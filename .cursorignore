@@ -1,0 +1,23 @@
+# datasets / artifacts
+data/
+dataset/
+datasets/
+checkpoints/
+ckpt/
+weights/
+outputs/
+runs/
+logs/
+cache/
+.cache/
+
+# build / deps
+node_modules/
+dist/
+build/
+
+# env
+.venv/
+venv/
+env/
+__pycache__/
