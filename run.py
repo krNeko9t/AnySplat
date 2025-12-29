@@ -35,6 +35,6 @@ from save_gs import save_tensors_to_ply
 
 save_tensors_to_ply('tmp.ply',gaussians.means[0],gaussians.scales[0],gaussians.rotations[0],gaussians.opacities[0],gaussians.harmonics[0])
 
- pred_all_extrinsic = pred_context_pose['extrinsic']
+pred_all_extrinsic = pred_context_pose['extrinsic']
 pred_all_intrinsic = pred_context_pose['intrinsic']
 save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, './res', model.decoder)
