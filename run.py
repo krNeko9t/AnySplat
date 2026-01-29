@@ -32,9 +32,11 @@ b, v, _, h, w = images.shape
 gaussians, pred_context_pose = model.inference((images+1)*0.5)
 
 from save_gs import save_tensors_to_ply
+from save_gs2 import save_gaussian_to_ply_robust
+from save_gs3 import save_ply_from_linear
 
-save_tensors_to_ply('tmp.ply',gaussians.means[0],gaussians.scales[0],gaussians.rotations[0],gaussians.opacities[0],gaussians.harmonics[0])
+save_ply_from_linear('tmp.ply',gaussians.means[0],gaussians.scales[0],gaussians.rotations[0],gaussians.opacities[0],gaussians.harmonics[0])
 
-pred_all_extrinsic = pred_context_pose['extrinsic']
-pred_all_intrinsic = pred_context_pose['intrinsic']
-save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, './res', model.decoder)
+# pred_all_extrinsic = pred_context_pose['extrinsic']
+# pred_all_intrinsic = pred_context_pose['intrinsic']
+# save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, './res', model.decoder)
