@@ -21,3 +21,9 @@ build/
 venv/
 env/
 __pycache__/
+
+examples/
+assets/
+
+save_gs*.py
+*.ply

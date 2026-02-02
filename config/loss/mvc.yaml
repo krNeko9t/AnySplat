@@ -1,0 +1,10 @@
+mvc:
+  weight: 1.0
+  num_samples: 8192
+  margin: 1.0
+  lambda_pull: 2.0
+  lambda_push: 1.0
+  ignore_id: 0
+  block_size: 512
+  normalize_by_pairs: false
+

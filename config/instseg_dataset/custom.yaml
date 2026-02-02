@@ -1,0 +1,34 @@
+# Dataset config for instance-seg training on a user-provided manifest.
+# This file is mapped into `cfg.dataset.custom` via Hydra defaults in an experiment file.
+
+name: custom
+
+# Root directory for relative paths in the manifest.
+root: datasets/custom
+
+# Manifest can be .json or .jsonl. See `src/instseg/dataset_custom.py` for accepted schema.
+manifest_path: datasets/custom/manifest.jsonl
+
+# Network input resolution (H, W).
+input_image_shape: [224, 448]
+
+# If set, only train on a single scene_id.
+overfit_to_scene: null
+
+cameras_are_circular: false
+
+# Instance ID semantics.
+instance_ignore_id: 0
+
+# Fallback near/far if not present per-frame in manifest.
+near: 0.01
+far: 100.0
+
+view_sampler:
+  name: bounded
+  num_context_views: 24
+  num_target_views: 2
+  min_distance_between_context_views: 8
+  max_distance_between_context_views: 64
+  min_distance_to_context_views: 0
+

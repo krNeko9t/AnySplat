@@ -3,6 +3,9 @@ defaults:
 
 name: anysplat
 
+# Instance embedding dimension (N). If 0, instance head is disabled.
+instance_feat_dim: 0
+
 opacity_mapping:
   initial: 0.0
   final: 0.0

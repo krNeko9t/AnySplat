@@ -5,7 +5,7 @@ from typing import Generic, TypeVar
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from src.dataset.types import BatchedExample
+from src.instseg.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
 from src.model.types import Gaussians
 

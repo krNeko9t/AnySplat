@@ -4,7 +4,7 @@ from typing import Generic, TypeVar
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from src.dataset.types import BatchedViews
+from src.instseg.types import BatchedViews
 
 T = TypeVar("T")
 

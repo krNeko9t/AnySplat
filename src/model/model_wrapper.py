@@ -29,8 +29,8 @@ from ..loss.loss_huber import HuberLoss, extri_intri_to_pose_encoding
 
 # from model.types import Gaussians
 
-from ..dataset.data_module import get_data_shim
-from ..dataset.types import BatchedExample
+from src.instseg.data_module import get_data_shim
+from src.instseg.types import BatchedExample
 from ..evaluation.metrics import compute_lpips, compute_psnr, compute_ssim, abs_relative_difference, delta1_acc
 from ..global_cfg import get_cfg
 from ..loss import Loss
@@ -55,7 +55,7 @@ from ..visualization.camera_trajectory.wobble import (
 from ..visualization.color_map import apply_color_map_to_image
 from ..visualization.layout import add_border, hcat, vcat
 # from ..visualization.validation_in_3d import render_cameras, render_projections
-from .decoder.decoder import Decoder, DepthRenderingMode
+from .decoder.decoder import Decoder, DecoderOutput, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .ply_export import export_ply
@@ -192,23 +192,55 @@ class ModelWrapper(LightningModule):
             batch = batch_combined
         
         batch: BatchedExample = self.data_shim(batch)
-        b, v, c, h, w = batch["context"]["image"].shape
+        b, v_ctx, c, h, w = batch["context"]["image"].shape
+        # For AnySplat, images are normalized to [-1,1] in the data shim; encoder expects [0,1].
         context_image = (batch["context"]["image"] + 1) / 2
+        # Train MVC on context+target views; concatenate as encoder input when target exists.
+        if "target" in batch and "image" in batch["target"]:
+            target_image = (batch["target"]["image"] + 1) / 2
+            input_image = torch.cat([context_image, target_image], dim=1)
+        else:
+            input_image = context_image
         
         # Run the model.
         visualization_dump = None
 
-        encoder_output, output = self.model(context_image, self.global_step, visualization_dump=visualization_dump)
+        encoder_output, output_all = self.model(input_image, self.global_step, visualization_dump=visualization_dump)
         gaussians, pred_pose_enc_list, depth_dict = encoder_output.gaussians, encoder_output.pred_pose_enc_list, encoder_output.depth_dict
         pred_context_pose = encoder_output.pred_context_pose
         infos = encoder_output.infos
         distill_infos = encoder_output.distill_infos
+
+        if depth_dict is None:
+            depth_dict = {}
+
+        # Slice per-view tensors to context views for existing reconstruction losses.
+        def _slice_views(x: Any, v: int):
+            if torch.is_tensor(x) and x.ndim >= 2 and x.shape[1] >= v:
+                return x[:, :v]
+            return x
+
+        distill_infos_ctx = None
+        if distill_infos is not None:
+            distill_infos_ctx = dict(distill_infos)
+            for k, v in list(distill_infos_ctx.items()):
+                distill_infos_ctx[k] = _slice_views(v, v_ctx)
+        depth_dict_ctx = dict(depth_dict)
+        for k, v in list(depth_dict_ctx.items()):
+            depth_dict_ctx[k] = _slice_views(v, v_ctx)
         
-        num_context_views = pred_context_pose['extrinsic'].shape[1]
+        num_context_views = v_ctx
 
         using_index = torch.arange(num_context_views, device=gaussians.means.device)
         batch["using_index"] = using_index
-        
+
+        # Slice model outputs to context views for existing reconstruction losses/metrics.
+        output = DecoderOutput(
+            color=output_all.color[:, :v_ctx],
+            depth=output_all.depth[:, :v_ctx],
+            alpha=output_all.alpha[:, :v_ctx],
+            lod_rendering=output_all.lod_rendering,
+        )
         target_gt = (batch["context"]["image"] + 1) / 2
         scene_scale = infos["scene_scale"]
         self.log("train/scene_scale", infos["scene_scale"])
@@ -221,40 +253,59 @@ class ModelWrapper(LightningModule):
         )
         self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
 
-        consis_absrel = abs_relative_difference(
-            rearrange(output.depth, "b v h w -> (b v) h w"),
-            rearrange(depth_dict['depth'].squeeze(-1), "b v h w -> (b v) h w"),
-            rearrange(distill_infos['conf_mask'], "b v h w -> (b v) h w"),
-        )
-        self.log("train/consis_absrel", consis_absrel.mean())
+        # Depth consistency metrics are reported on context views for comparability.
+        depth_pred = depth_dict_ctx.get("depth")
+        conf_mask = distill_infos_ctx.get("conf_mask") if distill_infos_ctx is not None else None
+        if depth_pred is not None and conf_mask is not None:
+            consis_absrel = abs_relative_difference(
+                rearrange(output.depth, "b v h w -> (b v) h w"),
+                rearrange(depth_pred[:, :v_ctx].squeeze(-1), "b v h w -> (b v) h w"),
+                rearrange(conf_mask[:, :v_ctx], "b v h w -> (b v) h w"),
+            )
+            self.log("train/consis_absrel", consis_absrel.mean())
 
-        consis_delta1 = delta1_acc(
-            rearrange(output.depth, "b v h w -> (b v) h w"),
-            rearrange(depth_dict['depth'].squeeze(-1), "b v h w -> (b v) h w"),
-            rearrange(distill_infos['conf_mask'], "b v h w -> (b v) h w"),
-        )
-        self.log("train/consis_delta1", consis_delta1.mean())
+            consis_delta1 = delta1_acc(
+                rearrange(output.depth, "b v h w -> (b v) h w"),
+                rearrange(depth_pred[:, :v_ctx].squeeze(-1), "b v h w -> (b v) h w"),
+                rearrange(conf_mask[:, :v_ctx], "b v h w -> (b v) h w"),
+            )
+            self.log("train/consis_delta1", consis_delta1.mean())
+        else:
+            self.log("train/consis_absrel", torch.tensor(0.0, device=self.device))
+            self.log("train/consis_delta1", torch.tensor(0.0, device=self.device))
         
         # Compute and log loss.
         total_loss = 0
 
-        depth_dict['distill_infos'] = distill_infos
+        # Provide distill info and instance seg inputs to losses.
+        depth_dict_ctx['distill_infos'] = distill_infos_ctx
+        if encoder_output.instance_feat_map is not None:
+            # For MVC we keep full (context+target) views.
+            depth_dict_ctx["instance_feat_map"] = encoder_output.instance_feat_map
+        if "context" in batch and "instance_mask" in batch["context"] and "target" in batch and "instance_mask" in batch["target"]:
+            depth_dict_ctx["instance_mask"] = torch.cat([batch["context"]["instance_mask"], batch["target"]["instance_mask"]], dim=1)
+            if "instance_feat_map" in depth_dict_ctx:
+                assert depth_dict_ctx["instance_feat_map"].shape[1] == depth_dict_ctx["instance_mask"].shape[1], (
+                    "instance_feat_map and instance_mask must share view dimension"
+                )
+        if "context" in batch and "valid_mask" in batch["context"] and "target" in batch and "valid_mask" in batch["target"]:
+            depth_dict_ctx["instance_valid_mask"] = torch.cat([batch["context"]["valid_mask"], batch["target"]["valid_mask"]], dim=1)
         with torch.amp.autocast('cuda', enabled=False):
             for loss_fn in self.losses:
-                loss = loss_fn.forward(output, batch, gaussians, depth_dict, self.global_step)
+                loss = loss_fn.forward(output, batch, gaussians, depth_dict_ctx, self.global_step)
                 self.log(f"loss/{loss_fn.name}", loss)
                 total_loss = total_loss + loss
 
-            if depth_dict is not None and "depth" in get_cfg()["loss"].keys() and self.train_cfg.cxt_depth_weight > 0:
+            if depth_dict_ctx is not None and "depth" in get_cfg()["loss"].keys() and self.train_cfg.cxt_depth_weight > 0:
                 depth_loss_idx = list(get_cfg()["loss"].keys()).index("depth")
                 depth_loss_fn = self.losses[depth_loss_idx].ctx_depth_loss
-                loss_depth = depth_loss_fn(depth_dict["depth_map"], depth_dict["depth_conf"], batch, cxt_depth_weight=self.train_cfg.cxt_depth_weight)
+                loss_depth = depth_loss_fn(depth_dict_ctx["depth_map"], depth_dict_ctx["depth_conf"], batch, cxt_depth_weight=self.train_cfg.cxt_depth_weight)
                 self.log("loss/ctx_depth", loss_depth)
                 total_loss = total_loss + loss_depth
 
-            if distill_infos is not None:
+            if distill_infos_ctx is not None:
                 # distill ctx pred_pose & depth & normal
-                loss_distill_list = self.loss_distill(distill_infos, pred_pose_enc_list, output, batch)
+                loss_distill_list = self.loss_distill(distill_infos_ctx, pred_pose_enc_list, output, batch)
                 self.log("loss/distill", loss_distill_list['loss_distill'])
                 self.log("loss/distill_pose", loss_distill_list['loss_pose'])
                 self.log("loss/distill_depth", loss_distill_list['loss_depth'])

@@ -1,0 +1,48 @@
+# @package _global_
+
+defaults:
+  - /instseg_dataset@dataset.custom: custom
+  - override /model/encoder: anysplat
+  - override /model/encoder/backbone: croco
+  - override /model/decoder: splatting_cuda
+  - override /loss: [mse, lpips, depth_consis, mvc]
+
+wandb:
+  name: instseg_custom
+  tags: [instseg, custom]
+
+model:
+  encoder:
+    instance_feat_dim: 32
+    pred_head_type: depth
+    pred_pose: true
+    distill: true
+    voxelize: true
+    intermediate_layer_idx: [4, 11, 17, 23]
+
+trainer:
+  max_steps: 30000
+  val_check_interval: 500
+  precision: bf16-mixed
+
+checkpointing:
+  load: null
+  every_n_train_steps: 200
+  save_weights_only: false
+  save_top_k: 5
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  mvc:
+    weight: 1.0
+    num_samples: 8192
+    margin: 1.0
+    lambda_pull: 2.0
+    lambda_push: 1.0
+    ignore_id: 0
+    block_size: 512
+    normalize_by_pairs: false
+

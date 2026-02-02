@@ -14,9 +14,9 @@ from einops import rearrange
 from huggingface_hub import PyTorchModelHubMixin
 from jaxtyping import Float
 from src.dataset.shims.bounds_shim import apply_bounds_shim
-from src.dataset.shims.normalize_shim import apply_normalize_shim
+from src.instseg.normalize_shim import apply_normalize_shim
 from src.dataset.shims.patch_shim import apply_patch_shim
-from src.dataset.types import BatchedExample, DataShim
+from src.instseg.types import BatchedExample, DataShim
 from src.geometry.projection import sample_image_grid
 
 from src.model.encoder.heads.vggt_dpt_gs_head import VGGT_DPT_GS_Head
@@ -114,6 +114,8 @@ class EncoderAnySplatCfg:
     conf_threshold: float = 0.1
     intermediate_layer_idx: Optional[List[int]] = None
     voxelize: bool = False
+    # N: instance embedding dimension. If 0, instance head is disabled.
+    instance_feat_dim: int = 0
 
 
 def rearrange_head(feat, patch_size, H, W):
@@ -202,12 +204,14 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         self.raw_gs_dim = 1 + self.gaussian_adapter.d_in  # 1 for opacity
         self.voxel_size = cfg.voxel_size
         self.gs_params_head_type = cfg.gs_params_head_type
+        self.instance_feat_dim = int(cfg.instance_feat_dim)
         # fake backbone for head parameters
         head_params = GSHeadParams()
         self.gaussian_param_head = VGGT_DPT_GS_Head(
             dim_in=2048,
             patch_size=head_params.patch_size,
-            output_dim=self.raw_gs_dim + 1,
+            # [opacity+adapter_feats]=raw_gs_dim, +1 conf, +N instance embedding
+            output_dim=self.raw_gs_dim + 1 + self.instance_feat_dim,
             activation="norm_exp",
             conf_activation="expp1",
             features=head_params.feature_dim,
@@ -286,7 +290,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             padded.append(t)
         return torch.stack(padded)
 
-    def voxelizaton_with_fusion(self, img_feat, pts3d, voxel_size, conf=None):
+    def voxelizaton_with_fusion(self, img_feat, pts3d, voxel_size, conf=None, inst_feat=None):
         # img_feat: B*V, C, H, W
         # pts3d: B*V, 3, H, W
         V, C, H, W = img_feat.shape
@@ -300,6 +304,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Flatten confidence scores and features
         conf_flat = conf.flatten()  # [B*V*N]
         anchor_feats_flat = img_feat.permute(0, 2, 3, 1).flatten(0, 2)  # [B*V*N, ...]
+        inst_flat = None
+        if inst_feat is not None:
+            # inst_feat: [V, N, H, W] -> [V*H*W, N]
+            inst_flat = inst_feat.permute(0, 2, 3, 1).flatten(0, 2)
 
         # Compute softmax weights per voxel
         conf_voxel_max, _ = scatter_max(conf_flat, inverse_indices, dim=0)
@@ -314,6 +322,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Compute weighted average of positions and features
         weighted_pts = pts3d_flatten * weights
         weighted_feats = anchor_feats_flat.squeeze(1) * weights
+        weighted_inst = None
+        if inst_flat is not None:
+            weighted_inst = inst_flat * weights
 
         # Aggregate per voxel
         voxel_pts = scatter_add(
@@ -322,8 +333,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         voxel_feats = scatter_add(
             weighted_feats, inverse_indices, dim=0
         )  # [num_unique_voxels, feat_dim]
+        voxel_inst = None
+        if weighted_inst is not None:
+            voxel_inst = scatter_add(weighted_inst, inverse_indices, dim=0)  # [num_unique_voxels, N]
 
-        return voxel_pts, voxel_feats
+        return voxel_pts, voxel_feats, voxel_inst
 
     def forward(
         self,
@@ -456,24 +470,37 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         scene_scale = pts_flat.norm(dim=-1).mean().clip(min=1e-8)
 
         anchor_feats, conf = out[:, :, : self.raw_gs_dim], out[:, :, self.raw_gs_dim]
+        instance_feat_map = None
+        if self.instance_feat_dim > 0:
+            instance_feat_map = out[
+                :, :, self.raw_gs_dim + 1 : self.raw_gs_dim + 1 + self.instance_feat_dim
+            ]
 
-        neural_feats_list, neural_pts_list = [], []
+        neural_feats_list, neural_pts_list, inst_feats_list = [], [], []
         if self.cfg.voxelize:
             for b_i in range(b):
-                neural_pts, neural_feats = self.voxelizaton_with_fusion(
+                neural_pts, neural_feats, voxel_inst = self.voxelizaton_with_fusion(
                     anchor_feats[b_i],
                     pts_all[b_i].permute(0, 3, 1, 2).contiguous(),
                     self.voxel_size,
                     conf=conf[b_i],
+                    inst_feat=None if instance_feat_map is None else instance_feat_map[b_i],
                 )
                 neural_feats_list.append(neural_feats)
                 neural_pts_list.append(neural_pts)
+                if instance_feat_map is not None:
+                    assert voxel_inst is not None
+                    inst_feats_list.append(voxel_inst)
         else:
             for b_i in range(b):
                 neural_feats_list.append(
                     anchor_feats[b_i].permute(0, 2, 3, 1)[conf_valid_mask[b_i]]
                 )
                 neural_pts_list.append(pts_all[b_i][conf_valid_mask[b_i]])
+                if instance_feat_map is not None:
+                    inst_feats_list.append(
+                        instance_feat_map[b_i].permute(0, 2, 3, 1)[conf_valid_mask[b_i]]
+                    )
 
         max_voxels = max(f.shape[0] for f in neural_feats_list)
         neural_feats = self.pad_tensor_list(
@@ -483,6 +510,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         neural_pts = self.pad_tensor_list(
             neural_pts_list, (max_voxels,), -1e4
         )  # -1 == invalid voxel
+        gaussian_instance_feat = None
+        if instance_feat_map is not None:
+            gaussian_instance_feat = self.pad_tensor_list(
+                inst_feats_list, (max_voxels,), value=0.0
+            )
 
         depths = neural_pts[..., -1].unsqueeze(-1)
         densities = neural_feats[..., 0].sigmoid()
@@ -524,6 +556,12 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 neural_feats[gaussian_usage].view(b, -1, self.raw_gs_dim).contiguous()
             )
             opacity = opacity[gaussian_usage].view(b, -1).contiguous()
+            if gaussian_instance_feat is not None:
+                gaussian_instance_feat = (
+                    gaussian_instance_feat[gaussian_usage]
+                    .view(b, -1, self.instance_feat_dim)
+                    .contiguous()
+                )
 
             print(
                 f"finally pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
@@ -578,6 +616,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             depth_dict=dict(depth=depth_map, conf_valid_mask=conf_valid_mask),
             infos=infos,
             distill_infos=distill_infos,
+            instance_feat_map=instance_feat_map,
+            gaussian_instance_feat=gaussian_instance_feat,
         )
 
     def get_data_shim(self) -> DataShim:
