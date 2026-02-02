@@ -6,7 +6,7 @@ from einops import rearrange, repeat
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from src.instseg.types import BatchedViews
+from src.dataset.types import BatchedViews
 from .backbone import Backbone
 from .backbone_resnet import BackboneResnet, BackboneResnetCfg
 

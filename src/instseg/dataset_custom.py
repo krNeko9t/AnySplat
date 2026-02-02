@@ -40,6 +40,9 @@ class DatasetCustomCfg:
     near: float = 0.01
     far: float = 100.0
 
+    # Depth invalid sentinel filter (Infinigen often uses very large values, e.g. 1e10).
+    depth_invalid_value: float = 1e9
+
 
 @dataclass
 class DatasetCustomCfgWrapper:
@@ -76,6 +79,8 @@ def _load_depth(path: Path) -> Tensor:
         arr = np.load(path)
     else:
         arr = np.array(Image.open(path))
+    if arr.ndim == 3:
+        arr = arr[..., 0]
     arr = arr.astype(np.float32)
     return torch.from_numpy(arr)  # [H,W]
 
@@ -194,7 +199,7 @@ class DatasetCustom(Dataset):
             intr = torch.stack(Ks, dim=0)  # [V,3,3] normalized
             near_t = torch.tensor(nears, dtype=torch.float32)
             far_t = torch.tensor(fars, dtype=torch.float32)
-            valid_mask = depths_t > 0  # [V,H,W]
+            valid_mask = (depths_t > 0) & torch.isfinite(depths_t) & (depths_t < float(self.cfg.depth_invalid_value))  # [V,H,W]
             return images, depths_t, masks_t, extr, intr, near_t, far_t, valid_mask
 
         ctx = load_stack(ctx_idx)

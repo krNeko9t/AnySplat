@@ -10,7 +10,7 @@ from jaxtyping import Float
 from torch import Tensor, nn
 from torchvision.models import ResNet
 
-from src.instseg.types import BatchedViews
+from src.dataset.types import BatchedViews
 from .backbone import Backbone
 
 

@@ -1,7 +1,9 @@
 # datasets / artifacts
-data/
-dataset/
-datasets/
+/data/
+/dataset/
+/datasets/
+# 如果 infinigen 很大、你不想被索引拖慢：建议也忽略
+/infinigen/
 checkpoints/
 ckpt/
 weights/

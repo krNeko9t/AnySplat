@@ -14,9 +14,9 @@ from einops import rearrange
 from huggingface_hub import PyTorchModelHubMixin
 from jaxtyping import Float
 from src.dataset.shims.bounds_shim import apply_bounds_shim
-from src.instseg.normalize_shim import apply_normalize_shim
+from src.dataset.shims.normalize_shim import apply_normalize_shim
 from src.dataset.shims.patch_shim import apply_patch_shim
-from src.instseg.types import BatchedExample, DataShim
+from src.dataset.types import BatchedExample, DataShim
 from src.geometry.projection import sample_image_grid
 
 from src.model.encoder.heads.vggt_dpt_gs_head import VGGT_DPT_GS_Head

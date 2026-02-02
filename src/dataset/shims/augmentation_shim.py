@@ -18,18 +18,28 @@ def reflect_extrinsics(
 
 def reflect_views(views: AnyViews) -> AnyViews:
     if "depth" in views.keys():
-        return {
+        out: AnyViews = {
             **views,
             "image": views["image"].flip(-1),
             "extrinsics": reflect_extrinsics(views["extrinsics"]),
             "depth": views["depth"].flip(-1),
         }
+        if "instance_mask" in views.keys():
+            out["instance_mask"] = views["instance_mask"].flip(-1)
+        if "valid_mask" in views.keys():
+            out["valid_mask"] = views["valid_mask"].flip(-1)
+        return out
     else:
-        return {
+        out: AnyViews = {
             **views,
             "image": views["image"].flip(-1),
             "extrinsics": reflect_extrinsics(views["extrinsics"]),
         }
+        if "instance_mask" in views.keys():
+            out["instance_mask"] = views["instance_mask"].flip(-1)
+        if "valid_mask" in views.keys():
+            out["valid_mask"] = views["valid_mask"].flip(-1)
+        return out
 
 
 def apply_augmentation_shim(

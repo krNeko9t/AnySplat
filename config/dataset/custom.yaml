@@ -1,0 +1,26 @@
+defaults:
+  - base_dataset
+  - view_sampler: bounded
+
+name: custom
+
+# Root directory for resolving relative paths in manifest_path.
+root: infinigen/16255241
+
+# Manifest can be .jsonl (one scene per line) or .json.
+manifest_path: manifest.jsonl
+
+# Infinigen raw resolution (H,W) for this scene.
+original_image_shape: [288, 512]
+
+# Network input resolution (H,W) after crop_shim.
+input_image_shape: [224, 448]
+
+cameras_are_circular: false
+
+# Depth invalid sentinel filter (Infinigen uses huge values like 1e10).
+depth_invalid_value: 1.0e9
+
+near: 0.01
+far: 100.0
+

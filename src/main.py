@@ -29,7 +29,7 @@ with install_import_hook(
     ("beartype", "beartype"),
 ):
     from src.config import load_typed_root_config
-    from src.instseg.data_module import DataModule
+    from src.dataset.data_module import DataModule
     from src.global_cfg import set_cfg
     from src.loss import get_losses
     from src.misc.LocalLogger import LocalLogger

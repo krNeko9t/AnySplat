@@ -24,6 +24,9 @@ instance_ignore_id: 0
 near: 0.01
 far: 100.0
 
+# Depth invalid sentinel filter (dataset-specific; Infinigen often uses 1e10).
+depth_invalid_value: 1.0e9
+
 view_sampler:
   name: bounded
   num_context_views: 24

@@ -5,7 +5,8 @@ from typing import Literal, Optional, Type, TypeVar
 from dacite import Config, from_dict
 from omegaconf import DictConfig, OmegaConf
 
-from .instseg.data_module import DataLoaderCfg, DatasetCfgWrapper
+from .dataset import DatasetCfgWrapper
+from .dataset.data_module import DataLoaderCfg
 from .loss import LossCfgWrapper
 from .model.decoder import DecoderCfg
 from .model.encoder import EncoderCfg

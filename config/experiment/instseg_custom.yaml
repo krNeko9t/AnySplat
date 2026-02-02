@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - /instseg_dataset@dataset.custom: custom
+  - /dataset@_group_.custom: custom
   - override /model/encoder: anysplat
   - override /model/encoder/backbone: croco
   - override /model/decoder: splatting_cuda
@@ -10,6 +10,11 @@ defaults:
 wandb:
   name: instseg_custom
   tags: [instseg, custom]
+
+data_loader:
+  # Avoid having to spin up new processes to print out visualizations.
+  train:
+    batch_size: 1
 
 model:
   encoder:
@@ -24,6 +29,8 @@ trainer:
   max_steps: 30000
   val_check_interval: 500
   precision: bf16-mixed
+  # 若验证阶段卡在“Validation epoch start”后，可设为 1 仅跑 1 个 val batch 以确认是否为首批 I/O 过慢
+  limit_val_batches: 1
 
 checkpointing:
   load: null
@@ -38,11 +45,14 @@ hydra:
 loss:
   mvc:
     weight: 1.0
-    num_samples: 8192
+    num_samples: 4096
     margin: 1.0
     lambda_pull: 2.0
     lambda_push: 1.0
     ignore_id: 0
     block_size: 512
     normalize_by_pairs: false
+
+dataset:
+  custom: {}
 

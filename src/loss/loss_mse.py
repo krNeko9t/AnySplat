@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from jaxtyping import Float
 from torch import Tensor
 import torch
-from src.instseg.types import BatchedExample
+from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
 from src.model.types import Gaussians
 from .loss import Loss

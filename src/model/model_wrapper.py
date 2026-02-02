@@ -29,8 +29,8 @@ from ..loss.loss_huber import HuberLoss, extri_intri_to_pose_encoding
 
 # from model.types import Gaussians
 
-from src.instseg.data_module import get_data_shim
-from src.instseg.types import BatchedExample
+from ..dataset.data_module import get_data_shim
+from ..dataset.types import BatchedExample
 from ..evaluation.metrics import compute_lpips, compute_psnr, compute_ssim, abs_relative_difference, delta1_acc
 from ..global_cfg import get_cfg
 from ..loss import Loss

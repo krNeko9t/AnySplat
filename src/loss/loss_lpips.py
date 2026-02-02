@@ -6,7 +6,7 @@ from jaxtyping import Float
 from lpips import LPIPS
 from torch import Tensor
 
-from src.instseg.types import BatchedExample
+from src.dataset.types import BatchedExample
 from src.misc.nn_module_tools import convert_to_buffer
 from src.model.decoder.decoder import DecoderOutput
 from src.model.types import Gaussians

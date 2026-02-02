@@ -33,6 +33,16 @@ def rescale_depth(
     depth_new = cv2.resize(depth_new, (w,h), interpolation=cv2.INTER_NEAREST)
     depth_new = torch.from_numpy(depth_new).to(depth.device)
     return depth_new
+
+def rescale_mask(
+    mask: Tensor,
+    shape: tuple[int, int],
+) -> Tensor:
+    """Rescale an integer mask with nearest interpolation."""
+    h, w = shape
+    m = mask.detach().cpu().numpy()
+    m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+    return torch.from_numpy(m).to(mask.device)
     
 def center_crop(
     images: Float[Tensor, "*#batch c h w"],
@@ -172,12 +182,23 @@ def rescale_and_crop(
 def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], intr_aug: bool = False) -> AnyViews:
     if "depth" in views.keys():
         images, intrinsics, depths = rescale_and_crop(views["image"], views["intrinsics"], shape, depths=views["depth"], intr_aug=intr_aug)
-        return {
+        out: AnyViews = {
             **views,
             "image": images,
             "intrinsics": intrinsics,
             "depth": depths,
         }
+        # Keep instance_mask aligned with the same resize/crop path.
+        if "instance_mask" in views.keys():
+            mask = views["instance_mask"]
+            if torch.is_tensor(mask):
+                # mask expected shape: (*batch, h, w)
+                *batch, h_in, w_in = mask.shape
+                mask = mask.reshape(-1, h_in, w_in)
+                mask = torch.stack([rescale_mask(m, (depths.shape[-2], depths.shape[-1])) for m in mask])
+                mask = mask.reshape(*batch, depths.shape[-2], depths.shape[-1]).to(torch.int64)
+                out["instance_mask"] = mask
+        return out
     else:
         images, intrinsics = rescale_and_crop(views["image"], views["intrinsics"], shape, intr_aug)
         return {

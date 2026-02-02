@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
-from src.instseg.types import BatchedExample
+from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
 from src.model.types import Gaussians
 from .loss import Loss
@@ -23,7 +23,7 @@ class LossMvcCfg:
     lambda_push: float = 1.0
     ignore_id: int = 0
     block_size: int = 512
-    # If enabled, divide by number of evaluated pairs (ordered, excluding diagonal).
+    # If enabled, divide by number of evaluated pairs (unordered, i<j).
     normalize_by_pairs: bool = False
 
 
@@ -106,13 +106,10 @@ class LossMVC(Loss[LossMvcCfg, LossMvcCfgWrapper]):
             f = F.normalize(f, p=2, dim=-1, eps=1e-8)
             ids = ids_flat[idx].to(torch.int64)  # [S]
 
-            # Precompute indices for diagonal masking.
-            point_ids = torch.arange(S, device=device)
-
             pull = torch.tensor(0.0, device=device)
             push = torch.tensor(0.0, device=device)
 
-            # Full pairwise (ordered pairs, excluding diagonal), computed in blocks.
+            # Full pairwise (unordered pairs i<j), computed in blocks.
             bs = max(1, int(self.cfg.block_size))
             for i0 in range(0, S, bs):
                 i1 = min(S, i0 + bs)
@@ -126,20 +123,23 @@ class LossMVC(Loss[LossMvcCfg, LossMvcCfgWrapper]):
                 ids_i = ids[i0:i1]  # [Bi]
                 same = ids_i[:, None] == ids[None, :]  # [Bi, S]
                 diff = ~same
-                self_mask = (torch.arange(i0, i1, device=device)[:, None] == point_ids[None, :])
+                # Keep only upper-triangle pairs (unordered): j > i.
+                i_idx = torch.arange(i0, i1, device=device)[:, None]  # [Bi,1]
+                j_idx = torch.arange(S, device=device)[None, :]       # [1,S]
+                upper = j_idx > i_idx                                  # [Bi,S]
 
-                pull = pull + dist[same & (~self_mask)].sum()
-                push = push + F.relu(float(self.cfg.margin) - dist)[diff].sum()
+                pull = pull + dist[same & upper].sum()
+                push = push + F.relu(float(self.cfg.margin) - dist)[diff & upper].sum()
 
             if self.cfg.normalize_by_pairs:
-                # Ordered pairs excluding diagonal: S*(S-1)
-                denom = float(S * (S - 1))
+                # Unordered pairs (i<j): S*(S-1)/2
+                denom = float(S * (S - 1) / 2.0)
                 pull = pull / denom
                 push = push / denom
 
             total_pull = total_pull + pull
             total_push = total_push + push
-            total_pairs = total_pairs + float(S * (S - 1))
+            total_pairs = total_pairs + float(S * (S - 1) / 2.0)
 
         loss = float(self.cfg.lambda_pull) * total_pull + float(self.cfg.lambda_push) * total_push
         loss = float(self.cfg.weight) * loss

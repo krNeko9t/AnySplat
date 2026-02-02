@@ -196,3 +196,5 @@ tmp_scripts/
 *v2*
 
 *.whl
+
+infinigen/
