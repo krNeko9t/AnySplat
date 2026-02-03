@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -17,14 +18,22 @@ def main():
     ap.add_argument("--image_dir", type=str, required=True, help="Directory containing input images")
     ap.add_argument("--out_dir", type=str, default="outputs/instseg_infer")
     ap.add_argument("--hf_model", type=str, default="lhjiang/anysplat")
+    ap.add_argument("--instance_feat_dim", type=int, default=16)
     args = ap.parse_args()
 
     image_dir = Path(args.image_dir)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model
-    model = AnySplat.from_pretrained(args.hf_model)
+    # Load base model, then attach an independent instance head by rebuilding the
+    # model with `instance_feat_dim > 0` and loading weights non-strictly.
+    base = AnySplat.from_pretrained(args.hf_model)
+    encoder_cfg = deepcopy(base.encoder_cfg)
+    encoder_cfg.instance_feat_dim = int(args.instance_feat_dim)
+    encoder_cfg.pretrained_weights = ""  # avoid any config-based re-init
+    model = AnySplat(encoder_cfg, deepcopy(base.decoder_cfg))
+    missing, unexpected = model.load_state_dict(base.state_dict(), strict=False)
+    print(f"[instseg_inference] missing_keys={len(missing)}, unexpected_keys={len(unexpected)}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()

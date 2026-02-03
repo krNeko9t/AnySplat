@@ -18,6 +18,9 @@ data_loader:
 
 model:
   encoder:
+    # Initialize original AnySplat weights from Hugging Face, while keeping the
+    # independent instance head randomly initialized.
+    pretrained_weights: "hf:lhjiang/anysplat"
     instance_feat_dim: 32
     pred_head_type: depth
     pred_pose: true
@@ -55,4 +58,3 @@ loss:
 
 dataset:
   custom: {}
-

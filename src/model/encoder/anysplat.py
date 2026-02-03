@@ -210,12 +210,36 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         self.gaussian_param_head = VGGT_DPT_GS_Head(
             dim_in=2048,
             patch_size=head_params.patch_size,
-            # [opacity+adapter_feats]=raw_gs_dim, +1 conf, +N instance embedding
-            output_dim=self.raw_gs_dim + 1 + self.instance_feat_dim,
+            # [opacity+adapter_feats]=raw_gs_dim, +1 conf
+            output_dim=self.raw_gs_dim + 1,
             activation="norm_exp",
             conf_activation="expp1",
             features=head_params.feature_dim,
         )
+        # Optional independent instance head (kept separate from gaussian_param_head so
+        # pretrained AnySplat weights can be loaded strictly for the original model).
+        self.instance_head: DPTHead | None = None
+        self.instance_head_proj: nn.Conv2d | None = None
+        if self.instance_feat_dim > 0:
+            # Use base DPT head to produce dense features, then project to the
+            # requested embedding dimension. This avoids the channel-mismatch
+            # issue in `VGGT_DPT_GS_Head` when `output_dim <= 50`.
+            self.instance_head = DPTHead(
+                dim_in=2048,
+                patch_size=int(head_params.patch_size[0]),
+                output_dim=1,
+                activation="inv_log",
+                conf_activation="expp1",
+                features=head_params.feature_dim,
+                feature_only=True,
+            )
+            self.instance_head_proj = nn.Conv2d(
+                head_params.feature_dim,
+                self.instance_feat_dim,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            )
 
     def map_pdf_to_opacity(
         self,
@@ -462,6 +486,20 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             patch_start_idx=patch_start_idx,
             image_size=(h, w),
         )
+        instance_feat_map = None
+        if self.instance_head is not None:
+            assert self.instance_head_proj is not None
+            dense_feat = self.instance_head(
+                aggregated_tokens_list,
+                images=image,
+                patch_start_idx=patch_start_idx,
+            )  # [B, V, C, H, W]
+            b0, v0, c0, h0, w0 = dense_feat.shape
+            dense_feat = dense_feat.reshape(b0 * v0, c0, h0, w0)
+            dense_feat = self.instance_head_proj(dense_feat)
+            instance_feat_map = dense_feat.reshape(
+                b0, v0, self.instance_feat_dim, h0, w0
+            )
 
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()
@@ -470,11 +508,6 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         scene_scale = pts_flat.norm(dim=-1).mean().clip(min=1e-8)
 
         anchor_feats, conf = out[:, :, : self.raw_gs_dim], out[:, :, self.raw_gs_dim]
-        instance_feat_map = None
-        if self.instance_feat_dim > 0:
-            instance_feat_map = out[
-                :, :, self.raw_gs_dim + 1 : self.raw_gs_dim + 1 + self.instance_feat_dim
-            ]
 
         neural_feats_list, neural_pts_list, inst_feats_list = [], [], []
         if self.cfg.voxelize:
