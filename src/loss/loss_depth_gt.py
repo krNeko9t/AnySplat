@@ -73,7 +73,13 @@ class LossDepthGT(Loss[LossDepthGTCfg, LossDepthGTCfgWrapper]):
         # mask: B, H, W
         
         target_depth = batch["target"]["depth"]
-        target_valid_mask = batch["target"]["valid_mask"]
+        target_valid_mask = batch.get("target", {}).get("valid_mask", None)
+        if not torch.is_tensor(target_valid_mask) or target_valid_mask.shape != target_depth.shape:
+            target_valid_mask = torch.ones_like(target_depth, dtype=torch.bool, device=target_depth.device)
+        else:
+            target_valid_mask = target_valid_mask.to(device=target_depth.device)
+            if target_valid_mask.dtype != torch.bool:
+                target_valid_mask = target_valid_mask > 0
         gs_depth = prediction.depth.clamp(1e-3)
         
         if self.cfg.type == "l1":

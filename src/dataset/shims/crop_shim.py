@@ -41,8 +41,23 @@ def rescale_mask(
     """Rescale an integer mask with nearest interpolation."""
     h, w = shape
     m = mask.detach().cpu().numpy()
+    # OpenCV does not support bool (and can be finicky with int64). Cast to a safe
+    # dtype for resizing, then cast back to the original dtype.
+    orig_is_bool = (m.dtype == np.bool_)
+    if orig_is_bool:
+        m = m.astype(np.uint8)
+    elif m.dtype == np.int64:
+        m = m.astype(np.int32)
+
     m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-    return torch.from_numpy(m).to(mask.device)
+
+    if orig_is_bool:
+        m = m > 0
+
+    out = torch.from_numpy(m).to(mask.device)
+    if (not orig_is_bool) and out.dtype != mask.dtype:
+        out = out.to(mask.dtype)
+    return out
     
 def center_crop(
     images: Float[Tensor, "*#batch c h w"],
@@ -198,6 +213,18 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], intr_aug: 
                 mask = torch.stack([rescale_mask(m, (depths.shape[-2], depths.shape[-1])) for m in mask])
                 mask = mask.reshape(*batch, depths.shape[-2], depths.shape[-1]).to(torch.int64)
                 out["instance_mask"] = mask
+        # Keep valid_mask aligned with the same resize/crop path.
+        if "valid_mask" in views.keys():
+            valid_mask = views["valid_mask"]
+            if torch.is_tensor(valid_mask):
+                # valid_mask expected shape: (*batch, h, w)
+                *batch, h_in, w_in = valid_mask.shape
+                valid_mask = valid_mask.reshape(-1, h_in, w_in)
+                valid_mask = torch.stack(
+                    [rescale_mask(m, (depths.shape[-2], depths.shape[-1])) for m in valid_mask]
+                )
+                valid_mask = valid_mask.reshape(*batch, depths.shape[-2], depths.shape[-1]).bool()
+                out["valid_mask"] = valid_mask
         return out
     else:
         images, intrinsics = rescale_and_crop(views["image"], views["intrinsics"], shape, intr_aug)

@@ -333,8 +333,8 @@ class DatasetDL3DV(Dataset):
         
         example["context"]["pts3d"] = context_pts3d
         example["target"]["pts3d"] = target_pts3d
-        example["context"]["valid_mask"] = context_valid_mask * -1
-        example["target"]["valid_mask"] = target_valid_mask * -1
+        example["context"]["valid_mask"] = context_valid_mask
+        example["target"]["valid_mask"] = target_valid_mask
 
         return example
         

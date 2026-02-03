@@ -352,10 +352,7 @@ class DatasetScannetpp(Dataset):
             torch.isnan(example["target"]["extrinsics"]).any() or torch.isinf(example["target"]["extrinsics"]).any() or \
             torch.isnan(example["target"]["intrinsics"]).any() or torch.isinf(example["target"]["intrinsics"]).any():
             raise Exception("encounter nan or inf in context depth")
-        
-        for key in ["context", "target"]:
-            example[key]["valid_mask"] = (torch.ones_like(example[key]["valid_mask"]) * -1).type(torch.int32)
-        
+
         return example
     
         

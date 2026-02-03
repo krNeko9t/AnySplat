@@ -124,10 +124,15 @@ class DistillLoss(nn.Module):
         
         pred_depth = prediction.depth.flatten(0, 1)
         pesudo_gt_depth = distill_infos['depth_map'].flatten(0, 1).squeeze(-1)
-        conf_mask = distill_infos['conf_mask'].flatten(0, 1)
+        conf_mask = distill_infos['conf_mask'].flatten(0, 1).to(torch.bool)
 
-        if batch['context']['valid_mask'].sum() > 0:
-            conf_mask = batch['context']['valid_mask'].flatten(0, 1)
+        batch_valid_mask = batch.get("context", {}).get("valid_mask", None)
+        if torch.is_tensor(batch_valid_mask):
+            batch_valid_mask = batch_valid_mask.flatten(0, 1).to(device=conf_mask.device)
+            if batch_valid_mask.dtype != torch.bool:
+                batch_valid_mask = batch_valid_mask > 0
+            if batch_valid_mask.shape == conf_mask.shape:
+                conf_mask = conf_mask & batch_valid_mask
 
         loss_depth = F.mse_loss(pred_depth[conf_mask], pesudo_gt_depth[conf_mask], reduction='none').mean()
 

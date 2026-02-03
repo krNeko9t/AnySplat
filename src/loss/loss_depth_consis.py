@@ -118,14 +118,22 @@ class LossDepthConsis(Loss[LossDepthConsisCfg, LossDepthConsisCfgWrapper]):
         # conf_valid_mask = depth_dict['conf_valid_mask']
         rendered_depth = prediction.depth
         gt_rgb = (batch["context"]["image"] + 1) / 2
-        valid_mask = depth_dict["distill_infos"]['conf_mask']
+        valid_mask = depth_dict["distill_infos"]["conf_mask"].to(torch.bool)
 
-        if batch['context']['valid_mask'].sum() > 0:
-            valid_mask = batch['context']['valid_mask']
+        # Optionally intersect with dataset-provided valid_mask, but only when it's
+        # actually compatible with the rendered/predicted depth resolution.
+        batch_valid_mask = batch.get("context", {}).get("valid_mask", None)
+        if torch.is_tensor(batch_valid_mask):
+            batch_valid_mask = batch_valid_mask.to(device=valid_mask.device)
+            if batch_valid_mask.dtype != torch.bool:
+                # Be conservative: treat positive values as valid.
+                batch_valid_mask = batch_valid_mask > 0
+            if batch_valid_mask.shape == rendered_depth.shape:
+                valid_mask = valid_mask & batch_valid_mask
         # if self.cfg.conf:
         #     valid_mask = valid_mask & conf_valid_mask
         if self.cfg.not_use_valid_mask:
-            valid_mask = torch.ones_like(valid_mask, device=valid_mask.device)
+            valid_mask = torch.ones_like(rendered_depth, dtype=torch.bool, device=rendered_depth.device)
         pred_depth = depth_dict['depth'].squeeze(-1)
         if self.cfg.detach:
             pred_depth = pred_depth.detach()

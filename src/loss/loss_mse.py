@@ -34,7 +34,13 @@ class LossMse(Loss[LossMseCfg, LossMseCfgWrapper]):
         # Get alpha and valid mask from inputs
         alpha = prediction.alpha
         # valid_mask = torch.ones_like(alpha, device=alpha.device).bool()
-        valid_mask = batch['context']['valid_mask']
+        valid_mask = batch.get("context", {}).get("valid_mask", None)
+        if not torch.is_tensor(valid_mask) or valid_mask.shape != alpha.shape:
+            valid_mask = torch.ones_like(alpha, dtype=torch.bool, device=alpha.device)
+        else:
+            valid_mask = valid_mask.to(device=alpha.device)
+            if valid_mask.dtype != torch.bool:
+                valid_mask = valid_mask > 0
 
         # # only for objaverse
         # if batch['context']['valid_mask'].sum() > 0:

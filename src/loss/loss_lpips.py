@@ -52,13 +52,26 @@ class LossLpips(Loss[LossLpipsCfg, LossLpipsCfgWrapper]):
         
         if self.cfg.mask or self.cfg.alpha or self.cfg.conf:
             if self.cfg.mask:
-                mask = batch["context"]["valid_mask"]
+                mask = batch.get("context", {}).get("valid_mask", None)
+                if not torch.is_tensor(mask):
+                    # Default: all pixels valid.
+                    if prediction.alpha is not None:
+                        mask = torch.ones_like(prediction.alpha, dtype=torch.bool)
+                    else:
+                        mask = torch.ones_like(prediction.color[:, :, 0], dtype=torch.bool)
+                if mask.dtype != torch.bool:
+                    mask = mask > 0
             elif self.cfg.alpha:
                 mask = prediction.alpha
             elif self.cfg.conf:
-                mask = depth_dict['conf_valid_mask']
+                mask = depth_dict["conf_valid_mask"] if depth_dict is not None else None
+                if mask is None:
+                    if prediction.alpha is not None:
+                        mask = torch.ones_like(prediction.alpha, dtype=torch.bool)
+                    else:
+                        mask = torch.ones_like(prediction.color[:, :, 0], dtype=torch.bool)
             b, v, c, h, w = prediction.color.shape
-            expanded_mask = mask.unsqueeze(2).expand(-1, -1, c, -1, -1)
+            expanded_mask = mask.to(dtype=prediction.color.dtype).unsqueeze(2).expand(-1, -1, c, -1, -1)
             masked_pred = prediction.color * expanded_mask
             masked_img = image * expanded_mask
             
