@@ -33,7 +33,27 @@ def main():
     encoder_cfg.pretrained_weights = ""  # avoid any config-based re-init
     model = AnySplat(encoder_cfg, deepcopy(base.decoder_cfg))
     missing, unexpected = model.load_state_dict(base.state_dict(), strict=False)
-    print(f"[instseg_inference] missing_keys={len(missing)}, unexpected_keys={len(unexpected)}")
+    allowed_missing_prefixes = (
+        "encoder.instance_head.",
+        "encoder.instance_head_proj.",
+    )
+    bad_missing = [k for k in missing if not k.startswith(allowed_missing_prefixes)]
+    print("[instseg_inference] Initialized from HF weights")
+    print(
+        f"[instseg_inference] missing_keys={len(missing)} "
+        f"(allowed={len(missing) - len(bad_missing)}, unexpected={len(bad_missing)}), "
+        f"unexpected_keys={len(unexpected)}"
+    )
+    if bad_missing:
+        prefixes = {}
+        for k in bad_missing:
+            p = k.split(".", 2)[:2]
+            p = ".".join(p) + "."
+            prefixes[p] = prefixes.get(p, 0) + 1
+        top = sorted(prefixes.items(), key=lambda x: x[1], reverse=True)[:15]
+        print("[instseg_inference] unexpected missing key prefixes (top):")
+        for p, c in top:
+            print(f"  - {p}: {c}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()

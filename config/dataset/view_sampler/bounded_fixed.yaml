@@ -3,10 +3,10 @@ name: bounded_fixed
 # Same defaults as bounded, but with a sampler implementation that never deadlocks
 # when num_context_views requests too many unique middle frames.
 num_target_views: 1
-num_context_views: 24
+num_context_views: 12
 
-min_distance_between_context_views: 2
-max_distance_between_context_views: 6
+min_distance_between_context_views: 12
+max_distance_between_context_views: 24
 min_distance_to_context_views: 0
 
 warm_up_steps: 0
