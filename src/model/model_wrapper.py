@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import gc
 import random
@@ -65,6 +65,13 @@ class OptimizerCfg:
     lr: float
     warm_up_steps: int
     backbone_lr_multiplier: float
+    # Parameter-name substrings that should use the base LR (treated as "new" params).
+    # Everything else uses lr * backbone_lr_multiplier.
+    #
+    # Defaults preserve the original behavior (treat gaussian head as "new").
+    new_param_keywords: list[str] = field(
+        default_factory=lambda: ["gaussian_param_head", "interm"]
+    )
 
 
 @dataclass
@@ -276,6 +283,7 @@ class ModelWrapper(LightningModule):
         
         # Compute and log loss.
         total_loss = 0
+        loss_values: dict[str, float] = {}
 
         # Provide distill info and instance seg inputs to losses.
         depth_dict_ctx['distill_infos'] = distill_infos_ctx
@@ -294,6 +302,10 @@ class ModelWrapper(LightningModule):
             for loss_fn in self.losses:
                 loss = loss_fn.forward(output, batch, gaussians, depth_dict_ctx, self.global_step)
                 self.log(f"loss/{loss_fn.name}", loss)
+                try:
+                    loss_values[loss_fn.name] = float(loss.detach().item())
+                except Exception:
+                    pass
                 total_loss = total_loss + loss
 
             if depth_dict_ctx is not None and "depth" in get_cfg()["loss"].keys() and self.train_cfg.cxt_depth_weight > 0:
@@ -301,23 +313,44 @@ class ModelWrapper(LightningModule):
                 depth_loss_fn = self.losses[depth_loss_idx].ctx_depth_loss
                 loss_depth = depth_loss_fn(depth_dict_ctx["depth_map"], depth_dict_ctx["depth_conf"], batch, cxt_depth_weight=self.train_cfg.cxt_depth_weight)
                 self.log("loss/ctx_depth", loss_depth)
+                try:
+                    loss_values["ctx_depth"] = float(loss_depth.detach().item())
+                except Exception:
+                    pass
                 total_loss = total_loss + loss_depth
 
-            if distill_infos_ctx is not None:
+            if distill_infos_ctx is not None and len(distill_infos_ctx) > 0:
                 # distill ctx pred_pose & depth & normal
                 loss_distill_list = self.loss_distill(distill_infos_ctx, pred_pose_enc_list, output, batch)
                 self.log("loss/distill", loss_distill_list['loss_distill'])
                 self.log("loss/distill_pose", loss_distill_list['loss_pose'])
                 self.log("loss/distill_depth", loss_distill_list['loss_depth'])
                 self.log("loss/distill_normal", loss_distill_list['loss_normal'])
+                for k, v in loss_distill_list.items():
+                    if torch.is_tensor(v):
+                        try:
+                            loss_values[k] = float(v.detach().item())
+                        except Exception:
+                            pass
                 total_loss = total_loss + loss_distill_list['loss_distill']
         
         self.log("loss/total", total_loss)
-        print(f"total_loss: {total_loss}")
+        if (
+            self.global_rank == 0
+            and self.global_step % self.train_cfg.print_log_every_n_steps == 0
+        ):
+            try:
+                loss_values["total"] = float(total_loss.detach().item())
+            except Exception:
+                pass
+            keys = sorted(loss_values.keys())
+            msg = ", ".join([f"{k}={loss_values[k]:.6g}" for k in keys])
+            print(f"loss breakdown: {msg}")
+        
 
         # Skip batch if loss is too high after certain step
         SKIP_AFTER_STEP = 1000  
-        LOSS_THRESHOLD = 0.2
+        LOSS_THRESHOLD = 10.
         if self.global_step > SKIP_AFTER_STEP and total_loss > LOSS_THRESHOLD:
             print(f"Skipping batch with high loss ({total_loss:.6f}) at step {self.global_step} on Rank {self.global_rank}")
             # set to a really small number
@@ -571,7 +604,10 @@ class ModelWrapper(LightningModule):
         self.log("val/consis_delta1", consis_delta1.mean())
 
         diff_map = torch.abs(output.depth - depth_dict['depth'].squeeze(-1))
-        self.log("val/consis_mse", diff_map[distill_infos['conf_mask']].mean())
+        try:
+            self.log("val/consis_mse", diff_map[distill_infos['conf_mask']].mean())
+        except:
+            pass
 
         # Construct comparison image.
         context_img = inverse_normalize(batch["context"]["image"][0])
@@ -860,16 +896,26 @@ class ModelWrapper(LightningModule):
     def configure_optimizers(self):
         new_params, new_param_names = [], []
         pretrained_params, pretrained_param_names = [], []
+        keywords = list(getattr(self.optimizer_cfg, "new_param_keywords", []))
+        if not keywords:
+            keywords = ["gaussian_param_head", "interm"]
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
             
-            if "gaussian_param_head" in name or "interm" in name:
+            if any(kw in name for kw in keywords):
                 new_params.append(param)
                 new_param_names.append(name)
             else:
                 pretrained_params.append(param)
                 pretrained_param_names.append(name)
+
+        if getattr(self, "global_rank", 0) == 0:
+            print(
+                "[configure_optimizers] new_param_keywords="
+                f"{keywords}; new={len(new_param_names)} params, "
+                f"backbone={len(pretrained_param_names)} params"
+            )
         
         param_dicts = [
             {

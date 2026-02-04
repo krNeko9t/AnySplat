@@ -5,7 +5,7 @@ defaults:
   - override /model/encoder: anysplat
   - override /model/encoder/backbone: croco
   - override /model/decoder: splatting_cuda
-  - override /loss: [mse, lpips, depth_consis, mvc]
+  - override /loss: [mse, lpips, mvc]
 
 wandb:
   name: instseg_custom
@@ -24,9 +24,19 @@ model:
     instance_feat_dim: 32
     pred_head_type: depth
     pred_pose: true
-    distill: true
+    distill: false
     voxelize: true
+    voxel_size: 0.002
     intermediate_layer_idx: [4, 11, 17, 23]
+
+optimizer:
+  # Differential LRs:
+  # - instance head: lr
+  # - everything else: lr * backbone_lr_multiplier
+  lr: 1.0e-5
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 0.1
+  new_param_keywords: ["instance_head", "instance_head_proj"]
 
 trainer:
   max_steps: 30000
@@ -48,13 +58,13 @@ hydra:
 loss:
   mvc:
     weight: 1.0
-    num_samples: 4096
+    num_samples: 8192
     margin: 1.0
     lambda_pull: 2.0
     lambda_push: 1.0
     ignore_id: 0
     block_size: 512
-    normalize_by_pairs: false
+    normalize_by_pairs: true
 
 dataset:
   custom: {}
