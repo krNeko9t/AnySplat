@@ -7,4 +7,21 @@ mvc:
   ignore_id: 0
   block_size: 512
   normalize_by_pairs: false
+  # Optional composable sampling recipe (if set, legacy fields above are ignored).
+  # recipe:
+  #   uniform:
+  #     num_points: 1024
+  #   instance:
+  #     num_instances: 64
+  #     samples_per_instance: 8
+  #     min_samples_per_instance: 2
+  #     max_pull_pairs_per_instance: 256
+  #   negatives:
+  #     rand_per_anchor: 32
+  #     hard_per_anchor: 32
+  #     hard_radius: 2
+  #     hard_tries: 8
+  recipe: null
+  # Print sampling stats every N steps (0 disables).
+  debug_every_steps: 0
 
