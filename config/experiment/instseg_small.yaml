@@ -1,0 +1,70 @@
+# @package _global_
+
+defaults:
+  - /dataset@_group_.custom: custom
+  - override /model/encoder: anysplat
+  - override /model/encoder/backbone: croco
+  - override /model/decoder: splatting_cuda
+  - override /loss: [mse, lpips, mvc]
+
+wandb:
+  name: instseg_custom
+  tags: [instseg, custom]
+
+data_loader:
+  # Avoid having to spin up new processes to print out visualizations.
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    # Initialize original AnySplat weights from Hugging Face, while keeping the
+    # independent instance head randomly initialized.
+    pretrained_weights: "hf:lhjiang/anysplat"
+    instance_feat_dim: 8
+    pred_head_type: depth
+    pred_pose: true
+    distill: false
+    voxelize: true
+    voxel_size: 0.003
+    intermediate_layer_idx: [4, 11, 17, 23]
+
+optimizer:
+  # Differential LRs:
+  # - instance head: lr
+  # - everything else: lr * backbone_lr_multiplier
+  lr: 1.0e-5
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 0.1
+  new_param_keywords: ["instance_head", "instance_head_proj"]
+
+trainer:
+  max_steps: 30000
+  val_check_interval: 2000
+  precision: bf16-mixed
+  # 若验证阶段卡在“Validation epoch start”后，可设为 1 仅跑 1 个 val batch 以确认是否为首批 I/O 过慢
+  limit_val_batches: 1
+
+checkpointing:
+  load: null
+  every_n_train_steps: 500
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  mvc:
+    weight: 1.0
+    num_samples: 16384
+    margin: 1.0
+    lambda_pull: 2.0
+    lambda_push: 1.0
+    ignore_id: 0
+    block_size: 512
+    normalize_by_pairs: true
+
+dataset:
+  custom: {}
