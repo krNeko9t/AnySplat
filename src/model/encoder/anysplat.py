@@ -45,9 +45,8 @@ from .visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpip
 root_path = os.path.abspath(".")
 sys.path.append(root_path)
 from src.model.encoder.heads.head_modules import TransformerBlockSelfAttn
-from src.model.encoder.vggt.heads.dpt_head import DPTHead
-from src.model.encoder.vggt.layers.mlp import Mlp
 from src.model.encoder.vggt.models.vggt import VGGT
+from src.model.encoder.iggt_heads import PartHead, SamProjector
 
 inf = float("inf")
 
@@ -216,29 +215,23 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             conf_activation="expp1",
             features=head_params.feature_dim,
         )
-        # Optional independent instance head (kept separate from gaussian_param_head so
-        # pretrained AnySplat weights can be loaded strictly for the original model).
-        self.instance_head: DPTHead | None = None
-        self.instance_head_proj: nn.Conv2d | None = None
+        # IGGT-style instance head: SamProjector (multi-scale adaptor) + PartHead
+        # (DPT fusion with cross-attention from point features + window attention).
+        self.part_adaptor: SamProjector | None = None
+        self.part_head: PartHead | None = None
         if self.instance_feat_dim > 0:
-            # Use base DPT head to produce dense features, then project to the
-            # requested embedding dimension. This avoids the channel-mismatch
-            # issue in `VGGT_DPT_GS_Head` when `output_dim <= 50`.
-            self.instance_head = DPTHead(
+            self.part_adaptor = SamProjector(
                 dim_in=2048,
                 patch_size=int(head_params.patch_size[0]),
-                output_dim=1,
-                activation="inv_log",
-                conf_activation="expp1",
-                features=head_params.feature_dim,
-                feature_only=True,
+                pos_embed=False,
+                out_channels=[256, 256, 256, 256],
             )
-            self.instance_head_proj = nn.Conv2d(
-                head_params.feature_dim,
-                self.instance_feat_dim,
-                kernel_size=1,
-                stride=1,
-                padding=0,
+            self.part_head = PartHead(
+                in_channels=[256, 256, 256, 256],
+                features=head_params.feature_dim,
+                output_dim=self.instance_feat_dim,
+                patch_size=int(head_params.patch_size[0]),
+                window_size=8,
             )
 
     def map_pdf_to_opacity(
@@ -486,20 +479,21 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             patch_start_idx=patch_start_idx,
             image_size=(h, w),
         )
+        # IGGT-style instance head: SamProjector + PartHead.
         instance_feat_map = None
-        if self.instance_head is not None:
-            assert self.instance_head_proj is not None
-            dense_feat = self.instance_head(
+        if self.part_adaptor is not None and self.part_head is not None:
+            adaptor_out, _pos = self.part_adaptor(
                 aggregated_tokens_list,
                 images=image,
                 patch_start_idx=patch_start_idx,
-            )  # [B, V, C, H, W]
-            b0, v0, c0, h0, w0 = dense_feat.shape
-            dense_feat = dense_feat.reshape(b0 * v0, c0, h0, w0)
-            dense_feat = self.instance_head_proj(dense_feat)
-            instance_feat_map = dense_feat.reshape(
-                b0, v0, self.instance_feat_dim, h0, w0
             )
+            # adaptor_out is a dict {"res1": ..., "res4": ...} with [B*V, C, H_i, W_i].
+            instance_feat_map = self.part_head(
+                list(adaptor_out.values()),
+                images=image,
+                patch_start_idx=patch_start_idx,
+                point_feature=None,  # point-feature conditioning can be added later
+            )  # [B, V, output_dim, H, W]
 
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()

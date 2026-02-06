@@ -5,7 +5,7 @@ defaults:
   - override /model/encoder: anysplat
   - override /model/encoder/backbone: croco
   - override /model/decoder: splatting_cuda
-  - override /loss: [mse, lpips, mvc]
+  - override /loss: [mse, lpips, disc]
 
 wandb:
   name: instseg_custom
@@ -36,7 +36,7 @@ optimizer:
   lr: 1.0e-5
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
-  new_param_keywords: ["instance_head", "instance_head_proj"]
+  new_param_keywords: ["part_adaptor", "part_head"]
 
 trainer:
   max_steps: 30000
@@ -56,15 +56,11 @@ hydra:
     dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
 
 loss:
-  mvc:
+  disc:
     weight: 1.0
-    num_samples: 16384
-    margin: 1.0
-    lambda_pull: 2.0
-    lambda_push: 1.0
+    delta_v: 0.5
+    delta_d: 1.5
     ignore_id: 0
-    block_size: 512
-    normalize_by_pairs: true
 
 dataset:
   custom: {}

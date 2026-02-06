@@ -5,7 +5,7 @@ defaults:
   - override /model/encoder: anysplat
   - override /model/encoder/backbone: croco
   - override /model/decoder: splatting_cuda
-  - override /loss: [mse, lpips, mvc]
+  - override /loss: [mse, lpips, disc]
 
 wandb:
   name: instseg_custom
@@ -36,7 +36,7 @@ optimizer:
   lr: 2.0e-4
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
-  new_param_keywords: ["instance_head", "instance_head_proj"]
+  new_param_keywords: ["part_adaptor", "part_head"]
 
 trainer:
   max_steps: 60000
@@ -56,27 +56,11 @@ hydra:
     dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
 
 loss:
-  mvc:
+  disc:
     weight: 1.0
-    margin: 1.0
-    lambda_pull: 3.0
-    lambda_push: 1.0
+    delta_v: 0.5
+    delta_d: 1.5
     ignore_id: 0
-    # Use recipe sampling to avoid long-tail under-sampling and O(S^2) all-pairs.
-    recipe:
-      uniform:
-        num_points: 512
-      instance:
-        num_instances: 64
-        samples_per_instance: 256
-        min_samples_per_instance: 2
-        max_pull_pairs_per_instance: 2048
-      negatives: # neg = (uniform + instance_num * samples_per_instance) * (rand_per_anchor + hard_per_anchor)
-        rand_per_anchor: 1
-        hard_per_anchor: 2
-        hard_radius: 3
-        hard_tries: 8
-    debug_every_steps: 200
 
 dataset:
   custom: {}
