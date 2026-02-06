@@ -97,6 +97,10 @@ class LossMVC(Loss[LossMvcCfg, LossMvcCfgWrapper]):
         depth_dict: dict | None,
         global_step: int,
     ) -> Float[Tensor, ""]:
+        # Optional side-channel metrics consumed by ModelWrapper.
+        # Always reset to avoid stale values when MVC is skipped.
+        self.extra_logs: dict[str, Tensor] = {}
+
         if depth_dict is None:
             return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
 
@@ -459,9 +463,22 @@ class LossMVC(Loss[LossMvcCfg, LossMvcCfgWrapper]):
                 total_push = total_push + push
                 total_pairs = total_pairs + float(S * (S - 1) / 2.0)
 
-        loss = float(self.cfg.lambda_pull) * total_pull + float(self.cfg.lambda_push) * total_push
-        loss = float(self.cfg.weight) * loss
+        # Decompose into pull/push components for easier debugging.
+        pull_term = float(self.cfg.weight) * float(self.cfg.lambda_pull) * total_pull
+        push_term = float(self.cfg.weight) * float(self.cfg.lambda_push) * total_push
+        loss = pull_term + push_term
+
+        pull_term = torch.nan_to_num(pull_term, nan=0.0, posinf=0.0, neginf=0.0)
+        push_term = torch.nan_to_num(push_term, nan=0.0, posinf=0.0, neginf=0.0)
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Expose both weighted and raw terms.
+        self.extra_logs = {
+            "mvc_pull": pull_term.detach(),
+            "mvc_push": push_term.detach(),
+            "mvc_pull_raw": total_pull.detach(),
+            "mvc_push_raw": total_push.detach(),
+        }
 
         if int(self.cfg.debug_every_steps) > 0 and (global_step % int(self.cfg.debug_every_steps) == 0):
             if torch.distributed.is_available() and torch.distributed.is_initialized():

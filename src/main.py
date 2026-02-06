@@ -86,10 +86,12 @@ def train(cfg_dict: DictConfig):
     callbacks.append(
         ModelCheckpoint(
             output_dir / "checkpoints",
+            save_last=True,
             every_n_train_steps=cfg.checkpointing.every_n_train_steps,
             save_top_k=cfg.checkpointing.save_top_k,
             save_weights_only=cfg.checkpointing.save_weights_only,
-            monitor="info/global_step",
+            # Use Lightning's built-in `step` metric for robust step checkpointing.
+            monitor="step",
             mode="max",
         )
     )

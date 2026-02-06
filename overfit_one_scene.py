@@ -14,7 +14,7 @@ from colorama import Fore
 from hydra.core.hydra_config import HydraConfig
 from jaxtyping import install_import_hook
 from lightning.pytorch import LightningDataModule, Trainer
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers.wandb import WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, Dataset
@@ -28,10 +28,55 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.model.model import get_model  # noqa: E402
 
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="torch.utils.checkpoint") 
+# warnings.filterwarnings("ignore", category=FutureWarning, module="torch.utils.checkpoint") 
 
 def cyan(text: str) -> str:
     return f"{Fore.CYAN}{text}{Fore.RESET}"
+
+
+class EveryNStepsCheckpoint(Callback):
+    """Save checkpoints every N optimizer steps (robust for overfit/debug runs).
+
+    This avoids subtle interactions between Lightning's ModelCheckpoint logic and validation cadence
+    when the training epoch has very few batches (often 1 in overfit settings).
+    """
+
+    def __init__(
+        self,
+        dirpath: Path,
+        every_n_train_steps: int,
+        save_weights_only: bool,
+        keep_last_k: int,
+    ) -> None:
+        super().__init__()
+        self.dirpath = Path(dirpath)
+        self.every_n_train_steps = int(every_n_train_steps)
+        self.save_weights_only = bool(save_weights_only)
+        self.keep_last_k = int(keep_last_k)
+
+    def on_train_batch_end(self, trainer: Trainer, pl_module, outputs, batch, batch_idx) -> None:
+        if not trainer.is_global_zero:
+            return
+        n = self.every_n_train_steps
+        if n <= 0:
+            return
+        step = int(trainer.global_step)
+        if step <= 0 or (step % n) != 0:
+            return
+
+        self.dirpath.mkdir(parents=True, exist_ok=True)
+        ckpt_path = self.dirpath / f"step={step}.ckpt"
+        trainer.save_checkpoint(ckpt_path, weights_only=self.save_weights_only)
+
+        # Optional retention to avoid filling disk during long overfit runs.
+        if self.keep_last_k > 0:
+            ckpts = sorted(self.dirpath.glob("step=*.ckpt"), key=lambda p: p.stat().st_mtime)
+            if len(ckpts) > self.keep_last_k:
+                for p in ckpts[: -self.keep_last_k]:
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
 
 
 class FixedOneSampleDataset(Dataset):
@@ -146,14 +191,22 @@ def main(cfg_dict: DictConfig) -> None:
         logger = LocalLogger()
 
     # Checkpointing
+    ckpt_dir = output_dir / "checkpoints"
+    callbacks.append(
+        EveryNStepsCheckpoint(
+            ckpt_dir,
+            every_n_train_steps=cfg.checkpointing.every_n_train_steps,
+            save_weights_only=cfg.checkpointing.save_weights_only,
+            keep_last_k=cfg.checkpointing.save_top_k,
+        )
+    )
+    # Always keep a deterministic "last" checkpoint, regardless of step trigger.
     callbacks.append(
         ModelCheckpoint(
-            output_dir / "checkpoints",
-            every_n_train_steps=cfg.checkpointing.every_n_train_steps,
-            save_top_k=cfg.checkpointing.save_top_k,
+            ckpt_dir,
+            save_last=True,
+            save_top_k=0,
             save_weights_only=cfg.checkpointing.save_weights_only,
-            monitor="info/global_step",
-            mode="max",
         )
     )
     callbacks[-1].CHECKPOINT_EQUALS_CHAR = "_"
@@ -167,7 +220,7 @@ def main(cfg_dict: DictConfig) -> None:
     torch.backends.cudnn.deterministic = True
 
     # Build model + wrapper.
-    step_tracker = StepTracker()
+    step_tracker = StepTracker(use_manager=False)
     model = get_model(cfg.model.encoder, cfg.model.decoder)
     model_wrapper = ModelWrapper(
         cfg.optimizer,
@@ -249,7 +302,12 @@ def main(cfg_dict: DictConfig) -> None:
         devices="auto",
         logger=logger,
         callbacks=callbacks,
+        enable_checkpointing=True,
         enable_progress_bar=False,
+        # Overfit runs often have 1 train batch/epoch; avoid log interval warnings.
+        log_every_n_steps=1,
+        # Skip sanity validation to make behavior deterministic for step-based checkpointing.
+        num_sanity_val_steps=0,
         gradient_clip_val=cfg.trainer.gradient_clip_val,
         max_steps=cfg.trainer.max_steps,
         precision=cfg.trainer.precision,

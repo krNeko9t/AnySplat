@@ -306,6 +306,17 @@ class ModelWrapper(LightningModule):
                     loss_values[loss_fn.name] = float(loss.detach().item())
                 except Exception:
                     pass
+
+                # Optional: log extra scalar components exposed by the loss.
+                extra_logs = getattr(loss_fn, "extra_logs", None)
+                if isinstance(extra_logs, dict):
+                    for k, v in extra_logs.items():
+                        if torch.is_tensor(v):
+                            self.log(f"loss/{k}", v)
+                            try:
+                                loss_values[k] = float(v.detach().item())
+                            except Exception:
+                                pass
                 total_loss = total_loss + loss
 
             if depth_dict_ctx is not None and "depth" in get_cfg()["loss"].keys() and self.train_cfg.cxt_depth_weight > 0:

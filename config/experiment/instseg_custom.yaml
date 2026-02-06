@@ -21,7 +21,7 @@ model:
     # Initialize original AnySplat weights from Hugging Face, while keeping the
     # independent instance head randomly initialized.
     pretrained_weights: "hf:lhjiang/anysplat"
-    instance_feat_dim: 32
+    instance_feat_dim: 8
     pred_head_type: depth
     pred_pose: true
     distill: false
@@ -33,13 +33,13 @@ optimizer:
   # Differential LRs:
   # - instance head: lr
   # - everything else: lr * backbone_lr_multiplier
-  lr: 1.0e-5
+  lr: 2.0e-4
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
   new_param_keywords: ["instance_head", "instance_head_proj"]
 
 trainer:
-  max_steps: 30000
+  max_steps: 60000
   val_check_interval: 500
   precision: bf16-mixed
   # 若验证阶段卡在“Validation epoch start”后，可设为 1 仅跑 1 个 val batch 以确认是否为首批 I/O 过慢
@@ -49,7 +49,7 @@ checkpointing:
   load: null
   every_n_train_steps: 200
   save_weights_only: false
-  save_top_k: 5
+  save_top_k: 3
 
 hydra:
   run:
@@ -59,21 +59,21 @@ loss:
   mvc:
     weight: 1.0
     margin: 1.0
-    lambda_pull: 2.0
+    lambda_pull: 3.0
     lambda_push: 1.0
     ignore_id: 0
     # Use recipe sampling to avoid long-tail under-sampling and O(S^2) all-pairs.
     recipe:
       uniform:
-        num_points: 256
+        num_points: 512
       instance:
         num_instances: 64
-        samples_per_instance: 128
+        samples_per_instance: 256
         min_samples_per_instance: 2
-        max_pull_pairs_per_instance: 1024
+        max_pull_pairs_per_instance: 2048
       negatives: # neg = (uniform + instance_num * samples_per_instance) * (rand_per_anchor + hard_per_anchor)
-        rand_per_anchor: 16
-        hard_per_anchor: 8
+        rand_per_anchor: 1
+        hard_per_anchor: 2
         hard_radius: 3
         hard_tries: 8
     debug_every_steps: 200
