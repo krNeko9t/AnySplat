@@ -445,12 +445,28 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 last_pred_pose_enc, image.shape[-2:]
             )  # only for debug
 
+            # Whether we need intermediate refinenet features for instance-head
+            # point-feature conditioning.
+            _need_point_feat = (
+                self.cfg.pred_head_type == "point"
+                and self.part_head is not None
+            )
+
             if self.cfg.pred_head_type == "point":
-                pts_all, pts_conf = self.point_head(
-                    aggregated_tokens_list,
-                    images=image,
-                    patch_start_idx=patch_start_idx,
-                )
+                if _need_point_feat:
+                    pts_all, pts_conf, point_intermediate = self.point_head(
+                        aggregated_tokens_list,
+                        images=image,
+                        patch_start_idx=patch_start_idx,
+                        return_intermediate=True,
+                    )
+                else:
+                    pts_all, pts_conf = self.point_head(
+                        aggregated_tokens_list,
+                        images=image,
+                        patch_start_idx=patch_start_idx,
+                    )
+                    point_intermediate = None
             elif self.cfg.pred_head_type == "depth":
                 depth_map, depth_conf = self.depth_head(
                     aggregated_tokens_list,
@@ -460,6 +476,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 pts_all = batchify_unproject_depth_map_to_point_map(
                     depth_map, extrinsic, intrinsic
                 )
+                point_intermediate = None  # depth head does not provide point features
             else:
                 raise ValueError(f"Invalid pred_head_type: {self.cfg.pred_head_type}")
 
@@ -488,11 +505,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 patch_start_idx=patch_start_idx,
             )
             # adaptor_out is a dict {"res1": ..., "res4": ...} with [B*V, C, H_i, W_i].
+            # point_intermediate is a tuple (out2, out3, out4) from point_head's
+            # DPT refinenets, used for cross-attention conditioning in PartHead.
             instance_feat_map = self.part_head(
                 list(adaptor_out.values()),
                 images=image,
                 patch_start_idx=patch_start_idx,
-                point_feature=None,  # point-feature conditioning can be added later
+                point_feature=list(point_intermediate) if point_intermediate is not None else None,
             )  # [B, V, output_dim, H, W]
 
         del aggregated_tokens_list, patch_start_idx

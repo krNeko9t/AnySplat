@@ -9,7 +9,7 @@
 
 
 import os
-from typing import List, Dict, Tuple, Union
+from typing import List, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -131,7 +131,8 @@ class DPTHead(nn.Module):
         images: torch.Tensor,
         patch_start_idx: int,
         frames_chunk_size: int = 8,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return_intermediate: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, ...]]]:
         """
         Forward pass through the DPT head, supports processing by chunking frames.
         Args:
@@ -141,17 +142,24 @@ class DPTHead(nn.Module):
                 Used to separate patch tokens from other tokens (e.g., camera or register tokens).
             frames_chunk_size (int, optional): Number of frames to process in each chunk.
                 If None or larger than S, all frames are processed at once. Default: 8.
+            return_intermediate (bool): If True, also return intermediate refinenet
+                features ``(out2, out3, out4)`` for point-feature conditioning.
 
         Returns:
             Tensor or Tuple[Tensor, Tensor]:
                 - If feature_only=True: Feature maps with shape [B, S, C, H, W]
                 - Otherwise: Tuple of (predictions, confidence) both with shape [B, S, 1, H, W]
+                When *return_intermediate* is True an extra element ``(out2, out3, out4)``
+                is appended.
         """
         B, S, _, H, W = images.shape
 
         # If frames_chunk_size is not specified or greater than S, process all frames at once
         if frames_chunk_size is None or frames_chunk_size >= S:
-            return self._forward_impl(aggregated_tokens_list, images, patch_start_idx)
+            return self._forward_impl(
+                aggregated_tokens_list, images, patch_start_idx,
+                return_intermediate=return_intermediate,
+            )
 
         # Otherwise, process frames in chunks to manage memory usage
         assert frames_chunk_size > 0
@@ -159,28 +167,61 @@ class DPTHead(nn.Module):
         # Process frames in batches
         all_preds = []
         all_conf = []
+        all_intermediate: List[Tuple[torch.Tensor, ...]] = []
         
         for frames_start_idx in range(0, S, frames_chunk_size):
             frames_end_idx = min(frames_start_idx + frames_chunk_size, S)
 
             # Process batch of frames
             if self.feature_only:
-                chunk_output = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
-                )
+                if return_intermediate:
+                    chunk_output, chunk_inter = self._forward_impl(
+                        aggregated_tokens_list, images, patch_start_idx,
+                        frames_start_idx, frames_end_idx,
+                        return_intermediate=True,
+                    )
+                    all_intermediate.append(chunk_inter)
+                else:
+                    chunk_output = self._forward_impl(
+                        aggregated_tokens_list, images, patch_start_idx,
+                        frames_start_idx, frames_end_idx,
+                    )
                 all_preds.append(chunk_output)
             else:
-                chunk_preds, chunk_conf = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
-                )
+                if return_intermediate:
+                    chunk_preds, chunk_conf, chunk_inter = self._forward_impl(
+                        aggregated_tokens_list, images, patch_start_idx,
+                        frames_start_idx, frames_end_idx,
+                        return_intermediate=True,
+                    )
+                    all_intermediate.append(chunk_inter)
+                else:
+                    chunk_preds, chunk_conf = self._forward_impl(
+                        aggregated_tokens_list, images, patch_start_idx,
+                        frames_start_idx, frames_end_idx,
+                    )
                 all_preds.append(chunk_preds)
                 all_conf.append(chunk_conf)
-        
+
+        # Helper: concatenate intermediate tuples along dim=0 (B*S dim).
+        def _cat_intermediates(
+            items: List[Tuple[torch.Tensor, ...]],
+        ) -> Tuple[torch.Tensor, ...]:
+            n = len(items[0])
+            return tuple(torch.cat([it[i] for it in items], dim=0) for i in range(n))
+
         # Concatenate results along the sequence dimension
         if self.feature_only:
-            return torch.cat(all_preds, dim=1)
+            result = torch.cat(all_preds, dim=1)
+            if return_intermediate:
+                return result, _cat_intermediates(all_intermediate)
+            return result
         else:
-            return torch.cat(all_preds, dim=1), torch.cat(all_conf, dim=1)
+            preds = torch.cat(all_preds, dim=1)
+            conf = torch.cat(all_conf, dim=1)
+            if return_intermediate:
+                return preds, conf, _cat_intermediates(all_intermediate)
+            return preds, conf
 
     def _forward_impl(
         self,
@@ -189,7 +230,8 @@ class DPTHead(nn.Module):
         patch_start_idx: int,
         frames_start_idx: int = None,
         frames_end_idx: int = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return_intermediate: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, ...]]]:
         """
         Implementation of the forward pass through the DPT head.
 
@@ -201,9 +243,13 @@ class DPTHead(nn.Module):
             patch_start_idx (int): Starting index for patch tokens.
             frames_start_idx (int, optional): Starting index for frames to process.
             frames_end_idx (int, optional): Ending index for frames to process.
+            return_intermediate (bool): If True, also return intermediate refinenet
+                features ``(out2, out3, out4)`` for point-feature conditioning.
 
         Returns:
             Tensor or Tuple[Tensor, Tensor]: Feature maps or (predictions, confidence).
+            When *return_intermediate* is True, returns
+            ``(preds, conf, (out2, out3, out4))``.
         """
         if frames_start_idx is not None and frames_end_idx is not None:
             images = images[:, frames_start_idx:frames_end_idx]
@@ -242,7 +288,12 @@ class DPTHead(nn.Module):
             dpt_idx += 1
 
         # Fuse features from multiple layers.
-        out = self.scratch_forward(out)
+        intermediate_feats: Optional[Tuple[torch.Tensor, ...]] = None
+        if return_intermediate:
+            out, intermediate_feats = self.scratch_forward(out, return_intermediate=True)
+        else:
+            out = self.scratch_forward(out)
+
         # Interpolate fused output to match target image resolution.
         out = custom_interpolate(
             out,
@@ -255,13 +306,18 @@ class DPTHead(nn.Module):
             out = self._apply_pos_embed(out, W, H)
 
         if self.feature_only:
-            return out.view(B, S, *out.shape[1:])
+            feat = out.view(B, S, *out.shape[1:])
+            if return_intermediate:
+                return feat, intermediate_feats
+            return feat
 
         out = self.scratch.output_conv2(out)
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
 
         preds = preds.view(B, S, *preds.shape[1:])
         conf = conf.view(B, S, *conf.shape[1:])
+        if return_intermediate:
+            return preds, conf, intermediate_feats
         return preds, conf
 
     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
@@ -276,15 +332,24 @@ class DPTHead(nn.Module):
         pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
         return x + pos_embed
 
-    def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
+    def scratch_forward(
+        self,
+        features: List[torch.Tensor],
+        return_intermediate: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
         """
         Forward pass through the fusion blocks.
 
         Args:
             features (List[Tensor]): List of feature maps from different layers.
+            return_intermediate (bool): If True, also return intermediate refinenet
+                outputs ``(out2, out3, out4)`` that can be used as point-feature
+                conditioning for the instance head.  Default: False.
 
         Returns:
-            Tensor: Fused feature map.
+            Tensor: Fused feature map.  When *return_intermediate* is True the
+            return value is ``(out, (out2, out3, out4))`` where ``outN`` is the
+            output of ``refinenetN``.
         """
         layer_1, layer_2, layer_3, layer_4 = features
 
@@ -293,19 +358,22 @@ class DPTHead(nn.Module):
         layer_3_rn = self.scratch.layer3_rn(layer_3)
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
-        out = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
+        out4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
         del layer_4_rn, layer_4
 
-        out = self.scratch.refinenet3(out, layer_3_rn, size=layer_2_rn.shape[2:])
+        out3 = self.scratch.refinenet3(out4, layer_3_rn, size=layer_2_rn.shape[2:])
         del layer_3_rn, layer_3
 
-        out = self.scratch.refinenet2(out, layer_2_rn, size=layer_1_rn.shape[2:])
+        out2 = self.scratch.refinenet2(out3, layer_2_rn, size=layer_1_rn.shape[2:])
         del layer_2_rn, layer_2
 
-        out = self.scratch.refinenet1(out, layer_1_rn)
+        out1 = self.scratch.refinenet1(out2, layer_1_rn)
         del layer_1_rn, layer_1
 
-        out = self.scratch.output_conv1(out)
+        out = self.scratch.output_conv1(out1)
+
+        if return_intermediate:
+            return out, (out2, out3, out4)
         return out
 
 
