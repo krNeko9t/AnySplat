@@ -144,6 +144,15 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         else:
             self.point_head = model_full.point_head
 
+        # IGGT uses point_head intermediate refinenet features (out2, out3, out4)
+        # as cross-attention conditioning for the PartHead.  When using the depth
+        # prediction path we still need a point_head to provide those features.
+        self._use_point_head_for_part = (
+            int(cfg.instance_feat_dim) > 0 and self.cfg.pred_head_type == "depth"
+        )
+        if self._use_point_head_for_part:
+            self.point_head = model_full.point_head
+
         if self.distill:
             self.distill_aggregator = copy.deepcopy(self.aggregator)
             self.distill_camera_head = copy.deepcopy(self.camera_head)
@@ -160,7 +169,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         if self.freeze_backbone:
             # Freeze backbone components
             if self.cfg.pred_head_type == "depth":
-                for module in [self.aggregator, self.camera_head, self.depth_head]:
+                modules_to_freeze = [self.aggregator, self.camera_head, self.depth_head]
+                # Also freeze the auxiliary point_head used for instance-head conditioning.
+                if self._use_point_head_for_part:
+                    modules_to_freeze.append(self.point_head)
+                for module in modules_to_freeze:
                     for param in module.parameters():
                         param.requires_grad = False
             else:
@@ -446,11 +459,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             )  # only for debug
 
             # Whether we need intermediate refinenet features for instance-head
-            # point-feature conditioning.
-            _need_point_feat = (
-                self.cfg.pred_head_type == "point"
-                and self.part_head is not None
-            )
+            # point-feature conditioning (aligns with IGGT which always feeds
+            # point_head intermediates into the PartHead cross-attention layers).
+            _need_point_feat = self.part_head is not None
 
             if self.cfg.pred_head_type == "point":
                 if _need_point_feat:
@@ -476,7 +487,19 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 pts_all = batchify_unproject_depth_map_to_point_map(
                     depth_map, extrinsic, intrinsic
                 )
-                point_intermediate = None  # depth head does not provide point features
+                # Run the auxiliary point_head to obtain intermediate refinenet
+                # features (out2, out3, out4) for PartHead cross-attention
+                # conditioning – this mirrors IGGT's architecture.
+                if _need_point_feat and self._use_point_head_for_part:
+                    _pts, _pts_conf, point_intermediate = self.point_head(
+                        aggregated_tokens_list,
+                        images=image,
+                        patch_start_idx=patch_start_idx,
+                        return_intermediate=True,
+                    )
+                    del _pts, _pts_conf
+                else:
+                    point_intermediate = None
             else:
                 raise ValueError(f"Invalid pred_head_type: {self.cfg.pred_head_type}")
 

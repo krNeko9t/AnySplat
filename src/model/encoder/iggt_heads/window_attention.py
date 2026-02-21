@@ -11,6 +11,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 from .attention_blocks import MemEffAttention
@@ -441,11 +442,26 @@ class SwinSA(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Input: (B, H, W, C), Output: (B, H, W, C)."""
-        x = x.permute(0, 3, 1, 2)
-        x = self.conv_after_body(self._forward_features(x)) + x
-        x = self.conv_before_upsample(x)
-        x = self.conv_last(x)
-        return x.permute(0, 2, 3, 1).contiguous()
+        x = x.permute(0, 3, 1, 2)  # (B, C, H, W)
+
+        # Pad spatial dims to multiples of window_size so that
+        # window_partition does not fail on arbitrary resolutions.
+        _, _, H, W = x.shape
+        ws = self.window_size
+        pad_h = (ws - H % ws) % ws
+        pad_w = (ws - W % ws) % ws
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+
+        feat = self.conv_after_body(self._forward_features(x)) + x
+
+        # Remove padding before the final conv layers.
+        if pad_h > 0 or pad_w > 0:
+            feat = feat[:, :, :H, :W]
+
+        feat = self.conv_before_upsample(feat)
+        feat = self.conv_last(feat)
+        return feat.permute(0, 2, 3, 1).contiguous()
 
 
 # ---------------------------------------------------------------------------
@@ -572,10 +588,27 @@ class SwinCA(nn.Module):
 
     def forward(self, x: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Input: (B, H, W, C), Output: (B, H, W, C)."""
-        x = x.permute(0, 3, 1, 2)
+        x = x.permute(0, 3, 1, 2)  # (B, C, H, W)
         k = k.permute(0, 3, 1, 2)
         v = v.permute(0, 3, 1, 2)
-        x = self.conv_after_body(self._forward_features(x, k, v)) + x
-        x = self.conv_before_upsample(x)
-        x = self.conv_last(x)
-        return x.permute(0, 2, 3, 1).contiguous()
+
+        # Pad spatial dims to multiples of window_size so that
+        # window_partition / unfold do not fail on arbitrary resolutions.
+        _, _, H, W = x.shape
+        ws = self.window_size
+        pad_h = (ws - H % ws) % ws
+        pad_w = (ws - W % ws) % ws
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+            k = F.pad(k, (0, pad_w, 0, pad_h))
+            v = F.pad(v, (0, pad_w, 0, pad_h))
+
+        feat = self.conv_after_body(self._forward_features(x, k, v)) + x
+
+        # Remove padding before the final conv layers.
+        if pad_h > 0 or pad_w > 0:
+            feat = feat[:, :, :H, :W]
+
+        feat = self.conv_before_upsample(feat)
+        feat = self.conv_last(feat)
+        return feat.permute(0, 2, 3, 1).contiguous()
