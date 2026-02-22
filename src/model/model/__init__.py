@@ -32,6 +32,8 @@ def get_model(encoder_cfg: EncoderCfg, decoder_cfg: DecoderCfg) -> nn.Module:
         allowed_missing_prefixes = (
             "encoder.instance_head.",
             "encoder.instance_head_proj.",
+            "encoder.part_adaptor.",
+            "encoder.part_head.",
         )
         bad_missing = [k for k in missing if not k.startswith(allowed_missing_prefixes)]
         print(f"[get_model] Initialized from HF `{hf_id}`")

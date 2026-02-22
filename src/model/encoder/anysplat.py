@@ -170,9 +170,6 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             # Freeze backbone components
             if self.cfg.pred_head_type == "depth":
                 modules_to_freeze = [self.aggregator, self.camera_head, self.depth_head]
-                # Also freeze the auxiliary point_head used for instance-head conditioning.
-                if self._use_point_head_for_part:
-                    modules_to_freeze.append(self.point_head)
                 for module in modules_to_freeze:
                     for param in module.parameters():
                         param.requires_grad = False

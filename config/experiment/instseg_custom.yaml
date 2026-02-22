@@ -37,7 +37,7 @@ optimizer:
   lr: 2.0e-4
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.0
-  new_param_keywords: ["part_adaptor", "part_head"]
+  new_param_keywords: ["part_adaptor", "part_head", "point_head"]
 
 trainer:
   max_steps: 60000
