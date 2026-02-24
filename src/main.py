@@ -41,7 +41,7 @@ with install_import_hook(
     from src.model.model_wrapper import ModelWrapper
 
 
-logger = logging.getLogger(__name__)
+logging_logger = logging.getLogger(__name__)
 
 
 def cyan(text: str) -> str:
@@ -62,7 +62,7 @@ def train(cfg_dict: DictConfig):
         hydra.core.hydra_config.HydraConfig.get()["runtime"]["output_dir"]
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(cyan(f"Saving outputs to {output_dir}."))
+    logging_logger.info(cyan(f"Saving outputs to {output_dir}."))
     
     cfg.train.output_path = output_dir
     
