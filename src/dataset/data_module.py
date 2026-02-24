@@ -153,6 +153,8 @@ class DataModule(LightningDataModule):
         dataset, datasets_ls = get_dataset(self.dataset_cfgs, "val", self.step_tracker, self.dataset_shim)
         world_size = get_world_size()
         rank = get_rank()
+        # Val uses MixedBatchSampler with DynamicDistributedSampler per dataset (world_size/rank),
+        # so each rank gets the same number of batches and participates in the same validation round.
         # here, we random select one dataset for val
         dataset_key = next(iter(get_cfg()["dataset"]))
         dataset_cfg = get_cfg()["dataset"][dataset_key]

@@ -562,17 +562,10 @@ class ModelWrapper(LightningModule):
         )
         self.benchmarker.summarize()
 
-    @rank_zero_only
-    def validation_step(self, batch, batch_idx, dataloader_idx=0):        
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        # Run forward + self.log() on all ranks so Lightning's metric sync (all_reduce) has every rank.
+        # Only logging/images/videos are rank-0-only to avoid duplicate work and NCCL timeout.
         batch: BatchedExample = self.data_shim(batch)
-
-        if self.global_rank == 0:
-            logger.info(
-                "validation step %s; scene = %s; context = %s",
-                self.global_step,
-                batch["scene"],
-                batch["context"]["index"].tolist(),
-            )
 
         # Render Gaussians.
         b, v, _, h, w = batch["context"]["image"].shape
@@ -628,89 +621,57 @@ class ModelWrapper(LightningModule):
         diff_map = torch.abs(output.depth - depth_dict['depth'].squeeze(-1))
         try:
             self.log("val/consis_mse", diff_map[distill_infos['conf_mask']].mean())
-        except:
+        except Exception:
             pass
 
-        # Construct comparison image.
-        context_img = inverse_normalize(batch["context"]["image"][0])
-        # context_img_depth = vis_depth_map(gaussian_means)
-        context = []
-        for i in range(context_img.shape[0]):
-            context.append(context_img[i])
-            # context.append(context_img_depth[i])
-        
-        colored_diff_map = vis_depth_map(diff_map[0], near=torch.tensor(1e-4, device=diff_map.device), far=torch.tensor(1.0, device=diff_map.device))
-        model_depth_pred = depth_dict["depth"].squeeze(-1)[0]
-        model_depth_pred = vis_depth_map(model_depth_pred)
-        
-        render_normal = (get_normal_map(output.depth.flatten(0, 1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
-        pred_normal = (get_normal_map(depth_dict['depth'].flatten(0, 1).squeeze(-1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
-
-        comparison = hcat(
-            add_label(vcat(*context), "Context"),
-            add_label(vcat(*rgb_gt), "Target (Ground Truth)"),
-            add_label(vcat(*rgb_pred), "Target (Prediction)"),
-            add_label(vcat(*depth_pred), "Depth (Prediction)"),
-            add_label(vcat(*model_depth_pred), "Depth (VGGT Prediction)"),
-            add_label(vcat(*render_normal), "Normal (Prediction)"),
-            add_label(vcat(*pred_normal), "Normal (VGGT Prediction)"),
-            add_label(vcat(*colored_diff_map), "Diff Map"),
-        )
-
-        comparison = torch.nn.functional.interpolate(
-            comparison.unsqueeze(0), 
-            scale_factor=0.5, 
-            mode='bicubic', 
-            align_corners=False
-        ).squeeze(0)
-        
-        self.logger.log_image(
-            "comparison",
-            [prep_image(add_border(comparison))],
-            step=self.global_step,
-            caption=batch["scene"],
-        )
-
-        # self.logger.log_image(
-        #     key="comparison",
-        #     images=[wandb.Image(prep_image(add_border(comparison)), caption=batch["scene"], file_type="jpg")],
-        #     step=self.global_step
-        # )
-
-        # Render projections and construct projection image.
-        # These are disabled for now, since RE10k scenes are effectively unbounded.
-
-        # if isinstance(gaussians, Gaussians):
-        #     projections = hcat(
-        #             *render_projections(
-        #                 gaussians,
-        #                 256,
-        #                 extra_label="",
-        #             )[0]
-        #         )
-        #     self.logger.log_image(
-        #         "projection",
-        #         [prep_image(add_border(projections))],
-        #         step=self.global_step,
-        #     )
-
-        # Draw cameras.
-        # cameras = hcat(*render_cameras(batch, 256))
-        # self.logger.log_image(
-        #     "cameras", [prep_image(add_border(cameras))], step=self.global_step
-        # )
-
-        if self.encoder_visualizer is not None:
-            for k, image in self.encoder_visualizer.visualize(
-                batch["context"], self.global_step
-            ).items():
-                self.logger.log_image(k, [prep_image(image)], step=self.global_step)
-        
-        # Run video validation step.
-        self.render_video_interpolation(batch)
-        self.render_video_wobble(batch)
-        if self.train_cfg.extended_visualization:
-            self.render_video_interpolation_exaggerated(batch)
+        # Rank-0-only: logging, comparison image, log_image, render_video (avoid duplicate + NCCL sync).
+        if self.trainer.global_rank == 0:
+            logger.info(
+                "validation step %s; scene = %s; context = %s",
+                self.global_step,
+                batch["scene"],
+                batch["context"]["index"].tolist(),
+            )
+            context_img = inverse_normalize(batch["context"]["image"][0])
+            context = []
+            for i in range(context_img.shape[0]):
+                context.append(context_img[i])
+            colored_diff_map = vis_depth_map(diff_map[0], near=torch.tensor(1e-4, device=diff_map.device), far=torch.tensor(1.0, device=diff_map.device))
+            model_depth_pred = depth_dict["depth"].squeeze(-1)[0]
+            model_depth_pred = vis_depth_map(model_depth_pred)
+            render_normal = (get_normal_map(output.depth.flatten(0, 1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
+            pred_normal = (get_normal_map(depth_dict['depth'].flatten(0, 1).squeeze(-1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
+            comparison = hcat(
+                add_label(vcat(*context), "Context"),
+                add_label(vcat(*rgb_gt), "Target (Ground Truth)"),
+                add_label(vcat(*rgb_pred), "Target (Prediction)"),
+                add_label(vcat(*depth_pred), "Depth (Prediction)"),
+                add_label(vcat(*model_depth_pred), "Depth (VGGT Prediction)"),
+                add_label(vcat(*render_normal), "Normal (Prediction)"),
+                add_label(vcat(*pred_normal), "Normal (VGGT Prediction)"),
+                add_label(vcat(*colored_diff_map), "Diff Map"),
+            )
+            comparison = torch.nn.functional.interpolate(
+                comparison.unsqueeze(0),
+                scale_factor=0.5,
+                mode='bicubic',
+                align_corners=False
+            ).squeeze(0)
+            self.logger.log_image(
+                "comparison",
+                [prep_image(add_border(comparison))],
+                step=self.global_step,
+                caption=batch["scene"],
+            )
+            if self.encoder_visualizer is not None:
+                for k, image in self.encoder_visualizer.visualize(
+                    batch["context"], self.global_step
+                ).items():
+                    self.logger.log_image(k, [prep_image(image)], step=self.global_step)
+            self.render_video_interpolation(batch)
+            self.render_video_wobble(batch)
+            if self.train_cfg.extended_visualization:
+                self.render_video_interpolation_exaggerated(batch)
 
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:
