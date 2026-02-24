@@ -72,6 +72,25 @@ class DatasetCustom(Dataset):
             if not self.scenes:
                 raise ValueError(f"overfit_to_scene={cfg.overfit_to_scene} not found in manifest")
 
+        # Training requires enough views for the view sampler (>=2 and >= num_context_views
+        # so that bounded/bounded_fixed samplers do not raise "Example does not have enough frames!").
+        def _num_frames(s):
+            for key in ("frames", "views", "images"):
+                val = s.get(key)
+                if val is not None and isinstance(val, list):
+                    return len(val)
+            return 0
+        min_views = max(2, getattr(self.view_sampler, "num_context_views", 2))
+        before = len(self.scenes)
+        self.scenes = [s for s in self.scenes if _num_frames(s) >= min_views]
+        if before > len(self.scenes):
+            import warnings
+            warnings.warn(
+                f"DatasetCustom: dropped {before - len(self.scenes)} scene(s) with <{min_views} views (kept {len(self.scenes)})",
+                UserWarning,
+                stacklevel=2,
+            )
+
     def __len__(self) -> int:
         return len(self.scenes)
 

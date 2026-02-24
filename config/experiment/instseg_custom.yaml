@@ -28,15 +28,15 @@ model:
     voxelize: true
     voxel_size: 0.002
     intermediate_layer_idx: [4, 11, 17, 23]
-    freeze_backbone: true
+    freeze_backbone: true # ugly
 
 optimizer:
   # Differential LRs:
   # - instance head: lr
   # - everything else: lr * backbone_lr_multiplier
-  lr: 2.0e-4
+  lr: 1.0e-4
   warm_up_steps: 1000
-  backbone_lr_multiplier: 0.0
+  backbone_lr_multiplier: 0.1
   new_param_keywords: ["part_adaptor", "part_head", "point_head"]
 
 trainer:
