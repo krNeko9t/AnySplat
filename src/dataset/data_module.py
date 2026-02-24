@@ -1,3 +1,4 @@
+import logging
 import random
 from dataclasses import dataclass
 from typing import Callable
@@ -18,6 +19,9 @@ from . import DatasetCfgWrapper, get_dataset
 from .types import DataShim, Stage
 from .data_sampler import BatchedRandomSampler, MixedBatchSampler, custom_collate_fn
 from .validation_wrapper import ValidationWrapper
+
+logger = logging.getLogger(__name__)
+
 
 def get_data_shim(encoder: nn.Module) -> DataShim:
     """Get functions that modify the batch. It's sometimes necessary to modify batches
@@ -137,10 +141,10 @@ class DataModule(LightningDataModule):
         # breakpoint()
         # Set epoch for train and validation loaders (if applicable)
         if hasattr(self.train_loader, "dataset") and hasattr(self.train_loader.dataset, "set_epoch"):
-            print("Training: Set Epoch in DataModule")
+            logger.debug("Training: Set Epoch in DataModule")
             self.train_loader.dataset.set_epoch(0)
         if hasattr(self.train_loader, "sampler") and hasattr(self.train_loader.sampler, "set_epoch"):
-            print("Training: Set Epoch in DataModule")
+            logger.debug("Training: Set Epoch in DataModule")
             self.train_loader.sampler.set_epoch(0)
         
         return self.train_loader
@@ -174,10 +178,10 @@ class DataModule(LightningDataModule):
             persistent_workers=self.get_persistent(self.data_loader_cfg.val),
         )
         if hasattr(self.val_loader, "dataset") and hasattr(self.val_loader.dataset, "set_epoch"):
-            print("Validation: Set Epoch in DataModule")
+            logger.debug("Validation: Set Epoch in DataModule")
             self.val_loader.dataset.set_epoch(0)
         if hasattr(self.val_loader, "sampler") and hasattr(self.val_loader.sampler, "set_epoch"):
-            print("Validation: Set Epoch in DataModule")
+            logger.debug("Validation: Set Epoch in DataModule")
             self.val_loader.sampler.set_epoch(0)
         return self.val_loader
 

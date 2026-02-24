@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields
 from typing import Optional
 
@@ -12,6 +13,8 @@ from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
 from src.model.types import Gaussians
 from .loss import Loss
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -486,9 +489,13 @@ class LossMVC(Loss[LossMvcCfg, LossMvcCfgWrapper]):
             else:
                 rank = 0
             if rank == 0 and _use_recipe():
-                print(
-                    f"[mvc] step={global_step} pull_pairs={dbg_pull_pairs} push_pairs={dbg_push_pairs} "
-                    f"instances={dbg_instances} instances_lt2={dbg_instances_lt2}"
+                logger.info(
+                    "[mvc] step=%s pull_pairs=%s push_pairs=%s instances=%s instances_lt2=%s",
+                    global_step,
+                    dbg_pull_pairs,
+                    dbg_push_pairs,
+                    dbg_instances,
+                    dbg_instances_lt2,
                 )
 
         return loss

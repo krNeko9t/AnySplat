@@ -1,4 +1,5 @@
 import copy
+import logging
 
 # VGGT parts
 import os
@@ -28,6 +29,8 @@ from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.utils.geometry import get_rel_pos  # used for model hub
 from torch import nn, Tensor
 from torch_scatter import scatter_add, scatter_max
+
+logger = logging.getLogger(__name__)
 
 from ..types import Gaussians
 from .backbone import Backbone, BackboneCfg, get_backbone
@@ -604,8 +607,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             opacity_threshold = self.cfg.opacity_threshold
             gaussian_usage = opacity > opacity_threshold  # (B, N)
 
-            print(
-                f"based on opacity threshold {opacity_threshold}, pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
+            logger.info(
+                "based on opacity threshold %s, pruned %s gaussians out of %s",
+                opacity_threshold,
+                gaussian_usage.shape[1] - neural_pts.shape[1],
+                gaussian_usage.shape[1],
             )
 
             if (gaussian_usage.sum() / gaussian_usage.numel()) > self.cfg.gs_keep_ratio:
@@ -629,8 +635,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     .contiguous()
                 )
 
-            print(
-                f"finally pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
+            logger.info(
+                "finally pruned %s gaussians out of %s",
+                gaussian_usage.shape[1] - neural_pts.shape[1],
+                gaussian_usage.shape[1],
             )
 
         gaussians = self.gaussian_adapter.forward(

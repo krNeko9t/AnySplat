@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Union
 
 from ..encoder import Encoder
@@ -13,6 +14,8 @@ MODELS = {
 
 EncoderCfg = Union[EncoderAnySplatCfg]
 DecoderCfg = DecoderSplattingCUDACfg
+
+logger = logging.getLogger(__name__)
 
 
 # hard code for now
@@ -36,11 +39,13 @@ def get_model(encoder_cfg: EncoderCfg, decoder_cfg: DecoderCfg) -> nn.Module:
             "encoder.part_head.",
         )
         bad_missing = [k for k in missing if not k.startswith(allowed_missing_prefixes)]
-        print(f"[get_model] Initialized from HF `{hf_id}`")
-        print(
-            f"[get_model] missing_keys={len(missing)} "
-            f"(allowed={len(missing) - len(bad_missing)}, unexpected={len(bad_missing)}), "
-            f"unexpected_keys={len(unexpected)}"
+        logger.info("[get_model] Initialized from HF `%s`", hf_id)
+        logger.info(
+            "[get_model] missing_keys=%d (allowed=%d, unexpected=%d), unexpected_keys=%d",
+            len(missing),
+            len(missing) - len(bad_missing),
+            len(bad_missing),
+            len(unexpected),
         )
         if bad_missing:
             prefixes = {}
@@ -49,9 +54,9 @@ def get_model(encoder_cfg: EncoderCfg, decoder_cfg: DecoderCfg) -> nn.Module:
                 p = ".".join(p) + "."
                 prefixes[p] = prefixes.get(p, 0) + 1
             top = sorted(prefixes.items(), key=lambda x: x[1], reverse=True)[:15]
-            print("[get_model] unexpected missing key prefixes (top):")
+            logger.info("[get_model] unexpected missing key prefixes (top):")
             for p, c in top:
-                print(f"  - {p}: {c}")
+                logger.info("  - %s: %d", p, c)
         return model
 
     return MODELS["anysplat"](encoder_cfg, decoder_cfg)

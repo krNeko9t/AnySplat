@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -18,6 +19,8 @@ from .shims.augmentation_shim import apply_augmentation_shim
 from .shims.crop_shim import apply_crop_shim
 from .types import Stage
 from .view_sampler import ViewSampler
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -129,7 +132,11 @@ class DatasetCustom(Dataset):
         scene = self.scenes[index]
         scene_id = str(scene.get("scene_id", index))
         if self.stage == "val":
-            print(f"[DatasetCustom] Loading val sample scene_id={scene_id} num_context_views={num_context_views}", flush=True)
+            logger.info(
+                "[DatasetCustom] Loading val sample scene_id=%s num_context_views=%s",
+                scene_id,
+                num_context_views,
+            )
         frames = scene.get("frames") or scene.get("views") or scene.get("images")
         if frames is None or len(frames) < 2:
             raise ValueError("Scene must contain frames with >=2 views")

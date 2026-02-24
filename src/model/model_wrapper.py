@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 import gc
+import logging
 import random
 from typing import Literal, Optional, Protocol, runtime_checkable, Any
 
@@ -59,6 +60,9 @@ from .decoder.decoder import Decoder, DecoderOutput, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .ply_export import export_ply
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class OptimizerCfg:
@@ -172,7 +176,7 @@ class ModelWrapper(LightningModule):
             self.trainer.datamodule.train_loader.sampler.set_epoch(self.current_epoch)
 
     def on_validation_epoch_start(self) -> None:
-        print(f"Validation epoch start on rank {self.trainer.global_rank}")
+        logger.info("Validation epoch start on rank %s", self.trainer.global_rank)
         # our custom dataset and sampler has to have epoch set by calling set_epoch
         if hasattr(self.trainer.datamodule.val_loader.dataset, "set_epoch"):
             self.trainer.datamodule.val_loader.dataset.set_epoch(self.current_epoch)
@@ -356,14 +360,19 @@ class ModelWrapper(LightningModule):
                 pass
             keys = sorted(loss_values.keys())
             msg = ", ".join([f"{k}={loss_values[k]:.6g}" for k in keys])
-            print(f"loss breakdown: {msg}")
+            logger.info("loss breakdown: %s", msg)
         
 
         # Skip batch if loss is too high after certain step
         SKIP_AFTER_STEP = 1000  
         LOSS_THRESHOLD = 10.
         if self.global_step > SKIP_AFTER_STEP and total_loss > LOSS_THRESHOLD:
-            print(f"Skipping batch with high loss ({total_loss:.6f}) at step {self.global_step} on Rank {self.global_rank}")
+            logger.warning(
+                "Skipping batch with high loss (%s) at step %s on Rank %s",
+                total_loss.item() if hasattr(total_loss, "item") else total_loss,
+                self.global_step,
+                self.global_rank,
+            )
             # set to a really small number
             return total_loss * 1e-10
 
@@ -371,11 +380,12 @@ class ModelWrapper(LightningModule):
             self.global_rank == 0
             and self.global_step % self.train_cfg.print_log_every_n_steps == 0
         ):
-            print(
-                f"train step {self.global_step}; "
-                f"scene = {[x[:20] for x in batch['scene']]}; "
-                f"context = {batch['context']['index'].tolist()}; "
-                f"loss = {total_loss:.6f}; "
+            logger.info(
+                "train step %s; scene = %s; context = %s; loss = %s",
+                self.global_step,
+                [x[:20] for x in batch["scene"]],
+                batch["context"]["index"].tolist(),
+                total_loss.item() if hasattr(total_loss, "item") else total_loss,
             )
             
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
@@ -406,8 +416,8 @@ class ModelWrapper(LightningModule):
         batch: BatchedExample = self.data_shim(batch)
         b, v, _, h, w = batch["target"]["image"].shape
         assert b == 1
-        if batch_idx % 100 == 0:
-            print(f"Test step {batch_idx:0>6}.")
+        if self.global_rank == 0 and batch_idx % 100 == 0:
+            logger.info("Test step %s.", f"{batch_idx:0>6}")
         
         # Render Gaussians.
         with self.benchmarker.time("encoder"):
@@ -557,10 +567,11 @@ class ModelWrapper(LightningModule):
         batch: BatchedExample = self.data_shim(batch)
 
         if self.global_rank == 0:
-            print(
-                f"validation step {self.global_step}; "
-                f"scene = {batch['scene']}; "
-                f"context = {batch['context']['index'].tolist()}"
+            logger.info(
+                "validation step %s; scene = %s; context = %s",
+                self.global_step,
+                batch["scene"],
+                batch["context"]["index"].tolist(),
             )
 
         # Render Gaussians.
@@ -895,13 +906,13 @@ class ModelWrapper(LightningModule):
 
             headers = ["Method"] + metric_list
             table = tabulate(table, headers)
-            print(table)
+            logger.info("%s", table)
 
-        print("All Pairs:")
+        logger.info("All Pairs:")
         print_metrics(self.running_metrics, methods)
         if overlap_tag is not None:
             for k, v in self.running_metrics_sub.items():
-                print(f"Overlap: {k}")
+                logger.info("Overlap: %s", k)
                 print_metrics(v, methods)
 
     def configure_optimizers(self):
@@ -922,10 +933,11 @@ class ModelWrapper(LightningModule):
                 pretrained_param_names.append(name)
 
         if getattr(self, "global_rank", 0) == 0:
-            print(
-                "[configure_optimizers] new_param_keywords="
-                f"{keywords}; new={len(new_param_names)} params, "
-                f"backbone={len(pretrained_param_names)} params"
+            logger.info(
+                "[configure_optimizers] new_param_keywords=%s; new=%d params, backbone=%d params",
+                keywords,
+                len(new_param_names),
+                len(pretrained_param_names),
             )
         
         param_dicts = [
