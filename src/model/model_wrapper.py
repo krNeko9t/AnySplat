@@ -114,12 +114,17 @@ class TrainCfg:
 
 @runtime_checkable
 class TrajectoryFn(Protocol):
+    """Receives t and encoder-predicted poses; returns extrinsics/intrinsics for each frame.
+    Uses predicted (not dataset) poses so the trajectory stays in the same coordinate system as gaussians."""
+
     def __call__(
         self,
         t: Float[Tensor, " t"],
+        pred_extrinsics: Float[Tensor, "batch view 4 4"],
+        pred_intrinsics: Float[Tensor, "batch view 3 3"],
     ) -> tuple[
         Float[Tensor, "batch view 4 4"],  # extrinsics
-        Float[Tensor, "batch view 3 3"],  # intrinsics
+        Float[Tensor, "batch view 3 3"],   # intrinsics
     ]:
         pass
 
@@ -675,22 +680,21 @@ class ModelWrapper(LightningModule):
 
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:
-        # Two views are needed to get the wobble radius.
-        _, v, _, _ = batch["context"]["extrinsics"].shape
-        if v != 2:
-            return
-
-        def trajectory_fn(t):
-            origin_a = batch["context"]["extrinsics"][:, 0, :3, 3]
-            origin_b = batch["context"]["extrinsics"][:, 1, :3, 3]
+        def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
+            # Two views are needed to get the wobble radius (use predicted poses).
+            _, v, _, _ = pred_extrinsics.shape
+            if v < 2:
+                return None, None
+            origin_a = pred_extrinsics[:, 0, :3, 3]
+            origin_b = pred_extrinsics[:, 1, :3, 3]
             delta = (origin_a - origin_b).norm(dim=-1)
             extrinsics = generate_wobble(
-                batch["context"]["extrinsics"][:, 0],
+                pred_extrinsics[:, 0],
                 delta * 0.25,
                 t,
             )
             intrinsics = repeat(
-                batch["context"]["intrinsics"][:, 0],
+                pred_intrinsics[:, 0],
                 "b i j -> b v i j",
                 v=t.shape[0],
             )
@@ -700,25 +704,18 @@ class ModelWrapper(LightningModule):
 
     @rank_zero_only
     def render_video_interpolation(self, batch: BatchedExample) -> None:
-        _, v, _, _ = batch["context"]["extrinsics"].shape
-
-        def trajectory_fn(t):
+        def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
+            _, v, _, _ = pred_extrinsics.shape
+            # Use first two predicted views so trajectory stays in gaussian coordinate system.
+            idx1 = min(1, v - 1)
             extrinsics = interpolate_extrinsics(
-                batch["context"]["extrinsics"][0, 0],
-                (
-                    batch["context"]["extrinsics"][0, 1]
-                    if v == 2
-                    else batch["target"]["extrinsics"][0, 0]
-                ),
+                pred_extrinsics[0, 0],
+                pred_extrinsics[0, idx1],
                 t,
             )
             intrinsics = interpolate_intrinsics(
-                batch["context"]["intrinsics"][0, 0],
-                (
-                    batch["context"]["intrinsics"][0, 1]
-                    if v == 2
-                    else batch["target"]["intrinsics"][0, 0]
-                ),
+                pred_intrinsics[0, 0],
+                pred_intrinsics[0, idx1],
                 t,
             )
             return extrinsics[None], intrinsics[None]
@@ -727,14 +724,12 @@ class ModelWrapper(LightningModule):
 
     @rank_zero_only
     def render_video_interpolation_exaggerated(self, batch: BatchedExample) -> None:
-        # Two views are needed to get the wobble radius.
-        _, v, _, _ = batch["context"]["extrinsics"].shape
-        if v != 2:
-            return
-
-        def trajectory_fn(t):
-            origin_a = batch["context"]["extrinsics"][:, 0, :3, 3]
-            origin_b = batch["context"]["extrinsics"][:, 1, :3, 3]
+        def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
+            _, v, _, _ = pred_extrinsics.shape
+            if v < 2:
+                return None, None
+            origin_a = pred_extrinsics[:, 0, :3, 3]
+            origin_b = pred_extrinsics[:, 1, :3, 3]
             delta = (origin_a - origin_b).norm(dim=-1)
             tf = generate_wobble_transformation(
                 delta * 0.5,
@@ -743,21 +738,13 @@ class ModelWrapper(LightningModule):
                 scale_radius_with_t=False,
             )
             extrinsics = interpolate_extrinsics(
-                batch["context"]["extrinsics"][0, 0],
-                (
-                    batch["context"]["extrinsics"][0, 1]
-                    if v == 2
-                    else batch["target"]["extrinsics"][0, 0]
-                ),
+                pred_extrinsics[0, 0],
+                pred_extrinsics[0, 1],
                 t * 5 - 2,
             )
             intrinsics = interpolate_intrinsics(
-                batch["context"]["intrinsics"][0, 0],
-                (
-                    batch["context"]["intrinsics"][0, 1]
-                    if v == 2
-                    else batch["target"]["intrinsics"][0, 0]
-                ),
+                pred_intrinsics[0, 0],
+                pred_intrinsics[0, 1],
                 t * 5 - 2,
             )
             return extrinsics @ tf, intrinsics[None]
@@ -781,15 +768,20 @@ class ModelWrapper(LightningModule):
         smooth: bool = True,
         loop_reverse: bool = True,
     ) -> None:
-        # Render probabilistic estimate of scene.
+        # Render probabilistic estimate of scene. Use predicted poses for trajectory
+        # so cameras and gaussians stay in the same coordinate system.
         encoder_output = self.model.encoder((batch["context"]["image"]+1)/2, self.global_step)
-        gaussians, pred_pose_enc_list = encoder_output.gaussians, encoder_output.pred_pose_enc_list
+        gaussians = encoder_output.gaussians
+        pred_ext = encoder_output.pred_context_pose["extrinsic"]
+        pred_intr = encoder_output.pred_context_pose["intrinsic"]
 
         t = torch.linspace(0, 1, num_frames, dtype=torch.float32, device=self.device)
         if smooth:
             t = (torch.cos(torch.pi * (t + 1)) + 1) / 2
 
-        extrinsics, intrinsics = trajectory_fn(t)
+        extrinsics, intrinsics = trajectory_fn(t, pred_ext, pred_intr)
+        if extrinsics is None:
+            return
 
         _, _, _, h, w = batch["context"]["image"].shape
 
