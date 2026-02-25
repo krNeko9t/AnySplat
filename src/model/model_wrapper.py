@@ -638,46 +638,47 @@ class ModelWrapper(LightningModule):
                 batch["scene"],
                 batch["context"]["index"].tolist(),
             )
-            context_img = inverse_normalize(batch["context"]["image"][0])
-            context = []
-            for i in range(context_img.shape[0]):
-                context.append(context_img[i])
-            colored_diff_map = vis_depth_map(diff_map[0], near=torch.tensor(1e-4, device=diff_map.device), far=torch.tensor(1.0, device=diff_map.device))
-            model_depth_pred = depth_dict["depth"].squeeze(-1)[0]
-            model_depth_pred = vis_depth_map(model_depth_pred)
-            render_normal = (get_normal_map(output.depth.flatten(0, 1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
-            pred_normal = (get_normal_map(depth_dict['depth'].flatten(0, 1).squeeze(-1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
-            comparison = hcat(
-                add_label(vcat(*context), "Context"),
-                add_label(vcat(*rgb_gt), "Target (Ground Truth)"),
-                add_label(vcat(*rgb_pred), "Target (Prediction)"),
-                add_label(vcat(*depth_pred), "Depth (Prediction)"),
-                add_label(vcat(*model_depth_pred), "Depth (VGGT Prediction)"),
-                add_label(vcat(*render_normal), "Normal (Prediction)"),
-                add_label(vcat(*pred_normal), "Normal (VGGT Prediction)"),
-                add_label(vcat(*colored_diff_map), "Diff Map"),
-            )
-            comparison = torch.nn.functional.interpolate(
-                comparison.unsqueeze(0),
-                scale_factor=0.5,
-                mode='bicubic',
-                align_corners=False
-            ).squeeze(0)
-            self.logger.log_image(
-                "comparison",
-                [prep_image(add_border(comparison))],
-                step=self.global_step,
-                caption=batch["scene"],
-            )
-            if self.encoder_visualizer is not None:
-                for k, image in self.encoder_visualizer.visualize(
-                    batch["context"], self.global_step
-                ).items():
-                    self.logger.log_image(k, [prep_image(image)], step=self.global_step)
-            self.render_video_interpolation(batch)
-            self.render_video_wobble(batch)
-            if self.train_cfg.extended_visualization:
-                self.render_video_interpolation_exaggerated(batch)
+            if batch_idx % 100 == 0:
+                context_img = inverse_normalize(batch["context"]["image"][0])
+                context = []
+                for i in range(context_img.shape[0]):
+                    context.append(context_img[i])
+                colored_diff_map = vis_depth_map(diff_map[0], near=torch.tensor(1e-4, device=diff_map.device), far=torch.tensor(1.0, device=diff_map.device))
+                model_depth_pred = depth_dict["depth"].squeeze(-1)[0]
+                model_depth_pred = vis_depth_map(model_depth_pred)
+                render_normal = (get_normal_map(output.depth.flatten(0, 1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
+                pred_normal = (get_normal_map(depth_dict['depth'].flatten(0, 1).squeeze(-1), batch["context"]["intrinsics"].flatten(0, 1)).permute(0, 3, 1, 2) + 1) / 2.
+                comparison = hcat(
+                    add_label(vcat(*context), "Context"),
+                    add_label(vcat(*rgb_gt), "Target (Ground Truth)"),
+                    add_label(vcat(*rgb_pred), "Target (Prediction)"),
+                    add_label(vcat(*depth_pred), "Depth (Prediction)"),
+                    add_label(vcat(*model_depth_pred), "Depth (VGGT Prediction)"),
+                    add_label(vcat(*render_normal), "Normal (Prediction)"),
+                    add_label(vcat(*pred_normal), "Normal (VGGT Prediction)"),
+                    add_label(vcat(*colored_diff_map), "Diff Map"),
+                )
+                comparison = torch.nn.functional.interpolate(
+                    comparison.unsqueeze(0),
+                    scale_factor=0.5,
+                    mode='bicubic',
+                    align_corners=False
+                ).squeeze(0)
+                self.logger.log_image(
+                    "comparison",
+                    [prep_image(add_border(comparison))],
+                    step=self.global_step,
+                    caption=batch["scene"],
+                )
+                if self.encoder_visualizer is not None:
+                    for k, image in self.encoder_visualizer.visualize(
+                        batch["context"], self.global_step
+                    ).items():
+                        self.logger.log_image(k, [prep_image(image)], step=self.global_step)
+                self.render_video_interpolation(batch)
+                self.render_video_wobble(batch)
+                if self.train_cfg.extended_visualization:
+                    self.render_video_interpolation_exaggerated(batch)
 
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:

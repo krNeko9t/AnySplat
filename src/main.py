@@ -128,6 +128,7 @@ def train(cfg_dict: DictConfig):
         max_steps=cfg.trainer.max_steps,
         precision=cfg.trainer.precision,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
+        limit_val_batches=cfg.trainer.limit_val_batches,
         # plugins=[SLURMEnvironment(requeue_signal=signal.SIGUSR1)],  # Uncomment for SLURM auto resubmission.
         inference_mode=False if (cfg.mode == "test" and cfg.test.align_pose) else True,
     )
