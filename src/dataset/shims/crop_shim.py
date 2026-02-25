@@ -101,10 +101,14 @@ def rescale_and_crop(
     intr_aug: bool = False,
     scale_range: tuple[float, float] = (0.77, 1.0),
     depths: Float[Tensor, "*#batch 1 h w"] | None = None,
+    instance_mask: Tensor | None = None,
+    valid_mask: Tensor | None = None,
 ) -> tuple[
     Float[Tensor, "*#batch c h_out w_out"],  # updated images
     Float[Tensor, "*#batch 3 3"],  # updated intrinsics
     Float[Tensor, "*#batch 1 h_out w_out"] | None,  # updated depths
+    Tensor | None,  # instance_mask_out
+    Tensor | None,  # valid_mask_out
 ]:
     if type(images) == list:
         images_new = []
@@ -135,9 +139,9 @@ def rescale_and_crop(
                 depth = rescale_depth(depth, (h_out, w_out))
                 depth = F.center_crop(depth, (h_out, w_out))
                 depths_new.append(depth)
-            return torch.stack(images_new), torch.stack(intrinsics_new), torch.stack(depths_new)
+            return torch.stack(images_new), torch.stack(intrinsics_new), torch.stack(depths_new), None, None
         else:
-            return torch.stack(images_new), torch.stack(intrinsics_new)
+            return torch.stack(images_new), torch.stack(intrinsics_new), None, None, None
     
     else:
         # we only support intr_aug for clean datasets
@@ -183,51 +187,74 @@ def rescale_and_crop(
             if intr_aug:
                 images = F.resize(images, size=(h_out, w_out), interpolation=F.InterpolationMode.BILINEAR)
                 depths = F.resize(depths, size=(h_out, w_out), interpolation=F.InterpolationMode.NEAREST)
-                
-            return images, intrinsics, depths
+
+            instance_mask_out: Tensor | None = None
+            valid_mask_out: Tensor | None = None
+            row = (h_scaled - h_scale) // 2
+            col = (w_scaled - w_scale) // 2
+
+            if instance_mask is not None and torch.is_tensor(instance_mask):
+                *batch_m, h_in, w_in = instance_mask.shape
+                mask_flat = instance_mask.reshape(-1, h_in, w_in)
+                mask_flat = torch.stack([rescale_mask(m, (h_scaled, w_scaled)) for m in mask_flat])
+                mask_crop = mask_flat.reshape(*batch_m, h_scaled, w_scaled)[..., row : row + h_scale, col : col + w_scale]
+                if intr_aug:
+                    mask_crop = F.resize(
+                        mask_crop.unsqueeze(1).float(),
+                        size=(h_out, w_out),
+                        interpolation=F.InterpolationMode.NEAREST,
+                    ).squeeze(1).long()
+                instance_mask_out = mask_crop.to(torch.int64)
+
+            if valid_mask is not None and torch.is_tensor(valid_mask):
+                *batch_m, h_in, w_in = valid_mask.shape
+                vm_flat = valid_mask.reshape(-1, h_in, w_in)
+                vm_flat = torch.stack([rescale_mask(m, (h_scaled, w_scaled)) for m in vm_flat])
+                vm_crop = vm_flat.reshape(*batch_m, h_scaled, w_scaled)[..., row : row + h_scale, col : col + w_scale]
+                if intr_aug:
+                    vm_crop = F.resize(
+                        vm_crop.unsqueeze(1).float(),
+                        size=(h_out, w_out),
+                        interpolation=F.InterpolationMode.NEAREST,
+                    ).squeeze(1).bool()
+                else:
+                    vm_crop = vm_crop.bool()
+                valid_mask_out = vm_crop
+
+            return images, intrinsics, depths, instance_mask_out, valid_mask_out
         else:
             images, intrinsics = center_crop(images, intrinsics, (h_scale, w_scale))
 
             if intr_aug:
                 images = F.resize(images, size=(h_out, w_out))
 
-            return images, intrinsics
+            return images, intrinsics, None, None, None
 
 
 def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], intr_aug: bool = False) -> AnyViews:
     if "depth" in views.keys():
-        images, intrinsics, depths = rescale_and_crop(views["image"], views["intrinsics"], shape, depths=views["depth"], intr_aug=intr_aug)
+        images, intrinsics, depths, instance_mask_out, valid_mask_out = rescale_and_crop(
+            views["image"],
+            views["intrinsics"],
+            shape,
+            depths=views["depth"],
+            intr_aug=intr_aug,
+            instance_mask=views.get("instance_mask"),
+            valid_mask=views.get("valid_mask"),
+        )
         out: AnyViews = {
             **views,
             "image": images,
             "intrinsics": intrinsics,
             "depth": depths,
         }
-        # Keep instance_mask aligned with the same resize/crop path.
-        if "instance_mask" in views.keys():
-            mask = views["instance_mask"]
-            if torch.is_tensor(mask):
-                # mask expected shape: (*batch, h, w)
-                *batch, h_in, w_in = mask.shape
-                mask = mask.reshape(-1, h_in, w_in)
-                mask = torch.stack([rescale_mask(m, (depths.shape[-2], depths.shape[-1])) for m in mask])
-                mask = mask.reshape(*batch, depths.shape[-2], depths.shape[-1]).to(torch.int64)
-                out["instance_mask"] = mask
-        # Keep valid_mask aligned with the same resize/crop path.
-        if "valid_mask" in views.keys():
-            valid_mask = views["valid_mask"]
-            if torch.is_tensor(valid_mask):
-                # valid_mask expected shape: (*batch, h, w)
-                *batch, h_in, w_in = valid_mask.shape
-                valid_mask = valid_mask.reshape(-1, h_in, w_in)
-                valid_mask = torch.stack(
-                    [rescale_mask(m, (depths.shape[-2], depths.shape[-1])) for m in valid_mask]
-                )
-                valid_mask = valid_mask.reshape(*batch, depths.shape[-2], depths.shape[-1]).bool()
-                out["valid_mask"] = valid_mask
+        if instance_mask_out is not None:
+            out["instance_mask"] = instance_mask_out
+        if valid_mask_out is not None:
+            out["valid_mask"] = valid_mask_out
         return out
     else:
-        images, intrinsics = rescale_and_crop(views["image"], views["intrinsics"], shape, intr_aug)
+        images, intrinsics, _, _, _ = rescale_and_crop(views["image"], views["intrinsics"], shape, intr_aug=intr_aug)
         return {
             **views,
             "image": images,
