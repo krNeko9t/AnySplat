@@ -108,7 +108,7 @@ def pca_visualize_embeddings(
         [V, 3, H, W] float tensor in [0, 1] for RGB visualization.
     """
     V, N, H, W = feat_vnhw.shape
-    feat_flat = feat_vnhw.permute(0, 2, 3, 1).reshape(-1, N)
+    feat_flat = feat_vnhw.permute(0, 2, 3, 1).reshape(-1, N).float()
     if valid_vhw is not None:
         valid_flat = valid_vhw.reshape(-1)
         feat_valid = feat_flat[valid_flat]
@@ -122,25 +122,32 @@ def pca_visualize_embeddings(
         pad_valid = torch.zeros((feat_valid.shape[0], 3 - C), device=feat_valid.device, dtype=feat_valid.dtype)
         feat_valid = torch.cat([feat_valid, pad_valid], dim=1)
         pad_flat = torch.zeros((feat_flat.shape[0], 3 - C), device=feat_flat.device, dtype=feat_flat.dtype)
-        feat_flat = torch.cat([feat_flat.float(), pad_flat], dim=1)
+        feat_flat = torch.cat([feat_flat, pad_flat], dim=1)
         C = 3
-    else:
-        feat_flat = feat_flat.float()
+
+    # Standardize (like IGGT) for stable PCA
+    mean = feat_valid.mean(dim=0, keepdim=True)
+    std = feat_valid.std(dim=0, keepdim=True) + 1e-5
+    feat_valid = (feat_valid - mean) / std
+    feat_flat = (feat_flat - mean) / std
 
     try:
-        _, _, v = torch.pca_lowrank(feat_valid.float(), q=min(C, 256))
+        _, _, v = torch.pca_lowrank(feat_valid, q=min(C, 256))
         proj = torch.matmul(feat_flat, v[:, :3])
     except Exception:
         return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
 
+    # Percentile normalization with fallback for degenerate range
     for i in range(3):
         ch = proj[:, i]
         v_low = torch.quantile(ch, low_p)
         v_high = torch.quantile(ch, high_p)
-        proj[:, i] = (ch - v_low) / (v_high - v_low + 1e-8)
+        if v_high > v_low:
+            proj[:, i] = (ch - v_low) / (v_high - v_low)
+        else:
+            proj[:, i] = 0.5
     proj = proj.clamp(0, 1)
 
     out = proj.view(V, H, W, 3).permute(0, 3, 1, 2)
-    if valid_vhw is not None:
-        out = out * valid_vhw.unsqueeze(1).float()
+    # Do not mask by valid_vhw for visualization - show PCA for all pixels
     return out
