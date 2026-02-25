@@ -3,6 +3,8 @@ from pathlib import Path
 import gc
 import logging
 import random
+
+import numpy as np
 from typing import Literal, Optional, Protocol, runtime_checkable, Any
 
 import moviepy.editor as mpy
@@ -54,6 +56,12 @@ from ..visualization.camera_trajectory.wobble import (
     generate_wobble_transformation,
 )
 from ..visualization.color_map import apply_color_map_to_image
+from ..visualization.instance_viz import (
+    cluster_instance_embeddings,
+    colorize_labels,
+    make_color_lut,
+    pca_visualize_embeddings,
+)
 from ..visualization.layout import add_border, hcat, vcat
 # from ..visualization.validation_in_3d import render_cameras, render_projections
 from .decoder.decoder import Decoder, DecoderOutput, DepthRenderingMode
@@ -670,6 +678,59 @@ class ModelWrapper(LightningModule):
                     step=self.global_step,
                     caption=batch["scene"],
                 )
+                # Instance head visualization: context | clustered | GT | PCA
+                if encoder_output.instance_feat_map is not None and "instance_mask" in batch["context"]:
+                    feat_map = encoder_output.instance_feat_map[0].float()
+                    V, N, H, W = feat_map.shape
+                    valid = depth_dict.get("conf_valid_mask")
+                    valid_vhw = valid[0] if valid is not None else None
+                    k_cluster = 20
+                    gt_np = batch["context"]["instance_mask"][0].detach().cpu().numpy().astype(np.int32)
+                    unique_gt = np.unique(gt_np)
+                    unique_gt = unique_gt[unique_gt != 0]
+                    if len(unique_gt) > 0:
+                        k_cluster = max(2, min(k_cluster, len(unique_gt) + 2))
+                    pred_labels = cluster_instance_embeddings(
+                        feat_map, valid_vhw, k=k_cluster, seed=0
+                    )
+                    gt_contig = np.zeros_like(gt_np, dtype=np.int32)
+                    id_to_contig = {int(i): (j + 1) for j, i in enumerate(unique_gt.tolist())}
+                    for i, j in id_to_contig.items():
+                        gt_contig[gt_np == i] = int(j)
+                    pred_lut = make_color_lut(max(1, k_cluster + 1), seed=0)
+                    gt_lut = make_color_lut(max(1, len(unique_gt) + 1), seed=1)
+                    dev = context_img.device
+                    pred_colored = [
+                        torch.from_numpy(colorize_labels(pred_labels[vi], pred_lut, ignore_label=0))
+                        .permute(2, 0, 1).float().to(dev) / 255.0
+                        for vi in range(V)
+                    ]
+                    gt_colored = [
+                        torch.from_numpy(colorize_labels(gt_contig[vi], gt_lut, ignore_label=0))
+                        .permute(2, 0, 1).float().to(dev) / 255.0
+                        for vi in range(V)
+                    ]
+                    pca_vis = pca_visualize_embeddings(feat_map, valid_vhw)
+                    pca_list = [pca_vis[vi] for vi in range(V)]
+                    ctx_list = [context_img[vi] for vi in range(V)]
+                    instance_comparison = hcat(
+                        add_label(vcat(*ctx_list), "Context"),
+                        add_label(vcat(*pred_colored), "Clustered Instance"),
+                        add_label(vcat(*gt_colored), "GT ID Map"),
+                        add_label(vcat(*pca_list), "PCA Instance"),
+                    )
+                    instance_comparison = torch.nn.functional.interpolate(
+                        instance_comparison.unsqueeze(0),
+                        scale_factor=0.5,
+                        mode="bicubic",
+                        align_corners=False,
+                    ).squeeze(0)
+                    self.logger.log_image(
+                        "instance_comparison",
+                        [prep_image(add_border(instance_comparison))],
+                        step=self.global_step,
+                        caption=batch["scene"],
+                    )
                 if self.encoder_visualizer is not None:
                     for k, image in self.encoder_visualizer.visualize(
                         batch["context"], self.global_step

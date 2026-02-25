@@ -35,6 +35,7 @@ class TrainerCfg:
     num_nodes: int = 1
     accumulate_grad_batches: int = 1
     precision: Literal["32", "16-mixed", "bf16-mixed"] = "32"
+    limit_val_batches: int | float | None = 1
 
 
 @dataclass
