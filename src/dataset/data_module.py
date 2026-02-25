@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from lightning.pytorch import LightningDataModule
 from torch import Generator, nn
-from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
 
 from src.dataset import *
 from src.global_cfg import get_cfg
@@ -15,7 +15,7 @@ from src.global_cfg import get_cfg
 
 from ..misc.step_tracker import StepTracker
 from ..misc.utils import get_world_size, get_rank
-from . import DatasetCfgWrapper, get_dataset
+from . import DatasetCfgWrapper, ValDatasetWrapper, get_dataset
 from .types import DataShim, Stage
 from .data_sampler import BatchedRandomSampler, MixedBatchSampler, custom_collate_fn
 from .validation_wrapper import ValidationWrapper
@@ -151,40 +151,22 @@ class DataModule(LightningDataModule):
 
     def val_dataloader(self):
         dataset, datasets_ls = get_dataset(self.dataset_cfgs, "val", self.step_tracker, self.dataset_shim)
-        world_size = get_world_size()
-        rank = get_rank()
-        # Val uses MixedBatchSampler with DynamicDistributedSampler per dataset (world_size/rank),
-        # so each rank gets the same number of batches and participates in the same validation round.
-        # here, we random select one dataset for val
         dataset_key = next(iter(get_cfg()["dataset"]))
         dataset_cfg = get_cfg()["dataset"][dataset_key]
-        if len(datasets_ls) > 1:
-             prob = [0.5] * len(datasets_ls)
-        else:
-            prob = None
-        sampler = MixedBatchSampler(datasets_ls, 
-                                    batch_size=self.data_loader_cfg.train.batch_size, 
-                                    num_context_views=dataset_cfg['view_sampler']['num_context_views'], 
-                                    world_size=world_size, 
-                                    rank=rank,
-                                    prob=prob,
-                                    generator=self.get_generator(self.data_loader_cfg.train))
-        sampler.set_epoch(0)
+        num_context_views = dataset_cfg['view_sampler']['num_context_views']
+        patchsize_h = dataset_cfg['input_image_shape'][0] // 14
+
+        val_dataset = ValDatasetWrapper(dataset, num_context_views, patchsize_h)
+        sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=True)
         self.val_loader = DataLoader(
-            dataset,
-            self.data_loader_cfg.val.batch_size,
+            val_dataset,
+            batch_size=self.data_loader_cfg.val.batch_size,
             num_workers=self.data_loader_cfg.val.num_workers,
             sampler=sampler,
             generator=self.get_generator(self.data_loader_cfg.val),
             worker_init_fn=worker_init_fn,
             persistent_workers=self.get_persistent(self.data_loader_cfg.val),
         )
-        if hasattr(self.val_loader, "dataset") and hasattr(self.val_loader.dataset, "set_epoch"):
-            logger.debug("Validation: Set Epoch in DataModule")
-            self.val_loader.dataset.set_epoch(0)
-        if hasattr(self.val_loader, "sampler") and hasattr(self.val_loader.sampler, "set_epoch"):
-            logger.debug("Validation: Set Epoch in DataModule")
-            self.val_loader.sampler.set_epoch(0)
         return self.val_loader
 
     def test_dataloader(self):

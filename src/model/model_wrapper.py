@@ -625,9 +625,10 @@ class ModelWrapper(LightningModule):
 
         diff_map = torch.abs(output.depth - depth_dict['depth'].squeeze(-1))
         try:
-            self.log("val/consis_mse", diff_map[distill_infos['conf_mask']].mean())
+            consis_mse = diff_map[distill_infos['conf_mask']].mean()
         except Exception:
-            pass
+            consis_mse = torch.tensor(0.0, device=diff_map.device)
+        self.log("val/consis_mse", consis_mse)
 
         # Rank-0-only: logging, comparison image, log_image, render_video (avoid duplicate + NCCL sync).
         if self.trainer.global_rank == 0:

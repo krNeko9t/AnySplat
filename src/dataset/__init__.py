@@ -31,6 +31,23 @@ class TestDatasetWarpper(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+
+class ValDatasetWrapper(Dataset):
+    """Wraps a CustomConcatDataset so that plain integer indices (from
+    DistributedSampler) are converted to the (index, num_context_views,
+    patchsize_h) tuples that the underlying datasets expect."""
+
+    def __init__(self, dataset: ConcatDataset, num_context_views: int, patchsize_h: int):
+        self.dataset = dataset
+        self.num_context_views = num_context_views
+        self.patchsize_h = patchsize_h
+
+    def __getitem__(self, idx: int):
+        return self.dataset[(idx, self.num_context_views, self.patchsize_h)]
+
+    def __len__(self):
+        return len(self.dataset)
+
         
     
 class CustomConcatDataset(ConcatDataset):
