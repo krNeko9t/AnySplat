@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -129,13 +130,16 @@ class DatasetCustom(Dataset):
         return K
 
     def getitem(self, index: int, num_context_views: int, patchsize: tuple[int, int]) -> dict:
+        t0 = time.monotonic()
         scene = self.scenes[index]
         scene_id = str(scene.get("scene_id", index))
         if self.stage == "val":
             logger.info(
-                "[DatasetCustom] Loading val sample scene_id=%s num_context_views=%s",
+                "[DatasetCustom] Loading val sample scene_id=%s num_context_views=%s index=%s patch=%s",
                 scene_id,
                 num_context_views,
+                index,
+                patchsize,
             )
         frames = scene.get("frames") or scene.get("views") or scene.get("images")
         if frames is None or len(frames) < 2:
@@ -159,12 +163,14 @@ class DatasetCustom(Dataset):
         extrinsics = torch.stack(extrinsics, dim=0)
         intrinsics = torch.stack(intrinsics, dim=0)
 
+        t_sample0 = time.monotonic()
         context_indices, target_indices, overlap = self.view_sampler.sample(
             scene_id,
             num_context_views,
             extrinsics,
             intrinsics,
         )
+        t_sample = time.monotonic() - t_sample0
 
         # Load selected frames.
         def load_stack(indices: Tensor):
@@ -174,10 +180,21 @@ class DatasetCustom(Dataset):
                 rgb_path = self._as_path(fr.get("rgb_path") or fr.get("image_path") or fr["rgb"])
                 depth_path = self._as_path(fr.get("depth_path") or fr["depth"])
                 inst_path = self._as_path(fr.get("instance_mask_path") or fr.get("mask_path") or fr["instance_mask"])
-
-                img = self._load_rgb(rgb_path)
-                depth = self._load_depth(depth_path)
-                inst = self._load_instance(inst_path)
+                try:
+                    img = self._load_rgb(rgb_path)
+                    depth = self._load_depth(depth_path)
+                    inst = self._load_instance(inst_path)
+                except Exception as e:
+                    # Make I/O/data corruption obvious in per-rank logs.
+                    logger.exception(
+                        "[DatasetCustom] Failed loading files for scene_id=%s frame_idx=%s rgb=%s depth=%s inst=%s",
+                        scene_id,
+                        i,
+                        str(rgb_path),
+                        str(depth_path),
+                        str(inst_path),
+                    )
+                    raise
 
                 imgs.append(img)
                 depths.append(depth)
@@ -192,8 +209,10 @@ class DatasetCustom(Dataset):
             valid_mask = (depth_t > 0) & torch.isfinite(depth_t) & (depth_t < float(self.cfg.depth_invalid_value))
             return images, depth_t, inst_t, torch.stack(Ks, dim=0), valid_mask
 
+        t_io0 = time.monotonic()
         context_images, context_depths, context_inst, context_K, context_valid = load_stack(context_indices)
         target_images, target_depths, target_inst, target_K, target_valid = load_stack(target_indices)
+        t_io = time.monotonic() - t_io0
 
         example = {
             "context": {
@@ -232,6 +251,22 @@ class DatasetCustom(Dataset):
 
         if self.stage == "train" and getattr(self.cfg, "augment", False):
             example = apply_augmentation_shim(example)
+
+        if self.stage == "val":
+            # Only emit extra info when something is slow, to keep logs usable.
+            dt = time.monotonic() - t0
+            slow_s = float(getattr(self.cfg, "val_log_slow_threshold_s", 5.0)) if hasattr(self.cfg, "val_log_slow_threshold_s") else 5.0
+            if dt >= slow_s:
+                logger.warning(
+                    "[DatasetCustom] Slow val sample scene_id=%s index=%s dt=%.3fs (sample=%.3fs io=%.3fs) ctx=%s tgt=%s",
+                    scene_id,
+                    index,
+                    dt,
+                    t_sample,
+                    t_io,
+                    context_indices.tolist(),
+                    target_indices.tolist(),
+                )
 
         return example
 

@@ -188,6 +188,20 @@ class ModelWrapper(LightningModule):
         if hasattr(self.trainer.datamodule.train_loader.sampler, "set_epoch"):
             self.trainer.datamodule.train_loader.sampler.set_epoch(self.current_epoch)
 
+    def on_train_batch_start(self, batch, batch_idx: int, dataloader_idx: int = 0) -> None:
+        # Low-frequency heartbeat on every rank to detect where a hang begins.
+        try:
+            step = int(self.global_step)
+        except Exception:
+            step = -1
+        if step >= 0 and (step % 500 == 0):
+            logger.info(
+                "Train batch start step=%s batch_idx=%s rank=%s",
+                step,
+                batch_idx,
+                self.trainer.global_rank,
+            )
+
     def on_validation_epoch_start(self) -> None:
         logger.info("Validation epoch start on rank %s", self.trainer.global_rank)
         # our custom dataset and sampler has to have epoch set by calling set_epoch
@@ -195,6 +209,21 @@ class ModelWrapper(LightningModule):
             self.trainer.datamodule.val_loader.dataset.set_epoch(self.current_epoch)
         if hasattr(self.trainer.datamodule.val_loader.sampler, "set_epoch"):
             self.trainer.datamodule.val_loader.sampler.set_epoch(self.current_epoch)
+
+    def on_validation_batch_start(self, batch, batch_idx: int, dataloader_idx: int = 0) -> None:
+        logger.info(
+            "Validation batch start step=%s batch_idx=%s rank=%s",
+            int(self.global_step),
+            batch_idx,
+            self.trainer.global_rank,
+        )
+
+    def on_validation_epoch_end(self) -> None:
+        logger.info(
+            "Validation epoch end step=%s rank=%s",
+            int(self.global_step),
+            self.trainer.global_rank,
+        )
         
     def training_step(self, batch, batch_idx):
         # combine batch from different dataloaders

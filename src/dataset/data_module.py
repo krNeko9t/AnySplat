@@ -106,6 +106,15 @@ class DataModule(LightningDataModule):
         dataset, datasets_ls = get_dataset(self.dataset_cfgs, "train", self.step_tracker, self.dataset_shim)
         world_size = get_world_size()
         rank = get_rank()
+        logger.info(
+            "[DataModule] train_dataloader build rank=%s world_size=%s dataset_len=%s num_datasets=%s workers=%s batch_size=%s",
+            rank,
+            world_size,
+            len(dataset),
+            len(datasets_ls),
+            self.data_loader_cfg.train.num_workers,
+            self.data_loader_cfg.train.batch_size,
+        )
         # breakpoint()
         prob_ls = [prob_mapping[type(dataset)] for dataset in datasets_ls]
         # we assume all the dataset share the same num_context_views
@@ -158,6 +167,24 @@ class DataModule(LightningDataModule):
 
         val_dataset = ValDatasetWrapper(dataset, num_context_views, patchsize_h)
         sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=True)
+        # Helpful to detect per-rank length mismatches.
+        try:
+            num_samples = getattr(sampler, "num_samples", None)
+            total_size = getattr(sampler, "total_size", None)
+        except Exception:
+            num_samples = None
+            total_size = None
+        logger.info(
+            "[DataModule] val_dataloader build rank=%s world_size=%s val_len=%s sampler(num_samples=%s total_size=%s drop_last=%s) workers=%s batch_size=%s",
+            get_rank(),
+            get_world_size(),
+            len(val_dataset),
+            num_samples,
+            total_size,
+            True,
+            self.data_loader_cfg.val.num_workers,
+            self.data_loader_cfg.val.batch_size,
+        )
         self.val_loader = DataLoader(
             val_dataset,
             batch_size=self.data_loader_cfg.val.batch_size,

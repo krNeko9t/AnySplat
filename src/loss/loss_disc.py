@@ -128,6 +128,8 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         self.extra_logs: dict[str, Tensor] = {}
 
         if depth_dict is None:
+            if global_step % 100 == 0:
+                print(f"[LossDisc dbg step={global_step}] depth_dict is None → return 0")
             return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
 
         feat_map: Tensor | None = depth_dict.get("instance_feat_map")
@@ -135,16 +137,27 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         valid_mask: Tensor | None = depth_dict.get("instance_valid_mask")
 
         if feat_map is None or inst_mask is None:
+            if global_step % 100 == 0:
+                print(f"[LossDisc dbg step={global_step}] feat_map={feat_map is not None}, inst_mask={inst_mask is not None} → return 0")
             return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
 
         B, V, C, H, W = feat_map.shape
         device = feat_map.device
+
+        if global_step % 100 == 0:
+            print(f"[LossDisc dbg step={global_step}] feat_map={feat_map.shape} inst_mask={inst_mask.shape} valid_mask={valid_mask.shape if valid_mask is not None else None}")
+            print(f"  inst_mask unique (pre-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
+            if valid_mask is not None:
+                print(f"  valid_mask sum={valid_mask.sum().item()}/{valid_mask.numel()}")
 
         # Apply valid mask to instance labels (set invalid pixels to ignore_id).
         if valid_mask is not None:
             if valid_mask.shape[-1] == 1:
                 valid_mask = valid_mask.squeeze(-1)
             inst_mask = inst_mask * valid_mask.long()
+
+        if global_step % 100 == 0:
+            print(f"  inst_mask unique (post-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
 
         # Flatten batch and view dimensions.
         feat_flat = feat_map.view(B * V, C, H, W)
@@ -169,6 +182,9 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
 
         if num_valid > 0:
             total_loss = total_loss / num_valid
+
+        if global_step % 100 == 0:
+            print(f"  num_valid={num_valid}/{B*V}, total_loss={total_loss.item():.6f}")
 
         loss = float(self.cfg.weight) * total_loss
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
