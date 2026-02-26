@@ -3,12 +3,14 @@ from pathlib import Path
 import gc
 import logging
 import random
+import threading
 
 import numpy as np
 from typing import Literal, Optional, Protocol, runtime_checkable, Any
 
 import moviepy.editor as mpy
 import torch
+import torch.distributed as dist
 import torchvision
 import wandb
 from einops import pack, rearrange, repeat
@@ -70,6 +72,24 @@ from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .ply_export import export_ply
 
 logger = logging.getLogger(__name__)
+
+
+def _write_video_async(path: Path, tensor, fps: int = 30) -> None:
+    """Encode and write a video file in a daemon thread.
+
+    NFS / GPFS writes can block for minutes under load.  Offloading the I/O
+    to a fire-and-forget daemon thread prevents rank 0 from stalling inside
+    ``validation_step``, which would cause NCCL timeouts on the other ranks.
+    """
+    def _worker():
+        try:
+            clip = mpy.ImageSequenceClip(list(tensor), fps=fps)
+            clip.write_videofile(str(path), logger=None)
+        except Exception as exc:
+            logger.warning("Background video write to %s failed: %s", path, exc)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
 
 
 @dataclass
@@ -667,6 +687,12 @@ class ModelWrapper(LightningModule):
             consis_mse = torch.tensor(0.0, device=diff_map.device)
         self.log("val/consis_mse", consis_mse)
 
+        # Barrier: all ranks must finish metric logging before rank 0 starts
+        # the heavier visualization work (image comparison, video rendering).
+        # Without this, rank 0 can fall behind and miss the next NCCL collective.
+        if dist.is_initialized():
+            dist.barrier()
+
         # Rank-0-only: logging, comparison image, log_image, render_video (avoid duplicate + NCCL sync).
         if self.trainer.global_rank == 0:
             logger.info(
@@ -770,6 +796,12 @@ class ModelWrapper(LightningModule):
                 if self.train_cfg.extended_visualization:
                     self.render_video_interpolation_exaggerated(batch)
 
+        # Final barrier so every rank exits validation_step together.
+        # Prevents desync between rank 0 (visualization overhead) and the
+        # others when Lightning proceeds to post-validation callbacks.
+        if dist.is_initialized():
+            dist.barrier()
+
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:
         def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
@@ -860,55 +892,57 @@ class ModelWrapper(LightningModule):
         smooth: bool = True,
         loop_reverse: bool = True,
     ) -> None:
-        # Render probabilistic estimate of scene. Use predicted poses for trajectory
-        # so cameras and gaussians stay in the same coordinate system.
-        encoder_output = self.model.encoder((batch["context"]["image"]+1)/2, self.global_step)
-        gaussians = encoder_output.gaussians
-        pred_ext = encoder_output.pred_context_pose["extrinsic"]
-        pred_intr = encoder_output.pred_context_pose["intrinsic"]
-
-        t = torch.linspace(0, 1, num_frames, dtype=torch.float32, device=self.device)
-        if smooth:
-            t = (torch.cos(torch.pi * (t + 1)) + 1) / 2
-
-        extrinsics, intrinsics = trajectory_fn(t, pred_ext, pred_intr)
-        if extrinsics is None:
-            return
-
-        _, _, _, h, w = batch["context"]["image"].shape
-
-        # TODO: Interpolate near and far planes?
-        near = repeat(batch["context"]["near"][:, 0], "b -> b v", v=num_frames)
-        far = repeat(batch["context"]["far"][:, 0], "b -> b v", v=num_frames)
-        output = self.model.decoder.forward(
-            gaussians, extrinsics, intrinsics, near, far, (h, w), "depth"
-        )
-        images = [
-            vcat(rgb, depth)
-            for rgb, depth in zip(output.color[0], vis_depth_map(output.depth[0]))
-        ]
-
-        video = torch.stack(images)
-        video = (video.clip(min=0, max=1) * 255).type(torch.uint8).cpu().numpy()
-        if loop_reverse:
-            video = pack([video, video[::-1][1:-1]], "* c h w")[0]
-        visualizations = {
-            f"video/{name}": wandb.Video(video[None], fps=30, format="mp4")
-        }
-            
-        # Since the PyTorch Lightning doesn't support video logging, log to wandb directly.
         try:
-            wandb.log(visualizations)
-        except Exception:
-            assert isinstance(self.logger, LocalLogger)
-            for key, value in visualizations.items():
-                tensor = value._prepare_video(value.data)
-                clip = mpy.ImageSequenceClip(list(tensor), fps=30)
-                dir = LOG_PATH / key
-                dir.mkdir(exist_ok=True, parents=True)
-                clip.write_videofile(
-                    str(dir / f"{self.global_step:0>6}.mp4"), logger=None
-                )
+            encoder_output = self.model.encoder((batch["context"]["image"]+1)/2, self.global_step)
+            gaussians = encoder_output.gaussians
+            pred_ext = encoder_output.pred_context_pose["extrinsic"]
+            pred_intr = encoder_output.pred_context_pose["intrinsic"]
+
+            t = torch.linspace(0, 1, num_frames, dtype=torch.float32, device=self.device)
+            if smooth:
+                t = (torch.cos(torch.pi * (t + 1)) + 1) / 2
+
+            extrinsics, intrinsics = trajectory_fn(t, pred_ext, pred_intr)
+            if extrinsics is None:
+                return
+
+            _, _, _, h, w = batch["context"]["image"].shape
+
+            # TODO: Interpolate near and far planes?
+            near = repeat(batch["context"]["near"][:, 0], "b -> b v", v=num_frames)
+            far = repeat(batch["context"]["far"][:, 0], "b -> b v", v=num_frames)
+            output = self.model.decoder.forward(
+                gaussians, extrinsics, intrinsics, near, far, (h, w), "depth"
+            )
+            images = [
+                vcat(rgb, depth)
+                for rgb, depth in zip(output.color[0], vis_depth_map(output.depth[0]))
+            ]
+
+            video = torch.stack(images)
+            video = (video.clip(min=0, max=1) * 255).type(torch.uint8).cpu().numpy()
+            if loop_reverse:
+                video = pack([video, video[::-1][1:-1]], "* c h w")[0]
+            visualizations = {
+                f"video/{name}": wandb.Video(video[None], fps=30, format="mp4")
+            }
+
+            # Since the PyTorch Lightning doesn't support video logging, log to wandb directly.
+            try:
+                wandb.log(visualizations)
+            except Exception:
+                if not isinstance(self.logger, LocalLogger):
+                    return
+                for key, value in visualizations.items():
+                    tensor = value._prepare_video(value.data)
+                    vid_dir = LOG_PATH / key
+                    vid_dir.mkdir(exist_ok=True, parents=True)
+                    vid_path = vid_dir / f"{self.global_step:0>6}.mp4"
+                    # Write video in a daemon thread so NFS latency cannot block
+                    # the training loop and cause NCCL timeouts on other ranks.
+                    _write_video_async(vid_path, tensor)
+        except Exception as exc:
+            logger.warning("render_video_generic(%s) failed: %s", name, exc)
 
     def print_preview_metrics(self, metrics: dict[str, float | Tensor], methods: list[str] | None = None, overlap_tag: str | None = None) -> None:
         if getattr(self, "running_metrics", None) is None:

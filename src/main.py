@@ -12,7 +12,7 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
-from lightning.pytorch.strategies import DeepSpeedStrategy
+from lightning.pytorch.strategies import DDPStrategy, DeepSpeedStrategy
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 
@@ -115,7 +115,7 @@ def train(cfg_dict: DictConfig):
         logger=logger,
         devices="auto",
         strategy=(
-            "ddp_find_unused_parameters_true"
+            DDPStrategy(find_unused_parameters=False, static_graph=True)
             if torch.cuda.device_count() > 1
             else "auto"
         ),
