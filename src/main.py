@@ -115,7 +115,7 @@ def train(cfg_dict: DictConfig):
         logger=logger,
         devices="auto",
         strategy=(
-            DDPStrategy(find_unused_parameters=False, static_graph=True)
+            DDPStrategy(find_unused_parameters=False, broadcast_buffers=False)
             if torch.cuda.device_count() > 1
             else "auto"
         ),

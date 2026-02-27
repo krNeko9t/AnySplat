@@ -10,7 +10,6 @@ from typing import Literal, Optional, Protocol, runtime_checkable, Any
 
 import moviepy.editor as mpy
 import torch
-import torch.distributed as dist
 import torchvision
 import wandb
 from einops import pack, rearrange, repeat
@@ -687,13 +686,7 @@ class ModelWrapper(LightningModule):
             consis_mse = torch.tensor(0.0, device=diff_map.device)
         self.log("val/consis_mse", consis_mse)
 
-        # Barrier: all ranks must finish metric logging before rank 0 starts
-        # the heavier visualization work (image comparison, video rendering).
-        # Without this, rank 0 can fall behind and miss the next NCCL collective.
-        if dist.is_initialized():
-            dist.barrier()
-
-        # Rank-0-only: logging, comparison image, log_image, render_video (avoid duplicate + NCCL sync).
+        # Rank-0-only: logging, comparison image, log_image, render_video (avoid duplicate work).
         if self.trainer.global_rank == 0:
             logger.info(
                 "validation step %s; scene = %s; context = %s",
@@ -795,12 +788,6 @@ class ModelWrapper(LightningModule):
                 self.render_video_wobble(batch)
                 if self.train_cfg.extended_visualization:
                     self.render_video_interpolation_exaggerated(batch)
-
-        # Final barrier so every rank exits validation_step together.
-        # Prevents desync between rank 0 (visualization overhead) and the
-        # others when Lightning proceeds to post-validation callbacks.
-        if dist.is_initialized():
-            dist.barrier()
 
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:
