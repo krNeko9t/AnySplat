@@ -6,7 +6,11 @@ Implements the discriminative loss from De Brabandere et al. (2017):
   * Push loss: penalise pairs of instance means that are closer than
     ``2 * delta_d``.
 
-Unlike the MVC contrastive loss, this operates per-image (not cross-view).
+When ``multi_view`` is False (default), operates per-image independently.
+When ``multi_view`` is True, all views of the same batch item are merged
+so that per-instance means are computed across views, providing implicit
+cross-view consistency (same physical instance in different views is pulled
+toward a shared global mean).
 
 Expected inputs (provided via ``depth_dict`` by the training loop):
   - depth_dict['instance_feat_map']: Float[Tensor] shaped [B, V, N, H, W]
@@ -35,6 +39,12 @@ class LossDiscCfg:
     delta_v: float = 0.5
     delta_d: float = 1.5
     ignore_id: int = 0
+    # --- new optional knobs (all default to legacy behaviour) ---
+    multi_view: bool = False
+    alpha_var: float = 1.0
+    alpha_dist: float = 1.0
+    soft_push_weight: float = 0.0
+    soft_pull_weight: float = 0.0
 
 
 @dataclass
@@ -49,8 +59,9 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         super().__init__(cfg)
 
     # ------------------------------------------------------------------
-    # Core discriminative loss (operates on a single [C, H, W] feature map
-    # with a corresponding [H, W] instance label map).
+    # Core discriminative loss.  Accepts any [C, *spatial] embedding
+    # with a matching [*spatial] label map (works for single-view
+    # [C, H, W] or multi-view merged [C, V*H*W]).
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -60,58 +71,78 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         delta_v: float = 0.5,
         delta_d: float = 1.5,
         ignore_id: int = 0,
-    ) -> Tensor:
-        """Compute discriminative loss for a single image.
+        alpha_var: float = 1.0,
+        alpha_dist: float = 1.0,
+        soft_push_weight: float = 0.0,
+        soft_pull_weight: float = 0.0,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Compute discriminative loss for one sample.
 
         Parameters
         ----------
-        embedding : Tensor [C, H, W]
-        seg_gt : Tensor [H, W]  (integer instance ids)
-        delta_v : float
-            Pull hinge margin (per-instance variance).
-        delta_d : float
-            Push hinge margin (inter-instance distance).
-        ignore_id : int
-            Instance id to ignore (e.g. background=0).
+        embedding : Tensor [C, N]  (N = H*W for single view, V*H*W for merged)
+        seg_gt : Tensor [N]  (integer instance ids)
+        delta_v / delta_d : hinge margins (same semantics as De Brabandere 2017)
+        alpha_var / alpha_dist : independent weights for pull / push terms
+        soft_push_weight : weight for a continuous exp-based push (0 = off)
+        soft_pull_weight : weight for a continuous mean-distance pull (0 = off)
 
         Returns
         -------
-        Tensor (scalar)
+        (total_loss, l_var_weighted, l_dist_weighted)  — all scalars
         """
-        unique_ids = torch.unique(seg_gt)
+        seg_flat = seg_gt.reshape(-1)
+        emb_flat = embedding.reshape(embedding.shape[0], -1)  # [C, N]
+
+        unique_ids = torch.unique(seg_flat)
         unique_ids = unique_ids[unique_ids != ignore_id]
         num_instances = len(unique_ids)
 
+        _zero = torch.tensor(0.0, device=embedding.device, dtype=embedding.dtype)
         if num_instances == 0:
-            return torch.tensor(0.0, device=embedding.device, dtype=embedding.dtype)
+            return _zero, _zero, _zero
 
         mu_list: list[Tensor] = []
-        l_var = embedding.new_tensor(0.0)
+        l_var = emb_flat.new_tensor(0.0)
+        l_soft_pull = emb_flat.new_tensor(0.0)
 
         for inst_id in unique_ids:
-            mask = seg_gt == inst_id
-            masked_emb = embedding[:, mask]  # [C, N_pixels]
-            mean = masked_emb.mean(dim=1)    # [C]
+            mask = seg_flat == inst_id
+            masked_emb = emb_flat[:, mask]          # [C, N_pixels]
+            mean = masked_emb.mean(dim=1)           # [C]
             mu_list.append(mean)
 
             dist = torch.norm(masked_emb - mean.unsqueeze(1), dim=0)  # [N_pixels]
             l_var = l_var + torch.clamp(dist - delta_v, min=0).pow(2).mean()
 
+            if soft_pull_weight > 0:
+                l_soft_pull = l_soft_pull + dist.mean()
+
         l_var = l_var / num_instances
+        l_soft_pull = l_soft_pull / num_instances
 
-        l_dist = embedding.new_tensor(0.0)
+        l_dist = emb_flat.new_tensor(0.0)
+        l_soft_push = emb_flat.new_tensor(0.0)
         if num_instances > 1:
-            mu = torch.stack(mu_list)            # [K, C]
-            mu_a = mu.unsqueeze(0)               # [1, K, C]
-            mu_b = mu.unsqueeze(1)               # [K, 1, C]
-            dist = torch.norm(mu_a - mu_b, dim=2)  # [K, K]
-
+            mu = torch.stack(mu_list)                    # [K, C]
+            pair_dist = torch.norm(
+                mu.unsqueeze(0) - mu.unsqueeze(1), dim=2
+            )  # [K, K]
             diag_mask = torch.eye(num_instances, device=embedding.device, dtype=torch.bool)
-            off_diag = dist[~diag_mask]
+            off_diag = pair_dist[~diag_mask]
 
             l_dist = torch.clamp(2 * delta_d - off_diag, min=0).pow(2).mean()
 
-        return l_var + l_dist
+            if soft_push_weight > 0:
+                l_soft_push = torch.exp(-off_diag).mean()
+
+        total = (
+            alpha_var * l_var
+            + alpha_dist * l_dist
+            + soft_pull_weight * l_soft_pull
+            + soft_push_weight * l_soft_push
+        )
+        return total, alpha_var * l_var, alpha_dist * l_dist
 
     # ------------------------------------------------------------------
     # AnySplat Loss interface
@@ -159,38 +190,66 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         if global_step % 100 == 0:
             print(f"  inst_mask unique (post-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
 
-        # Flatten batch and view dimensions.
-        feat_flat = feat_map.view(B * V, C, H, W)
-        mask_flat = inst_mask.view(B * V, H, W)
+        multi_view = bool(getattr(self.cfg, "multi_view", False))
+
+        loss_kwargs = dict(
+            delta_v=float(self.cfg.delta_v),
+            delta_d=float(self.cfg.delta_d),
+            ignore_id=int(self.cfg.ignore_id),
+            alpha_var=float(getattr(self.cfg, "alpha_var", 1.0)),
+            alpha_dist=float(getattr(self.cfg, "alpha_dist", 1.0)),
+            soft_push_weight=float(getattr(self.cfg, "soft_push_weight", 0.0)),
+            soft_pull_weight=float(getattr(self.cfg, "soft_pull_weight", 0.0)),
+        )
 
         total_loss = feat_map.new_tensor(0.0)
-        num_valid = 0
         total_var = feat_map.new_tensor(0.0)
         total_dist = feat_map.new_tensor(0.0)
+        num_valid = 0
 
-        for i in range(B * V):
-            loss_i = self._discriminative_loss(
-                feat_flat[i],
-                mask_flat[i],
-                delta_v=float(self.cfg.delta_v),
-                delta_d=float(self.cfg.delta_d),
-                ignore_id=int(self.cfg.ignore_id),
-            )
-            if loss_i > 0:
-                total_loss = total_loss + loss_i
-                num_valid += 1
+        if multi_view:
+            # Merge all views per batch item → cross-view disc loss.
+            for b in range(B):
+                feat_b = feat_map[b].reshape(C, V * H * W)
+                mask_b = inst_mask[b].reshape(V * H * W)
+                loss_b, var_b, dist_b = self._discriminative_loss(
+                    feat_b, mask_b, **loss_kwargs,
+                )
+                if loss_b > 0:
+                    total_loss = total_loss + loss_b
+                    total_var = total_var + var_b
+                    total_dist = total_dist + dist_b
+                    num_valid += 1
+        else:
+            # Legacy: per-view independent disc loss.
+            feat_flat = feat_map.view(B * V, C, H, W)
+            mask_flat = inst_mask.view(B * V, H, W)
+            for i in range(B * V):
+                loss_i, var_i, dist_i = self._discriminative_loss(
+                    feat_flat[i], mask_flat[i], **loss_kwargs,
+                )
+                if loss_i > 0:
+                    total_loss = total_loss + loss_i
+                    total_var = total_var + var_i
+                    total_dist = total_dist + dist_i
+                    num_valid += 1
 
         if num_valid > 0:
             total_loss = total_loss / num_valid
+            total_var = total_var / num_valid
+            total_dist = total_dist / num_valid
 
         if global_step % 100 == 0:
-            print(f"  num_valid={num_valid}/{B*V}, total_loss={total_loss.item():.6f}")
+            mode = "multi_view" if multi_view else "per_view"
+            print(f"  mode={mode} num_valid={num_valid}/{B if multi_view else B*V}, total_loss={total_loss.item():.6f} (var={total_var.item():.6f} dist={total_dist.item():.6f})")
 
         loss = float(self.cfg.weight) * total_loss
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
         self.extra_logs = {
             "disc_loss_raw": total_loss.detach(),
+            "disc_var": total_var.detach(),
+            "disc_dist": total_dist.detach(),
         }
 
         return loss
