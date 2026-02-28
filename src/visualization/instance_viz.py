@@ -138,34 +138,36 @@ def pca_visualize_embeddings(
         feat_flat = torch.cat([feat_flat, pad_flat], dim=1)
         C = 3
 
-    # Standardize (like IGGT) for stable PCA
-    mean = feat_valid.mean(dim=0, keepdim=True)
-    std = feat_valid.std(dim=0, keepdim=True) + 1e-5
-    feat_valid = (feat_valid - mean) / std
-    feat_flat = (feat_flat - mean) / std
-
-    try:
-        _, _, v = torch.pca_lowrank(feat_valid, q=min(C, 256))
-        proj = torch.matmul(feat_flat, v[:, :3])
-    except Exception as e:
-        logging.warning(
-            "pca_visualize_embeddings: PCA 失败 (%s)，改用全图重试",
-            e,
-            exc_info=True,
-        )
+    # Run PCA in float32; autocast can make tensors bfloat16 and pca_lowrank does not support it
+    with torch.amp.autocast(device_type="cuda", enabled=False):
+        feat_valid = feat_valid.float()
+        feat_flat = feat_flat.float()
+        mean = feat_valid.mean(dim=0, keepdim=True)
+        std = feat_valid.std(dim=0, keepdim=True) + 1e-5
+        feat_valid = (feat_valid - mean) / std
+        feat_flat = (feat_flat - mean) / std
         try:
-            mean = feat_flat.mean(dim=0, keepdim=True)
-            std = feat_flat.std(dim=0, keepdim=True) + 1e-5
-            feat_std = (feat_flat - mean) / std
-            _, _, v = torch.pca_lowrank(feat_std, q=min(C, 256))
-            proj = torch.matmul(feat_std, v[:, :3])
-        except Exception as e2:
+            _, _, v = torch.pca_lowrank(feat_valid, q=min(C, 256))
+            proj = torch.matmul(feat_flat, v[:, :3])
+        except Exception as e:
             logging.warning(
-                "pca_visualize_embeddings: 全图 PCA 仍失败，返回全黑 (%s)",
-                e2,
+                "pca_visualize_embeddings: PCA 失败 (%s)，改用全图重试",
+                e,
                 exc_info=True,
             )
-            return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
+            try:
+                mean = feat_flat.mean(dim=0, keepdim=True)
+                std = feat_flat.std(dim=0, keepdim=True) + 1e-5
+                feat_std = (feat_flat - mean) / std
+                _, _, v = torch.pca_lowrank(feat_std, q=min(C, 256))
+                proj = torch.matmul(feat_std, v[:, :3])
+            except Exception as e2:
+                logging.warning(
+                    "pca_visualize_embeddings: 全图 PCA 仍失败，返回全黑 (%s)",
+                    e2,
+                    exc_info=True,
+                )
+                return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
 
     # Percentile normalization: use valid pixels only for range so content is visible
     if valid_vhw is not None:
