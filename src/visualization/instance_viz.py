@@ -167,11 +167,19 @@ def pca_visualize_embeddings(
             )
             return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
 
-    # Percentile normalization with fallback for degenerate range
+    # Percentile normalization: use valid pixels only for range so content is visible
+    if valid_vhw is not None:
+        valid_flat = valid_vhw.reshape(-1)
+        if valid_flat.any():
+            ch_sample = proj[valid_flat]
+        else:
+            ch_sample = proj
+    else:
+        ch_sample = proj
     for i in range(3):
         ch = proj[:, i]
-        v_low = torch.quantile(ch, low_p)
-        v_high = torch.quantile(ch, high_p)
+        v_low = torch.quantile(ch_sample[:, i], low_p)
+        v_high = torch.quantile(ch_sample[:, i], high_p)
         if v_high > v_low:
             proj[:, i] = (ch - v_low) / (v_high - v_low)
         else:
