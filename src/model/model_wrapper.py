@@ -158,6 +158,29 @@ class TrajectoryFn(Protocol):
         pass
 
 
+def _align_gt_trajectory_to_pred(
+    extrinsics: Float[Tensor, "... 4 4"],
+    pred_ext: Float[Tensor, "batch view 4 4"],
+    gt_ext: Float[Tensor, "batch view 4 4"],
+) -> Float[Tensor, "... 4 4"]:
+    """把 GT 轨迹的 extrinsics 对齐到 pred 坐标系（scale + 平移 + 旋转），便于用 pred 的 gaussians 正确渲染。"""
+    pred_0 = pred_ext[0, 0]
+    pred_1 = pred_ext[0, min(1, pred_ext.shape[1] - 1)]
+    gt_0 = gt_ext[0, 0]
+    gt_1 = gt_ext[0, min(1, gt_ext.shape[1] - 1)]
+
+    scale = (pred_1[:3, 3] - pred_0[:3, 3]).norm() / (
+        (gt_1[:3, 3] - gt_0[:3, 3]).norm() + 1e-8
+    )
+    R_align = pred_0[:3, :3] @ gt_0[:3, :3].T
+    t_align = pred_0[:3, 3] - scale * (gt_0[:3, 3])
+
+    out = extrinsics.clone()
+    out[..., :3, :3] = R_align @ extrinsics[..., :3, :3]
+    out[..., :3, 3] = scale * extrinsics[..., :3, 3] + t_align
+    return out
+
+
 class ModelWrapper(LightningModule):
     logger: Optional[WandbLogger]
     model: nn.Module
@@ -810,15 +833,14 @@ class ModelWrapper(LightningModule):
                     delta * 0.25,
                     t,
                 )
+                extrinsics = _align_gt_trajectory_to_pred(
+                    extrinsics, pred_extrinsics, gt_ext
+                )
                 intrinsics = repeat(
                     gt_intr[:, 0],
                     "b i j -> b v i j",
                     v=t.shape[0],
                 )
-                # 对齐到 pred 尺度，避免 GT 与 gaussian 坐标系不一致导致上白下黑
-                scale = pred_extrinsics[:, :, :3, 3].mean() / gt_ext[:, :, :3, 3].mean()
-                extrinsics = extrinsics.clone()
-                extrinsics[..., :3, 3] = extrinsics[..., :3, 3] * scale
                 return extrinsics, intrinsics
         else:
             def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
@@ -857,15 +879,14 @@ class ModelWrapper(LightningModule):
                     gt_ext[0, idx1],
                     t,
                 )
+                extrinsics = _align_gt_trajectory_to_pred(
+                    extrinsics, pred_extrinsics, gt_ext
+                )
                 intrinsics = interpolate_intrinsics(
                     gt_intr[0, 0],
                     gt_intr[0, idx1],
                     t,
                 )
-                # 对齐到 pred 尺度，避免 GT 与 gaussian 坐标系不一致导致上白下黑
-                scale = pred_extrinsics[:, :, :3, 3].mean() / gt_ext[:, :, :3, 3].mean()
-                extrinsics = extrinsics.clone()
-                extrinsics[..., :3, 3] = extrinsics[..., :3, 3] * scale
                 return extrinsics[None], intrinsics[None]
         else:
             def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
