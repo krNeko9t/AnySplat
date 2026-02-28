@@ -798,7 +798,7 @@ class ModelWrapper(LightningModule):
             gt_ext = batch["context"]["extrinsics"]
             gt_intr = batch["context"]["intrinsics"]
 
-            def trajectory_fn(t, _pred_extrinsics, _pred_intrinsics):
+            def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
                 _, v, _, _ = gt_ext.shape
                 if v < 2:
                     return None, None
@@ -815,6 +815,10 @@ class ModelWrapper(LightningModule):
                     "b i j -> b v i j",
                     v=t.shape[0],
                 )
+                # 对齐到 pred 尺度，避免 GT 与 gaussian 坐标系不一致导致上白下黑
+                scale = pred_extrinsics[:, :, :3, 3].mean() / gt_ext[:, :, :3, 3].mean()
+                extrinsics = extrinsics.clone()
+                extrinsics[..., :3, 3] = extrinsics[..., :3, 3] * scale
                 return extrinsics, intrinsics
         else:
             def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
@@ -845,7 +849,7 @@ class ModelWrapper(LightningModule):
             gt_ext = batch["context"]["extrinsics"]
             gt_intr = batch["context"]["intrinsics"]
 
-            def trajectory_fn(t, _pred_extrinsics, _pred_intrinsics):
+            def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
                 _, v, _, _ = gt_ext.shape
                 idx1 = min(1, v - 1)
                 extrinsics = interpolate_extrinsics(
@@ -858,6 +862,10 @@ class ModelWrapper(LightningModule):
                     gt_intr[0, idx1],
                     t,
                 )
+                # 对齐到 pred 尺度，避免 GT 与 gaussian 坐标系不一致导致上白下黑
+                scale = pred_extrinsics[:, :, :3, 3].mean() / gt_ext[:, :, :3, 3].mean()
+                extrinsics = extrinsics.clone()
+                extrinsics[..., :3, 3] = extrinsics[..., :3, 3] * scale
                 return extrinsics[None], intrinsics[None]
         else:
             def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
