@@ -137,6 +137,8 @@ class TrainCfg:
     weight_normal: float = 1.0
     render_ba: bool = False
     render_ba_after_step: int = 0
+    # 为 True 时 val 视频用 dataset GT 位姿生成轨迹，便于每次同一视角对比训练进度；默认 False 保持原逻辑。
+    video_use_gt_trajectory: bool = False
 
 
 @runtime_checkable
@@ -791,45 +793,87 @@ class ModelWrapper(LightningModule):
 
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:
-        def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
-            # Two views are needed to get the wobble radius (use predicted poses).
-            _, v, _, _ = pred_extrinsics.shape
-            if v < 2:
-                return None, None
-            origin_a = pred_extrinsics[:, 0, :3, 3]
-            origin_b = pred_extrinsics[:, 1, :3, 3]
-            delta = (origin_a - origin_b).norm(dim=-1)
-            extrinsics = generate_wobble(
-                pred_extrinsics[:, 0],
-                delta * 0.25,
-                t,
-            )
-            intrinsics = repeat(
-                pred_intrinsics[:, 0],
-                "b i j -> b v i j",
-                v=t.shape[0],
-            )
-            return extrinsics, intrinsics
+        use_gt = getattr(self.train_cfg, "video_use_gt_trajectory", False)
+        if use_gt:
+            gt_ext = batch["context"]["extrinsics"]
+            gt_intr = batch["context"]["intrinsics"]
+
+            def trajectory_fn(t, _pred_extrinsics, _pred_intrinsics):
+                _, v, _, _ = gt_ext.shape
+                if v < 2:
+                    return None, None
+                origin_a = gt_ext[:, 0, :3, 3]
+                origin_b = gt_ext[:, 1, :3, 3]
+                delta = (origin_a - origin_b).norm(dim=-1)
+                extrinsics = generate_wobble(
+                    gt_ext[:, 0],
+                    delta * 0.25,
+                    t,
+                )
+                intrinsics = repeat(
+                    gt_intr[:, 0],
+                    "b i j -> b v i j",
+                    v=t.shape[0],
+                )
+                return extrinsics, intrinsics
+        else:
+            def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
+                _, v, _, _ = pred_extrinsics.shape
+                if v < 2:
+                    return None, None
+                origin_a = pred_extrinsics[:, 0, :3, 3]
+                origin_b = pred_extrinsics[:, 1, :3, 3]
+                delta = (origin_a - origin_b).norm(dim=-1)
+                extrinsics = generate_wobble(
+                    pred_extrinsics[:, 0],
+                    delta * 0.25,
+                    t,
+                )
+                intrinsics = repeat(
+                    pred_intrinsics[:, 0],
+                    "b i j -> b v i j",
+                    v=t.shape[0],
+                )
+                return extrinsics, intrinsics
 
         return self.render_video_generic(batch, trajectory_fn, "wobble", num_frames=60)
 
     @rank_zero_only
     def render_video_interpolation(self, batch: BatchedExample) -> None:
-        def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
-            _, v, _, _ = pred_extrinsics.shape
-            # Use first two predicted views so trajectory stays in gaussian coordinate system.
-            idx1 = min(1, v - 1)
-            extrinsics = interpolate_extrinsics(
-                pred_extrinsics[0, 0],
-                pred_extrinsics[0, idx1],
-                t,
-            )
-            intrinsics = interpolate_intrinsics(
-                pred_intrinsics[0, 0],
-                pred_intrinsics[0, idx1],
-                t,
-            )
-            return extrinsics[None], intrinsics[None]
+        use_gt = getattr(self.train_cfg, "video_use_gt_trajectory", False)
+        if use_gt:
+            gt_ext = batch["context"]["extrinsics"]
+            gt_intr = batch["context"]["intrinsics"]
+
+            def trajectory_fn(t, _pred_extrinsics, _pred_intrinsics):
+                _, v, _, _ = gt_ext.shape
+                idx1 = min(1, v - 1)
+                extrinsics = interpolate_extrinsics(
+                    gt_ext[0, 0],
+                    gt_ext[0, idx1],
+                    t,
+                )
+                intrinsics = interpolate_intrinsics(
+                    gt_intr[0, 0],
+                    gt_intr[0, idx1],
+                    t,
+                )
+                return extrinsics[None], intrinsics[None]
+        else:
+            def trajectory_fn(t, pred_extrinsics, pred_intrinsics):
+                _, v, _, _ = pred_extrinsics.shape
+                idx1 = min(1, v - 1)
+                extrinsics = interpolate_extrinsics(
+                    pred_extrinsics[0, 0],
+                    pred_extrinsics[0, idx1],
+                    t,
+                )
+                intrinsics = interpolate_intrinsics(
+                    pred_intrinsics[0, 0],
+                    pred_intrinsics[0, idx1],
+                    t,
+                )
+                return extrinsics[None], intrinsics[None]
 
         return self.render_video_generic(batch, trajectory_fn, "rgb")
 

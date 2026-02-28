@@ -7,6 +7,9 @@
 defaults:
   - instseg_custom
 
+train:
+  video_use_gt_trajectory: true  # val 视频固定轨迹，便于对比训练进度
+
 wandb:
   name: instseg_insscene15k
   tags: [instseg, insscene15k]
@@ -30,6 +33,10 @@ optimizer:
   lr: 4.0e-4
   warm_up_steps: 3000
 
+trainer:
+  max_steps: 60000
+  val_check_interval: 200
+
 loss:
   disc:
     weight: 1.0
@@ -37,8 +44,8 @@ loss:
     delta_d: 1.5          # 可调大到 2.5
     ignore_id: 0
     # --- 新增开关 ---
-    multi_view: true      # 跨视图 merged disc loss（默认 false）
-    alpha_var: 1.0        # pull 权重（默认 1.0）
-    alpha_dist: 2.0       # push 权重（默认 1.0，可加大）
-    soft_push_weight: 0.5 # continuous exp(-dist) push（默认 0 关闭）
-    soft_pull_weight: 0.1 # continuous mean-dist pull（默认 0 关闭）
+    # multi_view: true      # 跨视图 merged disc loss（默认 false）
+    # alpha_var: 1.0        # pull 权重（默认 1.0）
+    # alpha_dist: 2.0       # push 权重（默认 1.0，可加大）
+    # soft_push_weight: 0.5 # continuous exp(-dist) push（默认 0 关闭）
+    # soft_pull_weight: 0.1 # continuous mean-dist pull（默认 0 关闭）
