@@ -5,6 +5,7 @@ Reusable helpers for visualizing instance_feat_map from instance heads.
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -107,13 +108,25 @@ def pca_visualize_embeddings(
     Returns:
         [V, 3, H, W] float tensor in [0, 1] for RGB visualization.
     """
+    MIN_SAMPLES_FOR_PCA = 10
+
     V, N, H, W = feat_vnhw.shape
     feat_flat = feat_vnhw.permute(0, 2, 3, 1).reshape(-1, N).float()
     if valid_vhw is not None:
         valid_flat = valid_vhw.reshape(-1)
         feat_valid = feat_flat[valid_flat]
-        if feat_valid.numel() == 0:
-            return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
+        n_valid = feat_valid.shape[0]
+        if n_valid == 0:
+            logging.warning(
+                "pca_visualize_embeddings: valid mask 下无有效像素，改用全图做 PCA"
+            )
+            feat_valid = feat_flat
+        elif n_valid < MIN_SAMPLES_FOR_PCA:
+            logging.warning(
+                "pca_visualize_embeddings: 有效像素过少 (%d)，改用全图做 PCA",
+                n_valid,
+            )
+            feat_valid = feat_flat
     else:
         feat_valid = feat_flat
 
@@ -134,8 +147,25 @@ def pca_visualize_embeddings(
     try:
         _, _, v = torch.pca_lowrank(feat_valid, q=min(C, 256))
         proj = torch.matmul(feat_flat, v[:, :3])
-    except Exception:
-        return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
+    except Exception as e:
+        logging.warning(
+            "pca_visualize_embeddings: PCA 失败 (%s)，改用全图重试",
+            e,
+            exc_info=True,
+        )
+        try:
+            mean = feat_flat.mean(dim=0, keepdim=True)
+            std = feat_flat.std(dim=0, keepdim=True) + 1e-5
+            feat_std = (feat_flat - mean) / std
+            _, _, v = torch.pca_lowrank(feat_std, q=min(C, 256))
+            proj = torch.matmul(feat_std, v[:, :3])
+        except Exception as e2:
+            logging.warning(
+                "pca_visualize_embeddings: 全图 PCA 仍失败，返回全黑 (%s)",
+                e2,
+                exc_info=True,
+            )
+            return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
 
     # Percentile normalization with fallback for degenerate range
     for i in range(3):
