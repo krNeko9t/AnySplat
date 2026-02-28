@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from lightning.pytorch import LightningDataModule
 from torch import Generator, nn
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset, SequentialSampler
 
 from src.dataset import *
 from src.global_cfg import get_cfg
@@ -166,14 +166,16 @@ class DataModule(LightningDataModule):
         patchsize_h = dataset_cfg['input_image_shape'][0] // 14
 
         val_dataset = ValDatasetWrapper(dataset, num_context_views, patchsize_h)
-        sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=True)
-        # Helpful to detect per-rank length mismatches.
-        try:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=True)
             num_samples = getattr(sampler, "num_samples", None)
             total_size = getattr(sampler, "total_size", None)
-        except Exception:
-            num_samples = None
-            total_size = None
+            drop_last = True
+        else:
+            sampler = SequentialSampler(val_dataset)
+            num_samples = len(val_dataset)
+            total_size = len(val_dataset)
+            drop_last = False
         logger.info(
             "[DataModule] val_dataloader build rank=%s world_size=%s val_len=%s sampler(num_samples=%s total_size=%s drop_last=%s) workers=%s batch_size=%s",
             get_rank(),
@@ -181,7 +183,7 @@ class DataModule(LightningDataModule):
             len(val_dataset),
             num_samples,
             total_size,
-            True,
+            drop_last,
             self.data_loader_cfg.val.num_workers,
             self.data_loader_cfg.val.batch_size,
         )
