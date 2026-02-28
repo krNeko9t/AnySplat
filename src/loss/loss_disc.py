@@ -20,6 +20,7 @@ Expected inputs (provided via ``depth_dict`` by the training loop):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, fields
 
 import torch
@@ -31,6 +32,8 @@ from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
 from src.model.types import Gaussians
 from .loss import Loss
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -160,7 +163,7 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
 
         if depth_dict is None:
             if global_step % 100 == 0:
-                print(f"[LossDisc dbg step={global_step}] depth_dict is None → return 0")
+                logger.info(f"[LossDisc dbg step={global_step}] depth_dict is None → return 0")
             return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
 
         feat_map: Tensor | None = depth_dict.get("instance_feat_map")
@@ -169,17 +172,17 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
 
         if feat_map is None or inst_mask is None:
             if global_step % 100 == 0:
-                print(f"[LossDisc dbg step={global_step}] feat_map={feat_map is not None}, inst_mask={inst_mask is not None} → return 0")
+                logger.info(f"[LossDisc dbg step={global_step}] feat_map={feat_map is not None}, inst_mask={inst_mask is not None} → return 0")
             return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
 
         B, V, C, H, W = feat_map.shape
         device = feat_map.device
 
         if global_step % 100 == 0:
-            print(f"[LossDisc dbg step={global_step}] feat_map={feat_map.shape} inst_mask={inst_mask.shape} valid_mask={valid_mask.shape if valid_mask is not None else None}")
-            print(f"  inst_mask unique (pre-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
+            logger.info(f"[LossDisc dbg step={global_step}] feat_map={feat_map.shape} inst_mask={inst_mask.shape} valid_mask={valid_mask.shape if valid_mask is not None else None}")
+            logger.info(f"  inst_mask unique (pre-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
             if valid_mask is not None:
-                print(f"  valid_mask sum={valid_mask.sum().item()}/{valid_mask.numel()}")
+                logger.info(f"  valid_mask sum={valid_mask.sum().item()}/{valid_mask.numel()}")
 
         # Apply valid mask to instance labels (set invalid pixels to ignore_id).
         if valid_mask is not None:
@@ -188,7 +191,7 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
             inst_mask = inst_mask * valid_mask.long()
 
         if global_step % 100 == 0:
-            print(f"  inst_mask unique (post-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
+            logger.info(f"  inst_mask unique (post-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
 
         multi_view = bool(getattr(self.cfg, "multi_view", False))
 
@@ -210,7 +213,10 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         if multi_view:
             # Merge all views per batch item → cross-view disc loss.
             for b in range(B):
-                feat_b = feat_map[b].reshape(C, V * H * W)
+                # feat_b = feat_map[b].reshape(C, V * H * W)
+                # feat_map[b] is [V, C, H, W]
+                # 先 permute 成 [C, V, H, W]，再 reshape 成 [C, V*H*W]
+                feat_b = feat_map[b].permute(1, 0, 2, 3).reshape(C, V * H * W)
                 mask_b = inst_mask[b].reshape(V * H * W)
                 loss_b, var_b, dist_b = self._discriminative_loss(
                     feat_b, mask_b, **loss_kwargs,
@@ -241,7 +247,7 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
 
         if global_step % 100 == 0:
             mode = "multi_view" if multi_view else "per_view"
-            print(f"  mode={mode} num_valid={num_valid}/{B if multi_view else B*V}, total_loss={total_loss.item():.6f} (var={total_var.item():.6f} dist={total_dist.item():.6f})")
+            logger.info(f"  mode={mode} num_valid={num_valid}/{B if multi_view else B*V}, total_loss={total_loss.item():.6f} (var={total_var.item():.6f} dist={total_dist.item():.6f})")
 
         loss = float(self.cfg.weight) * total_loss
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
