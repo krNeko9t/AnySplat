@@ -24,18 +24,18 @@ dataset:
 data_loader:
   train:
     num_workers: 8
-    batch_size: 6
+    batch_size: 8
 
 optimizer:
   # Differential LRs:
   # - instance head: lr
   # - everything else: lr * backbone_lr_multiplier
-  lr: 4.0e-4
+  lr: 2.0e-4
   warm_up_steps: 3000
 
 trainer:
   max_steps: 60000
-  val_check_interval: 200
+  val_check_interval: 500
 
 loss:
   disc:
@@ -43,9 +43,12 @@ loss:
     delta_v: 0.5          # 可调小到 0.2
     delta_d: 1.5          # 可调大到 2.5
     ignore_id: 0
-    # --- 新增开关 ---
-    # multi_view: true      # 跨视图 merged disc loss（默认 false）
-    # alpha_var: 1.0        # pull 权重（默认 1.0）
-    # alpha_dist: 2.0       # push 权重（默认 1.0，可加大）
-    # soft_push_weight: 0.5 # continuous exp(-dist) push（默认 0 关闭）
-    # soft_pull_weight: 0.1 # continuous mean-dist pull（默认 0 关闭）
+    # --- 多视角与 soft 开关（可配合 step 做 curriculum）---
+    multi_view: true
+    multi_view_step: 15000   # 第 N 步才启用 multi_view，0 表示从 step 0 就用
+    alpha_var: 1.0
+    alpha_dist: 2.0
+    # soft_push_weight: 0.5
+    # soft_pull_weight: 0.1
+    # soft_step: 20000       # 第 M 步开始把 soft 从 0 线性加到目标值
+    # soft_ramp_steps: 5000   # ramp 持续步数

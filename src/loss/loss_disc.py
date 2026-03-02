@@ -12,6 +12,11 @@ so that per-instance means are computed across views, providing implicit
 cross-view consistency (same physical instance in different views is pulled
 toward a shared global mean).
 
+Optional step-based schedule (non-invasive): set ``multi_view_step`` to
+enable multi_view only when global_step >= N; set ``soft_step`` and
+``soft_ramp_steps`` to ramp ``soft_push_weight`` / ``soft_pull_weight``
+from 0 starting at step M. Use 0 for "from step 0" (legacy behaviour).
+
 Expected inputs (provided via ``depth_dict`` by the training loop):
   - depth_dict['instance_feat_map']: Float[Tensor] shaped [B, V, N, H, W]
   - depth_dict['instance_mask']:     Int64[Tensor] shaped [B, V, H, W]
@@ -48,6 +53,10 @@ class LossDiscCfg:
     alpha_dist: float = 1.0
     soft_push_weight: float = 0.0
     soft_pull_weight: float = 0.0
+    # --- step-based schedule (0 = from step 0, no delay) ---
+    multi_view_step: int = 0   # enable multi_view only when global_step >= this
+    soft_step: int = 0         # start ramping soft_* from 0 at this step
+    soft_ramp_steps: int = 5000  # ramp soft_* to target over this many steps
 
 
 @dataclass
@@ -193,7 +202,22 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         if global_step % 100 == 0:
             logger.info(f"  inst_mask unique (post-valid): {torch.unique(inst_mask.view(-1))[:15].tolist()}, nonzero={inst_mask.count_nonzero().item()}/{inst_mask.numel()}")
 
-        multi_view = bool(getattr(self.cfg, "multi_view", False))
+        # Step-based schedule: only use multi_view when global_step >= multi_view_step
+        multi_view_cfg = bool(getattr(self.cfg, "multi_view", False))
+        multi_view_step = int(getattr(self.cfg, "multi_view_step", 0))
+        multi_view = multi_view_cfg and (global_step >= multi_view_step)
+
+        # Step-based schedule: ramp soft weights from 0 starting at soft_step
+        _soft_step = int(getattr(self.cfg, "soft_step", 0))
+        _soft_ramp = int(getattr(self.cfg, "soft_ramp_steps", 5000))
+        _push_t = float(getattr(self.cfg, "soft_push_weight", 0.0))
+        _pull_t = float(getattr(self.cfg, "soft_pull_weight", 0.0))
+        if _soft_step <= 0 or _soft_ramp <= 0:
+            soft_push_w, soft_pull_w = _push_t, _pull_t
+        else:
+            ramp = min(1.0, max(0.0, (global_step - _soft_step) / _soft_ramp))
+            soft_push_w = _push_t * ramp
+            soft_pull_w = _pull_t * ramp
 
         loss_kwargs = dict(
             delta_v=float(self.cfg.delta_v),
@@ -201,8 +225,8 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
             ignore_id=int(self.cfg.ignore_id),
             alpha_var=float(getattr(self.cfg, "alpha_var", 1.0)),
             alpha_dist=float(getattr(self.cfg, "alpha_dist", 1.0)),
-            soft_push_weight=float(getattr(self.cfg, "soft_push_weight", 0.0)),
-            soft_pull_weight=float(getattr(self.cfg, "soft_pull_weight", 0.0)),
+            soft_push_weight=soft_push_w,
+            soft_pull_weight=soft_pull_w,
         )
 
         total_loss = feat_map.new_tensor(0.0)
@@ -247,7 +271,8 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
 
         if global_step % 100 == 0:
             mode = "multi_view" if multi_view else "per_view"
-            logger.info(f"  mode={mode} num_valid={num_valid}/{B if multi_view else B*V}, total_loss={total_loss.item():.6f} (var={total_var.item():.6f} dist={total_dist.item():.6f})")
+            soft_info = f" soft_push={soft_push_w:.3f} soft_pull={soft_pull_w:.3f}" if (soft_push_w > 0 or soft_pull_w > 0) else ""
+            logger.info(f"  mode={mode} num_valid={num_valid}/{B if multi_view else B*V}, total_loss={total_loss.item():.6f} (var={total_var.item():.6f} dist={total_dist.item():.6f}){soft_info}")
 
         loss = float(self.cfg.weight) * total_loss
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
