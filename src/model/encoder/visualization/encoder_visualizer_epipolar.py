@@ -4,12 +4,12 @@ from typing import Optional
 
 import numpy as np
 import torch
-import wandb
 from einops import rearrange, reduce, repeat
 from jaxtyping import Bool, Float
 from torch import Tensor
 
 from ....dataset.types import BatchedViews
+from ....global_cfg import get_cfg
 from ....misc.heterogeneous_pairings import generate_heterogeneous_index
 from ....visualization.annotation import add_label
 from ....visualization.color_map import apply_color_map, apply_color_map_to_image
@@ -81,8 +81,8 @@ class EncoderVisualizerEpipolar(
             )
 
         # This is kind of hacky for now, since we're using it for short experiments.
-        if self.cfg.export_ply and wandb.run is not None:
-            name = wandb.run._name.split(" ")[0]
+        if self.cfg.export_ply:
+            name = get_cfg()["wandb"]["name"]
             ply_path = Path(f"outputs/gaussians/{name}/{global_step:0>6}.ply")
             export_ply(
                 context["extrinsics"][0, 0],
