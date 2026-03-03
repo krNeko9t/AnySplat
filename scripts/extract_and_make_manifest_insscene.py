@@ -7,8 +7,8 @@ Usage:
   # 1) Extract all zips and build manifest (need enough disk for extracted data)
   python scripts/extract_and_make_manifest_insscene.py \\
     --data_dir /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen \\
-    --extract_dir /path/to/extracted_insscene \\
-    --manifest_out /path/to/extracted_insscene/manifest.jsonl
+    --extract_dir /path/to/processed_infinigen_extracted \\
+    --manifest_out /path/to/processed_infinigen_extracted/manifest.jsonl
 
   # 2) Only build manifest (extract_dir already exists)
   python scripts/extract_and_make_manifest_insscene.py \\
@@ -20,8 +20,8 @@ Usage:
 Then train with root=extract_dir, manifest_path=manifest_out, multi-GPU e.g.:
   CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m \\
     experiment=instseg_custom \\
-    dataset.custom.root=/path/to/extracted_insscene \\
-    dataset.custom.manifest_path=/path/to/extracted_insscene/manifest.jsonl
+    dataset.custom.root=/path/to/processed_infinigen_extracted \\
+    dataset.custom.manifest_path=/path/to/processed_infinigen_extracted/manifest.jsonl
 """
 from __future__ import annotations
 

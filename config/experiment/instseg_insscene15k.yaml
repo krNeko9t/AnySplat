@@ -14,8 +14,8 @@ wandb:
 # 解压后的根目录与 manifest（请先跑 extract_and_make_manifest_insscene.py）
 dataset:
   custom:
-    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/extracted_insscene
-    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/extracted_insscene/manifest.jsonl
+    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted
+    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted/manifest.jsonl
 
 # 多卡时适当增加 num_workers
 data_loader:
