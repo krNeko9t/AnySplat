@@ -11,7 +11,6 @@ from typing import Literal, Optional, Protocol, runtime_checkable, Any
 import moviepy.editor as mpy
 import torch
 import torchvision
-import wandb
 from einops import pack, rearrange, repeat
 from jaxtyping import Float
 from lightning.pytorch import LightningModule
@@ -44,6 +43,7 @@ from ..misc.benchmarker import Benchmarker
 from ..misc.cam_utils import update_pose, get_pnp_pose, rotation_6d_to_matrix
 from ..misc.image_io import prep_image, save_image, save_video
 from ..misc.LocalLogger import LOG_PATH, LocalLogger
+from ..misc.tb_logger import TBLogger
 from ..misc.nn_module_tools import convert_to_buffer
 from ..misc.step_tracker import StepTracker
 from ..misc.utils import inverse_normalize, vis_depth_map, confidence_map, get_overlap_tag
@@ -983,24 +983,32 @@ class ModelWrapper(LightningModule):
             video = (video.clip(min=0, max=1) * 255).type(torch.uint8).cpu().numpy()
             if loop_reverse:
                 video = pack([video, video[::-1][1:-1]], "* c h w")[0]
-            visualizations = {
-                f"video/{name}": wandb.Video(video[None], fps=30, format="mp4")
-            }
+            tag = f"video/{name}"
 
-            # Since the PyTorch Lightning doesn't support video logging, log to wandb directly.
-            try:
-                wandb.log(visualizations)
-            except Exception:
-                if not isinstance(self.logger, LocalLogger):
-                    return
-                for key, value in visualizations.items():
-                    tensor = value._prepare_video(value.data)
-                    vid_dir = LOG_PATH / key
-                    vid_dir.mkdir(exist_ok=True, parents=True)
-                    vid_path = vid_dir / f"{self.global_step:0>6}.mp4"
-                    # Write video in a daemon thread so NFS latency cannot block
-                    # the training loop and cause NCCL timeouts on other ranks.
-                    _write_video_async(vid_path, tensor)
+            if isinstance(self.logger, WandbLogger):
+                try:
+                    import wandb
+                    wandb.log({tag: wandb.Video(video[None], fps=30, format="mp4")})
+                except Exception:
+                    pass
+            elif isinstance(self.logger, TBLogger):
+                # TensorBoard: (N, T, C, H, W), float [0, 1]
+                vid_tensor = torch.from_numpy(video).float() / 255.0
+                if vid_tensor.dim() == 4:
+                    vid_tensor = vid_tensor.unsqueeze(0)
+                self.logger.experiment.add_video(
+                    tag=tag,
+                    vid_tensor=vid_tensor,
+                    global_step=self.global_step,
+                    fps=30,
+                )
+            elif isinstance(self.logger, LocalLogger):
+                vid_dir = LOG_PATH / tag
+                vid_dir.mkdir(exist_ok=True, parents=True)
+                vid_path = vid_dir / f"{self.global_step:0>6}.mp4"
+                # moviepy expects list of (H, W, C); video is (T, C, H, W)
+                frames = [video[i].transpose(1, 2, 0) for i in range(video.shape[0])]
+                _write_video_async(vid_path, frames)
         except Exception as exc:
             logger.warning("render_video_generic(%s) failed: %s", name, exc)
 

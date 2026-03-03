@@ -3,7 +3,10 @@ defaults:
   - model/decoder: splatting_cuda
   - loss: [mse]
   - _self_
-  
+
+# Logger backend: wandb | tensorboard | local
+logger: wandb
+
 wandb:
   project: anysplat
   entity: scene-representation-group

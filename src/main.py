@@ -33,7 +33,7 @@ with install_import_hook(
     from src.dataset.data_module import DataModule
     from src.global_cfg import set_cfg
     from src.loss import get_losses
-    from src.misc.LocalLogger import LocalLogger
+    from src.misc.logging_factory import create_logger
     from src.misc.step_tracker import StepTracker
     from src.misc.wandb_tools import update_checkpoint_path
     from src.model.decoder import get_decoder
@@ -66,25 +66,13 @@ def train(cfg_dict: DictConfig):
     
     cfg.train.output_path = output_dir
     
-    # Set up logging with wandb.
+    # Set up logging from config (logger: wandb | tensorboard | local).
     callbacks = []
-    if cfg_dict.wandb.mode != "disabled":
-        logger = WandbLogger(
-            project=cfg_dict.wandb.project,
-            mode=cfg_dict.wandb.mode,
-            name=f"{cfg_dict.wandb.name} ({output_dir.parent.name}/{output_dir.name})",
-            tags=cfg_dict.wandb.get("tags", None),
-            log_model=False,
-            save_dir=output_dir,
-            config=OmegaConf.to_container(cfg_dict),
-        )
+    logger = create_logger(cfg_dict, output_dir)
+    if isinstance(logger, WandbLogger):
         callbacks.append(LearningRateMonitor("step", True))
-        
-        # On rank != 0, wandb.run is None.
         if wandb.run is not None:
             wandb.run.log_code("src")
-    else:
-        logger = LocalLogger()
     
     # Set up checkpointing.
     callbacks.append(

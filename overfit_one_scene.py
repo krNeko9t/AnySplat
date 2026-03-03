@@ -159,6 +159,7 @@ def main(cfg_dict: DictConfig) -> None:
         from src.dataset.dataset_custom import DatasetCustom
         from src.global_cfg import set_cfg
         from src.loss import get_losses
+        from src.misc.logging_factory import create_logger
         from src.misc.step_tracker import StepTracker
         from src.misc.wandb_tools import update_checkpoint_path
         from src.model.model_wrapper import ModelWrapper
@@ -170,25 +171,13 @@ def main(cfg_dict: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     print(cyan(f"[overfit_one_scene] Saving outputs to {output_dir}"))
 
-    # Logging
+    # Logging (logger: wandb | tensorboard | local)
     callbacks = []
-    if cfg_dict.wandb.mode != "disabled":
-        logger = WandbLogger(
-            project=cfg_dict.wandb.project,
-            mode=cfg_dict.wandb.mode,
-            name=f"{cfg_dict.wandb.name} ({output_dir.parent.name}/{output_dir.name})",
-            tags=cfg_dict.wandb.get("tags", None),
-            log_model=False,
-            save_dir=output_dir,
-            config=OmegaConf.to_container(cfg_dict),
-        )
+    logger = create_logger(cfg_dict, output_dir)
+    if isinstance(logger, WandbLogger):
         callbacks.append(LearningRateMonitor("step", True))
         if wandb.run is not None:
             wandb.run.log_code("src")
-    else:
-        from src.misc.LocalLogger import LocalLogger
-
-        logger = LocalLogger()
 
     # Checkpointing
     ckpt_dir = output_dir / "checkpoints"
