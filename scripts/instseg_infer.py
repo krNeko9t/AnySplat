@@ -1,0 +1,820 @@
+"""Unified AnySplat inference script with modular input/output stages.
+
+Supports two input modes (custom images or dataset), multiple composable
+output modes (2D segmentation, PCA visualization, 3D cluster PLY, video,
+embedding export), and two model loading paths (ModelWrapper+ckpt or
+HuggingFace pretrained).
+
+Examples:
+  # Custom images, HF model, multiple outputs:
+  python scripts/anysplat_infer.py \
+      --image_dir examples/vrnerf/riverview \
+      --outputs seg2d,pca2d,seg3d_ply,video,embedding \
+      --out_dir outputs/my_result
+
+  # Dataset mode with specific scene/views:
+  python scripts/anysplat_infer.py \
+      --run_dir output/my_run --ckpt path/to.ckpt \
+      --scene_id my_scene --context_views 0,1 --target_views 2,3 \
+      --outputs seg2d,pca2d,seg3d_ply
+
+  # Dataset mode with random sampling:
+  python scripts/anysplat_infer.py \
+      --run_dir output/my_run --ckpt path/to.ckpt \
+      --num_context 3 --num_target 2 --seed 42 \
+      --outputs seg3d_ply
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+import os
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InferenceInput:
+    """Unified container for model input, regardless of source."""
+    images: Tensor                          # [1, V, 3, H, W] in [0, 1]
+    meta: dict[str, Any] = field(default_factory=dict)
+    gt_instance_mask: Tensor | None = None  # [1, V, H, W]
+    depth: Tensor | None = None             # [1, V, H, W]
+    intrinsics: Tensor | None = None        # [1, V, 3, 3]
+    extrinsics: Tensor | None = None        # [1, V, 4, 4]
+
+
+@dataclass
+class OutputConfig:
+    """Aggregated output-related CLI args."""
+    k: int = 20
+    cluster_algo: str = "kmeans"
+    kmeans_iters: int = 30
+    max_points: int = 200_000
+    dbscan_eps: float = 0.3
+    dbscan_min_samples: int = 10
+    hdbscan_min_cluster_size: int = 50
+    hdbscan_min_samples: int = 10
+    opacity_threshold: float = 1.0 / 255.0
+    seed: int = 0
+    palette_seed: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Input Stage
+# ---------------------------------------------------------------------------
+
+def _parse_int_list(s: str | None) -> list[int]:
+    if not s:
+        return []
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
+class _FixedSampler:
+    def __init__(self, ctx: list[int], tgt: list[int]):
+        self._ctx = torch.tensor(ctx, dtype=torch.int64)
+        self._tgt = torch.tensor(tgt, dtype=torch.int64)
+
+    @property
+    def num_context_views(self) -> int:
+        return int(self._ctx.numel())
+
+    @property
+    def num_target_views(self) -> int:
+        return int(self._tgt.numel())
+
+    def sample(self, scene, num_context_views, extrinsics, intrinsics, device=torch.device("cpu")):
+        return self._ctx.to(device), self._tgt.to(device), torch.tensor([0.5], device=device, dtype=torch.float32)
+
+
+class _RandomSampler:
+    def __init__(self, num_ctx: int, num_tgt: int, seed: int):
+        self._num_ctx = num_ctx
+        self._num_tgt = num_tgt
+        self._seed = seed
+
+    @property
+    def num_context_views(self) -> int:
+        return self._num_ctx
+
+    @property
+    def num_target_views(self) -> int:
+        return self._num_tgt
+
+    def sample(self, scene, num_context_views, extrinsics, intrinsics, device=torch.device("cpu")):
+        V = int(extrinsics.shape[0])
+        need = self._num_ctx + self._num_tgt
+        if V < need:
+            raise ValueError(f"Scene has {V} views but need {need}")
+        rng = random.Random(self._seed)
+        idx = list(range(V))
+        rng.shuffle(idx)
+        ctx = torch.tensor(idx[: self._num_ctx], dtype=torch.int64, device=device)
+        tgt = torch.tensor(idx[self._num_ctx : self._num_ctx + self._num_tgt], dtype=torch.int64, device=device)
+        return ctx, tgt, torch.tensor([0.5], device=device, dtype=torch.float32)
+
+
+def load_input_images(args: argparse.Namespace) -> InferenceInput:
+    """Load input from a directory of custom images."""
+    from src.utils.image import process_image
+
+    image_dir = Path(args.image_dir)
+    exts = {".png", ".jpg", ".jpeg"}
+    paths = sorted(p for p in image_dir.iterdir() if p.suffix.lower() in exts)
+    if not paths:
+        raise ValueError(f"No images found in {image_dir}")
+
+    imgs = torch.stack([process_image(str(p)) for p in paths], dim=0)  # [V, 3, 448, 448] in [-1, 1]
+    imgs_01 = (imgs + 1.0) * 0.5  # -> [0, 1]
+    images = imgs_01.unsqueeze(0)  # [1, V, 3, H, W]
+
+    meta = {
+        "source": "images",
+        "image_dir": str(image_dir),
+        "image_paths": [str(p) for p in paths],
+        "num_views": len(paths),
+    }
+    print(f"[input] Loaded {len(paths)} images from {image_dir}")
+    return InferenceInput(images=images, meta=meta)
+
+
+def _find_scene_index(scenes: list[dict[str, Any]], scene_id: str) -> int:
+    for i, s in enumerate(scenes):
+        if str(s.get("scene_id", i)) == str(scene_id):
+            return i
+    raise ValueError(f"scene_id={scene_id} not found ({len(scenes)} scenes)")
+
+
+def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
+    """Load input from a dataset using the Hydra config in run_dir."""
+    from omegaconf import OmegaConf
+
+    from src.config import load_typed_root_config
+    from src.dataset.dataset_custom import DatasetCustom
+    from src.global_cfg import set_cfg
+
+    run_dir = Path(args.run_dir)
+    cfg_path = run_dir / ".hydra" / "config.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(cfg_path)
+
+    cfg_dict = OmegaConf.load(str(cfg_path))
+    cfg = load_typed_root_config(cfg_dict)
+    set_cfg(cfg_dict)
+
+    custom_cfg = None
+    for w in cfg.dataset:
+        if hasattr(w, "custom"):
+            custom_cfg = w.custom
+            break
+    if custom_cfg is None:
+        raise ValueError("No custom dataset cfg found in cfg.dataset")
+
+    cli_ctx = _parse_int_list(getattr(args, "context_views", None))
+    cli_tgt = _parse_int_list(getattr(args, "target_views", None))
+
+    if cli_ctx and cli_tgt:
+        sampler = _FixedSampler(cli_ctx, cli_tgt)
+    else:
+        sampler = _RandomSampler(
+            int(getattr(args, "num_context", 2)),
+            int(getattr(args, "num_target", 1)),
+            int(getattr(args, "seed", 0)),
+        )
+
+    ds = DatasetCustom(custom_cfg, "train", sampler)
+
+    scene_id_arg = getattr(args, "scene_id", None)
+    if scene_id_arg:
+        scene_index = _find_scene_index(ds.scenes, scene_id_arg)
+        scene_id = scene_id_arg
+    else:
+        rng = np.random.default_rng(int(getattr(args, "seed", 0)))
+        scene_index = int(rng.integers(0, len(ds.scenes)))
+        scene_id = str(ds.scenes[scene_index].get("scene_id", scene_index))
+
+    ps_h = int(custom_cfg.input_image_shape[0] // 14)
+    ps_w = int(custom_cfg.input_image_shape[1] // 14)
+    example = ds.getitem(scene_index, sampler.num_context_views, (ps_h, ps_w))
+
+    ctx_img = example["context"]["image"].unsqueeze(0)   # [1, Vc, 3, H, W]
+    tgt_img = example["target"]["image"].unsqueeze(0)     # [1, Vt, 3, H, W]
+    images = torch.cat([ctx_img, tgt_img], dim=1)         # [1, V, 3, H, W]
+
+    view_indices = example["context"]["index"].tolist() + example["target"]["index"].tolist()
+
+    gt_mask = None
+    if "instance_mask" in example["context"] and "instance_mask" in example["target"]:
+        gt_mask = torch.cat([
+            example["context"]["instance_mask"].unsqueeze(0),
+            example["target"]["instance_mask"].unsqueeze(0),
+        ], dim=1)
+
+    depth = None
+    if "depth" in example["context"] and "depth" in example["target"]:
+        depth = torch.cat([
+            example["context"]["depth"].unsqueeze(0),
+            example["target"]["depth"].unsqueeze(0),
+        ], dim=1)
+
+    intrinsics = extrinsics = None
+    if "intrinsics" in example["context"]:
+        intrinsics = torch.cat([
+            example["context"]["intrinsics"].unsqueeze(0),
+            example["target"]["intrinsics"].unsqueeze(0),
+        ], dim=1)
+    if "extrinsics" in example["context"]:
+        extrinsics = torch.cat([
+            example["context"]["extrinsics"].unsqueeze(0),
+            example["target"]["extrinsics"].unsqueeze(0),
+        ], dim=1)
+
+    meta = {
+        "source": "dataset",
+        "run_dir": str(run_dir),
+        "scene_id": scene_id,
+        "scene_index": scene_index,
+        "context_views": example["context"]["index"].tolist(),
+        "target_views": example["target"]["index"].tolist(),
+        "view_indices": view_indices,
+    }
+    print(f"[input] Dataset scene_id={scene_id} context={meta['context_views']} target={meta['target_views']}")
+    return InferenceInput(
+        images=images,
+        meta=meta,
+        gt_instance_mask=gt_mask,
+        depth=depth,
+        intrinsics=intrinsics,
+        extrinsics=extrinsics,
+    )
+
+
+def load_input(args: argparse.Namespace) -> InferenceInput:
+    if getattr(args, "image_dir", None):
+        return load_input_images(args)
+    elif getattr(args, "run_dir", None):
+        return load_input_dataset(args)
+    else:
+        raise ValueError("Specify --image_dir (images mode) or --run_dir (dataset mode)")
+
+
+# ---------------------------------------------------------------------------
+# Model Stage
+# ---------------------------------------------------------------------------
+
+def _load_lightning_ckpt(ckpt_path: Path) -> dict:
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        return ckpt["state_dict"]
+    if isinstance(ckpt, dict):
+        return ckpt
+    raise ValueError("Unsupported checkpoint format")
+
+
+def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
+    """Load model via ModelWrapper + Lightning checkpoint."""
+    from omegaconf import OmegaConf
+
+    from src.config import load_typed_root_config
+    from src.global_cfg import set_cfg
+    from src.loss import get_losses
+    from src.misc.step_tracker import StepTracker
+    from src.model.model import get_model
+    from src.model.model_wrapper import ModelWrapper
+
+    run_dir = Path(args.run_dir)
+    cfg_path = run_dir / ".hydra" / "config.yaml"
+    cfg_dict = OmegaConf.load(str(cfg_path))
+    cfg = load_typed_root_config(cfg_dict)
+    set_cfg(cfg_dict)
+
+    step_tracker = StepTracker()
+    model = get_model(cfg.model.encoder, cfg.model.decoder)
+    wrapper = ModelWrapper(cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker)
+    state_dict = _load_lightning_ckpt(Path(args.ckpt))
+    missing, unexpected = wrapper.load_state_dict(state_dict, strict=False)
+    print(f"[model] Loaded ckpt={args.ckpt} (missing={len(missing)}, unexpected={len(unexpected)})")
+
+    wrapper = wrapper.to(device).eval()
+    return wrapper.model
+
+
+def load_model_pretrained(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
+    """Load model via AnySplat.from_pretrained, optionally with instance head."""
+    from src.model.model.anysplat import AnySplat
+
+    hf_id = getattr(args, "hf_model", "lhjiang/anysplat")
+    instance_dim = int(getattr(args, "instance_feat_dim", 0))
+
+    base = AnySplat.from_pretrained(hf_id)
+
+    if instance_dim > 0:
+        encoder_cfg = deepcopy(base.encoder_cfg)
+        encoder_cfg.instance_feat_dim = instance_dim
+        encoder_cfg.pretrained_weights = ""
+        model = AnySplat(encoder_cfg, deepcopy(base.decoder_cfg))
+        missing, unexpected = model.load_state_dict(base.state_dict(), strict=False)
+        allowed = ("encoder.instance_head.", "encoder.instance_head_proj.")
+        bad = [k for k in missing if not k.startswith(allowed)]
+        print(f"[model] HF model with instance_feat_dim={instance_dim} "
+              f"(missing={len(missing)}, unexpected={len(unexpected)}, bad_missing={len(bad)})")
+        del base
+    else:
+        model = base
+        print(f"[model] HF model {hf_id} (no instance head)")
+
+    model = model.to(device).eval()
+    for p in model.parameters():
+        p.requires_grad = False
+    return model
+
+
+def load_model(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
+    if getattr(args, "run_dir", None) and getattr(args, "ckpt", None):
+        return load_model_wrapper(args, device)
+    else:
+        return load_model_pretrained(args, device)
+
+
+# ---------------------------------------------------------------------------
+# Inference Stage
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def run_inference(model, inp: InferenceInput, device: torch.device):
+    """Run encoder forward pass. Returns EncoderOutput."""
+    images = inp.images.to(device)
+    return model.encoder(images, global_step=0, visualization_dump=None)
+
+
+# ---------------------------------------------------------------------------
+# Output: 2D Segmentation Maps
+# ---------------------------------------------------------------------------
+
+def _to_uint8_rgb(img_chw: Tensor) -> np.ndarray:
+    return img_chw.detach().clamp(0, 1).mul(255).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+
+
+def _save_image(path: Path, arr: np.ndarray) -> None:
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(arr).save(path)
+
+
+def output_seg2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Cluster instance_feat_map and save per-view colored segmentation maps."""
+    from src.visualization.instance_viz import (
+        cluster_instance_embeddings,
+        colorize_labels,
+        make_color_lut,
+    )
+
+    feat_map = enc_out.instance_feat_map
+    if feat_map is None:
+        print("[seg2d] Skipped: instance_feat_map is None (need instance_feat_dim > 0)")
+        return
+
+    feat = feat_map[0].float()  # [V, N, H, W]
+    V = feat.shape[0]
+
+    valid = None
+    if inp.gt_instance_mask is not None:
+        valid = (inp.gt_instance_mask[0] > 0).to(feat.device)
+    elif hasattr(enc_out, "valid_mask") and enc_out.valid_mask is not None:
+        valid = enc_out.valid_mask[0].to(torch.bool).to(feat.device)
+
+    labels = cluster_instance_embeddings(
+        feat, valid, k=cfg.k, max_points=cfg.max_points, num_iters=cfg.kmeans_iters, seed=cfg.seed,
+    )
+    lut = make_color_lut(max(1, cfg.k + 1), seed=cfg.palette_seed)
+
+    seg_dir = out_dir / "seg2d"
+    view_indices = inp.meta.get("view_indices", list(range(V)))
+    images = inp.images[0]  # [V, 3, H, W]
+
+    for vi in range(V):
+        idx = view_indices[vi] if vi < len(view_indices) else vi
+        rgb = _to_uint8_rgb(images[vi])
+        seg_col = colorize_labels(labels[vi], lut, ignore_label=0)
+        _save_image(seg_dir / "rgb" / f"{idx:04d}.png", rgb)
+        _save_image(seg_dir / "seg" / f"{idx:04d}.png", seg_col)
+        trip = np.concatenate([rgb, seg_col], axis=1)
+        _save_image(seg_dir / "overlay" / f"{idx:04d}.png", trip)
+
+    gt_mask = inp.gt_instance_mask
+    if gt_mask is not None:
+        gt_np = gt_mask[0].detach().cpu().numpy().astype(np.int32)
+        unique_ids = np.unique(gt_np)
+        unique_ids = unique_ids[unique_ids != 0]
+        gt_lut = make_color_lut(max(1, len(unique_ids) + 1), seed=cfg.palette_seed + 1)
+        id_map = {int(uid): j + 1 for j, uid in enumerate(unique_ids.tolist())}
+        gt_contig = np.zeros_like(gt_np, dtype=np.int32)
+        for uid, j in id_map.items():
+            gt_contig[gt_np == uid] = j
+        for vi in range(V):
+            idx = view_indices[vi] if vi < len(view_indices) else vi
+            gt_col = colorize_labels(gt_contig[vi], gt_lut, ignore_label=0)
+            _save_image(seg_dir / "gt" / f"{idx:04d}.png", gt_col)
+
+    np.save(seg_dir / "labels.npy", labels)
+    print(f"[seg2d] Saved {V} views to {seg_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Output: 2D PCA Visualization
+# ---------------------------------------------------------------------------
+
+def output_pca2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """PCA-reduce instance_feat_map to 3-channel RGB and save per-view images."""
+    from src.visualization.instance_viz import pca_visualize_embeddings
+
+    feat_map = enc_out.instance_feat_map
+    if feat_map is None:
+        print("[pca2d] Skipped: instance_feat_map is None")
+        return
+
+    feat = feat_map[0].float()  # [V, N, H, W]
+    V = feat.shape[0]
+
+    valid = None
+    if inp.gt_instance_mask is not None:
+        valid = (inp.gt_instance_mask[0] > 0).to(feat.device)
+
+    pca_vis = pca_visualize_embeddings(feat, valid)  # [V, 3, H, W] in [0, 1]
+
+    pca_dir = out_dir / "pca2d"
+    view_indices = inp.meta.get("view_indices", list(range(V)))
+    images = inp.images[0]
+
+    for vi in range(V):
+        idx = view_indices[vi] if vi < len(view_indices) else vi
+        rgb = _to_uint8_rgb(images[vi])
+        pca_rgb = _to_uint8_rgb(pca_vis[vi])
+        _save_image(pca_dir / "rgb" / f"{idx:04d}.png", rgb)
+        _save_image(pca_dir / "pca" / f"{idx:04d}.png", pca_rgb)
+        pair = np.concatenate([rgb, pca_rgb], axis=1)
+        _save_image(pca_dir / "overlay" / f"{idx:04d}.png", pair)
+
+    print(f"[pca2d] Saved {V} views to {pca_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Output: 3D Cluster PLY
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def _cluster_3d_kmeans(
+    feat: Tensor, opacities: Tensor, k: int, iters: int,
+    seed: int, max_points: int, threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    from src.instseg.kmeans import kmeans_torch
+    G, N = feat.shape
+    valid = opacities.reshape(-1) > threshold
+    valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(1)
+    if valid_idx.numel() == 0:
+        return np.zeros(G, dtype=np.int32), np.zeros((k, N), dtype=np.float32)
+
+    S = min(max_points, valid_idx.numel())
+    g = torch.Generator(device=feat.device)
+    g.manual_seed(seed)
+    perm = torch.randperm(valid_idx.numel(), generator=g, device=feat.device)[:S]
+    x = F.normalize(feat[valid_idx[perm]].float(), p=2, dim=-1, eps=1e-8)
+    _, centers = kmeans_torch(x, k=k, num_iters=iters, seed=seed)
+
+    feat_n = F.normalize(feat.float(), p=2, dim=-1, eps=1e-8)
+    centers_n = F.normalize(centers.float(), p=2, dim=-1, eps=1e-8)
+    pred0 = (feat_n @ centers_n.T).argmax(dim=1).to(torch.int64)
+    pred0[~valid] = -1
+
+    labels = torch.zeros(G, dtype=torch.int32, device=feat.device)
+    labels[pred0 >= 0] = (pred0[pred0 >= 0] + 1).to(torch.int32)
+    return labels.cpu().numpy(), centers.cpu().numpy()
+
+
+@torch.no_grad()
+def _cluster_3d_dbscan(
+    feat: Tensor, opacities: Tensor,
+    eps: float, min_samples: int, threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    from sklearn.cluster import DBSCAN
+    G, N = feat.shape
+    valid = opacities.reshape(-1) > threshold
+    valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(1)
+    if valid_idx.numel() == 0:
+        return np.zeros(G, dtype=np.int32), np.zeros((0, N), dtype=np.float32)
+
+    x_np = F.normalize(feat[valid_idx].float(), p=2, dim=-1, eps=1e-8).cpu().numpy()
+    db_labels = DBSCAN(eps=eps, min_samples=min_samples, metric="cosine", n_jobs=-1).fit_predict(x_np)
+
+    labels = np.zeros(G, dtype=np.int32)
+    valid_np = valid_idx.cpu().numpy()
+    is_cluster = db_labels >= 0
+    if np.any(is_cluster):
+        labels[valid_np[is_cluster]] = (db_labels[is_cluster] + 1).astype(np.int32)
+
+    n_clusters = int(db_labels[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    centers = np.zeros((n_clusters, N), dtype=np.float32)
+    for cid in range(n_clusters):
+        mem = valid_np[db_labels == cid]
+        c = feat[torch.from_numpy(mem).to(feat.device)].float().mean(0)
+        centers[cid] = F.normalize(c, p=2, dim=-1, eps=1e-8).cpu().numpy()
+    return labels, centers
+
+
+@torch.no_grad()
+def _cluster_3d_hdbscan(
+    feat: Tensor, opacities: Tensor,
+    min_cluster_size: int, min_samples: int, threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    import hdbscan
+    G, N = feat.shape
+    valid = opacities.reshape(-1) > threshold
+    valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(1)
+    if valid_idx.numel() == 0:
+        return np.zeros(G, dtype=np.int32), np.zeros((0, N), dtype=np.float32)
+
+    x_np = F.normalize(feat[valid_idx].float(), p=2, dim=-1, eps=1e-8).cpu().numpy()
+    hdb_labels = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size, min_samples=min_samples, metric="euclidean",
+    ).fit_predict(x_np)
+
+    labels = np.zeros(G, dtype=np.int32)
+    valid_np = valid_idx.cpu().numpy()
+    is_cluster = hdb_labels >= 0
+    if np.any(is_cluster):
+        labels[valid_np[is_cluster]] = (hdb_labels[is_cluster] + 1).astype(np.int32)
+
+    n_clusters = int(hdb_labels[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    centers = np.zeros((n_clusters, N), dtype=np.float32)
+    for cid in range(n_clusters):
+        mem = valid_np[hdb_labels == cid]
+        c = feat[torch.from_numpy(mem).to(feat.device)].float().mean(0)
+        centers[cid] = F.normalize(c, p=2, dim=-1, eps=1e-8).cpu().numpy()
+    return labels, centers
+
+
+def output_seg3d_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Cluster gaussian_instance_feat, encode as SH colors, export PLY."""
+    from src.model.ply_export import export_ply
+    from src.post_opt.utils import rgb_to_sh
+    from src.visualization.instance_viz import make_color_lut
+
+    gaussians = enc_out.gaussians
+    g_feat = enc_out.gaussian_instance_feat
+    if g_feat is None:
+        print("[seg3d_ply] Skipped: gaussian_instance_feat is None")
+        return
+
+    device = gaussians.means.device
+    feat = g_feat[0].to(device).float()  # [G, N]
+    op = gaussians.opacities[0].to(device)
+
+    if cfg.cluster_algo == "kmeans":
+        labels, centers = _cluster_3d_kmeans(
+            feat, op, k=cfg.k, iters=cfg.kmeans_iters, seed=cfg.seed,
+            max_points=cfg.max_points, threshold=cfg.opacity_threshold,
+        )
+    elif cfg.cluster_algo == "dbscan":
+        labels, centers = _cluster_3d_dbscan(
+            feat, op, eps=cfg.dbscan_eps,
+            min_samples=cfg.dbscan_min_samples, threshold=cfg.opacity_threshold,
+        )
+    elif cfg.cluster_algo == "hdbscan":
+        labels, centers = _cluster_3d_hdbscan(
+            feat, op, min_cluster_size=cfg.hdbscan_min_cluster_size,
+            min_samples=cfg.hdbscan_min_samples, threshold=cfg.opacity_threshold,
+        )
+    else:
+        raise ValueError(f"Unknown cluster_algo: {cfg.cluster_algo}")
+
+    max_label = int(labels.max()) if labels.size > 0 else 0
+    lut = make_color_lut(max_label + 1, seed=cfg.palette_seed)
+    rgb_u8 = lut[np.clip(labels, 0, max_label)]  # [G, 3]
+    rgb = torch.from_numpy(rgb_u8).to(device=device, dtype=torch.float32) / 255.0
+
+    sh_dc = rgb_to_sh(rgb)
+    harm = torch.zeros_like(gaussians.harmonics[0]).float()
+    harm[:, :, 0] = sh_dc
+
+    ply_dir = out_dir / "seg3d_ply"
+    ply_dir.mkdir(parents=True, exist_ok=True)
+
+    export_ply(
+        gaussians.means[0], gaussians.scales[0], gaussians.rotations[0],
+        harm, gaussians.opacities[0], ply_dir / "gaussians_cluster_color.ply",
+        save_sh_dc_only=True,
+    )
+
+    from plyfile import PlyData, PlyElement
+    pos = gaussians.means[0].detach().cpu().numpy().astype(np.float32)
+    dtype = [("x", "f4"), ("y", "f4"), ("z", "f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")]
+    verts = np.empty(len(pos), dtype=dtype)
+    verts["x"], verts["y"], verts["z"] = pos[:, 0], pos[:, 1], pos[:, 2]
+    verts["red"], verts["green"], verts["blue"] = rgb_u8[:, 0], rgb_u8[:, 1], rgb_u8[:, 2]
+    PlyData([PlyElement.describe(verts, "vertex")]).write(str(ply_dir / "colored_pointcloud.ply"))
+
+    np.save(ply_dir / "cluster_labels.npy", labels)
+    n_valid = int((labels > 0).sum())
+    print(f"[seg3d_ply] algo={cfg.cluster_algo} clusters={max_label} "
+          f"valid={n_valid}/{labels.size} -> {ply_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Output: Interpolated RGB/Depth Video
+# ---------------------------------------------------------------------------
+
+def output_video(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path, *, model=None) -> None:
+    """Render interpolated RGB and depth videos from predicted poses."""
+    from src.misc.image_io import save_interpolated_video
+
+    pred_pose = enc_out.pred_context_pose
+    if pred_pose is None:
+        print("[video] Skipped: pred_context_pose is None")
+        return
+    if model is None:
+        print("[video] Skipped: model reference needed for decoder")
+        return
+
+    gaussians = enc_out.gaussians
+    _, _, _, h, w = inp.images.shape
+
+    video_dir = out_dir / "video"
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    save_interpolated_video(
+        pred_pose["extrinsic"], pred_pose["intrinsic"],
+        1, h, w, gaussians, str(video_dir), model.decoder,
+    )
+    print(f"[video] Saved rgb.mp4 and depth.mp4 to {video_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Output: Raw Embedding Export
+# ---------------------------------------------------------------------------
+
+def output_embedding(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Export raw gaussian instance embedding as a torch checkpoint."""
+    from src.instseg.export import export_gaussian_instance_embedding
+
+    if enc_out.gaussian_instance_feat is None:
+        print("[embedding] Skipped: gaussian_instance_feat is None")
+        return
+
+    emb_dir = out_dir / "embedding"
+    emb_dir.mkdir(parents=True, exist_ok=True)
+    path = export_gaussian_instance_embedding(
+        emb_dir / "gaussian_instance_embedding.pt",
+        enc_out.gaussians,
+        enc_out.gaussian_instance_feat,
+        meta=inp.meta,
+    )
+    print(f"[embedding] Saved to {path}")
+
+
+# ---------------------------------------------------------------------------
+# Output: Plain PLY (original colors)
+# ---------------------------------------------------------------------------
+
+def output_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Export vanilla Gaussian Splatting PLY with original SH colors."""
+    from src.model.ply_export import export_ply
+
+    gaussians = enc_out.gaussians
+    ply_path = out_dir / "gaussians.ply"
+    export_ply(
+        gaussians.means[0], gaussians.scales[0], gaussians.rotations[0],
+        gaussians.harmonics[0], gaussians.opacities[0], ply_path,
+        save_sh_dc_only=True,
+    )
+    print(f"[ply] Saved to {ply_path}")
+
+
+# ---------------------------------------------------------------------------
+# Output Registry
+# ---------------------------------------------------------------------------
+
+OUTPUT_REGISTRY: dict[str, Callable] = {
+    "seg2d": output_seg2d,
+    "pca2d": output_pca2d,
+    "seg3d_ply": output_seg3d_ply,
+    "video": output_video,
+    "embedding": output_embedding,
+    "ply": output_ply,
+}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        description="Unified AnySplat inference with composable outputs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    g_input = ap.add_argument_group("Input (choose one)")
+    g_input.add_argument("--image_dir", type=str, default=None, help="Directory of input images (images mode)")
+    g_input.add_argument("--run_dir", type=str, default=None, help="Hydra run dir with .hydra/config.yaml (dataset mode)")
+    g_input.add_argument("--scene_id", type=str, default=None, help="Scene ID in the dataset (dataset mode)")
+    g_input.add_argument("--context_views", type=str, default=None, help="Comma-separated context view indices")
+    g_input.add_argument("--target_views", type=str, default=None, help="Comma-separated target view indices")
+    g_input.add_argument("--num_context", type=int, default=2, help="Random context views count (dataset mode)")
+    g_input.add_argument("--num_target", type=int, default=1, help="Random target views count (dataset mode)")
+
+    g_model = ap.add_argument_group("Model")
+    g_model.add_argument("--ckpt", type=str, default=None, help="Lightning .ckpt path (with --run_dir)")
+    g_model.add_argument("--hf_model", type=str, default="lhjiang/anysplat", help="HuggingFace model ID")
+    g_model.add_argument("--instance_feat_dim", type=int, default=16, help="Instance feature dim (0 to disable)")
+    g_model.add_argument("--device", type=str, default="cuda")
+
+    g_output = ap.add_argument_group("Output")
+    g_output.add_argument(
+        "--outputs", type=str, default="seg2d,pca2d,seg3d_ply",
+        help=f"Comma-separated output modes: {','.join(OUTPUT_REGISTRY.keys())}",
+    )
+    g_output.add_argument("--out_dir", type=str, default="outputs/anysplat_infer")
+
+    g_cluster = ap.add_argument_group("Clustering parameters")
+    g_cluster.add_argument("--cluster_algo", type=str, default="kmeans", choices=["kmeans", "dbscan", "hdbscan"])
+    g_cluster.add_argument("--k", type=int, default=20, help="K-means clusters")
+    g_cluster.add_argument("--kmeans_iters", type=int, default=30)
+    g_cluster.add_argument("--max_points", type=int, default=200_000, help="Max points for k-means fit")
+    g_cluster.add_argument("--dbscan_eps", type=float, default=0.3)
+    g_cluster.add_argument("--dbscan_min_samples", type=int, default=10)
+    g_cluster.add_argument("--hdbscan_min_cluster_size", type=int, default=50)
+    g_cluster.add_argument("--hdbscan_min_samples", type=int, default=10)
+    g_cluster.add_argument("--opacity_threshold", type=float, default=1.0 / 255.0)
+    g_cluster.add_argument("--seed", type=int, default=0)
+    g_cluster.add_argument("--palette_seed", type=int, default=0)
+
+    return ap
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    requested = [s.strip() for s in args.outputs.split(",") if s.strip()]
+    unknown = [r for r in requested if r not in OUTPUT_REGISTRY]
+    if unknown:
+        raise ValueError(f"Unknown output modes: {unknown}. Available: {list(OUTPUT_REGISTRY.keys())}")
+
+    # --- Load input ---
+    inp = load_input(args)
+
+    # --- Load model ---
+    model = load_model(args, device)
+
+    # --- Inference ---
+    print("[infer] Running encoder forward ...")
+    enc_out = run_inference(model, inp, device)
+    print(f"[infer] Gaussians: {tuple(enc_out.gaussians.means.shape)}, "
+          f"instance_feat_map={'yes' if enc_out.instance_feat_map is not None else 'no'}, "
+          f"gaussian_instance_feat={'yes' if enc_out.gaussian_instance_feat is not None else 'no'}")
+
+    # --- Run outputs ---
+    out_cfg = OutputConfig(
+        k=args.k, cluster_algo=args.cluster_algo, kmeans_iters=args.kmeans_iters,
+        max_points=args.max_points, dbscan_eps=args.dbscan_eps,
+        dbscan_min_samples=args.dbscan_min_samples,
+        hdbscan_min_cluster_size=args.hdbscan_min_cluster_size,
+        hdbscan_min_samples=args.hdbscan_min_samples,
+        opacity_threshold=args.opacity_threshold, seed=args.seed,
+        palette_seed=args.palette_seed,
+    )
+
+    for name in requested:
+        fn = OUTPUT_REGISTRY[name]
+        print(f"\n--- Output: {name} ---")
+        if name == "video":
+            fn(enc_out, inp, out_cfg, out_dir, model=model)
+        else:
+            fn(enc_out, inp, out_cfg, out_dir)
+
+    # --- Save meta ---
+    meta = {**inp.meta, "outputs": requested, "args": vars(args)}
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+    print(f"\n[done] All outputs written to {out_dir}")
+
+
+if __name__ == "__main__":
+    main()

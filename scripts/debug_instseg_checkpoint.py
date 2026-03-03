@@ -1,3 +1,4 @@
+# deprecated: use debug_instseg_ckpt.py instead
 from __future__ import annotations
 
 import argparse

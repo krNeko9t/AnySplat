@@ -1,3 +1,4 @@
+# deprecated: 用 instseg_infer.py 替代，此脚本仅保留作为参考
 #!/usr/bin/env python3
 from __future__ import annotations
 

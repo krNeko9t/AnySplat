@@ -1,3 +1,4 @@
+# deprecated: use instseg_infer.py instead
 from __future__ import annotations
 
 import argparse

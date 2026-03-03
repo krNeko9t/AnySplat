@@ -1,4 +1,5 @@
 """
+deprecated: use instseg_infer.py instead
 Debug a trained instseg checkpoint: run encoder + k-means on one scene and save visualizations.
 
 Usage:
