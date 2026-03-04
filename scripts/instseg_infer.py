@@ -992,7 +992,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g_cluster.add_argument("--k", type=int, default=20, help="K-means clusters")
     g_cluster.add_argument("--kmeans_iters", type=int, default=30)
-    g_cluster.add_argument("--max_points", type=int, default=200_000, help="Max points for k-means fit")
+    g_cluster.add_argument("--max_points", type=int, default=50_000, help="Max points for all clustering algorithms")
     g_cluster.add_argument("--dbscan_eps", type=float, default=0.3)
     g_cluster.add_argument("--dbscan_min_samples", type=int, default=10)
     g_cluster.add_argument("--hdbscan_min_cluster_size", type=int, default=50)
