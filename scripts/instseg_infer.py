@@ -1,28 +1,29 @@
 """Unified AnySplat inference script with modular input/output stages.
 
 Supports two input modes (custom images or dataset), multiple composable
-output modes (2D segmentation, PCA visualization, 3D cluster PLY, video,
-embedding export), and two model loading paths (ModelWrapper+ckpt or
-HuggingFace pretrained).
+output modes (rgb, gt, seg2d, pca2d, seg3d_ply, video, embedding, ply),
+and two model loading paths (ModelWrapper+ckpt or HuggingFace pretrained).
 
 Examples:
-  # Custom images, HF model, multiple outputs:
+  # Custom images, default compare output:
   python scripts/anysplat_infer.py \
       --image_dir examples/vrnerf/riverview \
-      --outputs seg2d,pca2d,seg3d_ply,video,embedding \
+      --outputs seg2d,pca2d \
       --out_dir outputs/my_result
 
-  # Dataset mode with specific scene/views:
+  # Multiple clustering algorithms with overlay + compare (gt|rgb|seg):
   python scripts/anysplat_infer.py \
       --run_dir output/my_run --ckpt path/to.ckpt \
-      --scene_id my_scene --context_views 0,1 --target_views 2,3 \
-      --outputs seg2d,pca2d,seg3d_ply
+      --outputs rgb,gt,seg2d \
+      --cluster_algos kmeans,dbscan,hdbscan \
+      --seg2d_outs seg,overlay,compare \
+      --compare_style gt_rgb_seg
 
-  # Dataset mode with random sampling:
+  # PCA with overlay and compare:
   python scripts/anysplat_infer.py \
-      --run_dir output/my_run --ckpt path/to.ckpt \
-      --num_context 3 --num_target 2 --seed 42 \
-      --outputs seg3d_ply
+      --image_dir examples/vrnerf/riverview \
+      --outputs pca2d \
+      --pca2d_outs pca,overlay,compare
 """
 from __future__ import annotations
 
@@ -66,7 +67,7 @@ class InferenceInput:
 class OutputConfig:
     """Aggregated output-related CLI args."""
     k: int = 20
-    cluster_algo: str = "kmeans"
+    cluster_algos: list[str] = field(default_factory=lambda: ["kmeans"])
     kmeans_iters: int = 30
     max_points: int = 200_000
     dbscan_eps: float = 0.3
@@ -76,6 +77,9 @@ class OutputConfig:
     opacity_threshold: float = 1.0 / 255.0
     seed: int = 0
     palette_seed: int = 0
+    seg2d_outs: list[str] = field(default_factory=lambda: ["compare"])
+    pca2d_outs: list[str] = field(default_factory=lambda: ["compare"])
+    compare_style: str = "rgb_seg"
 
 
 # ---------------------------------------------------------------------------
@@ -424,20 +428,158 @@ def _save_image(path: Path, arr: np.ndarray) -> None:
     Image.fromarray(arr).save(path)
 
 
+def _blend_overlay(rgb: np.ndarray, vis: np.ndarray, alpha: float = 0.5) -> np.ndarray:
+    """Alpha-blend *vis* onto *rgb* where *vis* has non-zero pixels."""
+    fg = (vis > 0).any(axis=-1, keepdims=True).astype(np.float32)
+    return (rgb * (1.0 - alpha * fg) + vis * alpha * fg).clip(0, 255).astype(np.uint8)
+
+
+def _algo_tag(cfg: OutputConfig, algo: str) -> str:
+    if algo == "kmeans":
+        return f"kmeans_k{cfg.k}"
+    if algo == "dbscan":
+        return f"dbscan_eps{cfg.dbscan_eps}_ms{cfg.dbscan_min_samples}"
+    if algo == "hdbscan":
+        return f"hdbscan_mcs{cfg.hdbscan_min_cluster_size}_ms{cfg.hdbscan_min_samples}"
+    return algo
+
+
+def _make_compare(
+    style: str, rgb: np.ndarray, vis_col: np.ndarray,
+    gt_col: np.ndarray | None,
+) -> np.ndarray | None:
+    """Horizontally concatenate images based on *compare_style*."""
+    if style == "rgb_seg":
+        return np.concatenate([rgb, vis_col], axis=1)
+    if style == "gt_seg":
+        return np.concatenate([gt_col, vis_col], axis=1) if gt_col is not None else None
+    if style == "gt_rgb_seg":
+        return np.concatenate([gt_col, rgb, vis_col], axis=1) if gt_col is not None else None
+    return None
+
+
+def _colorize_gt_masks(gt_mask: Tensor, palette_seed: int) -> list[np.ndarray]:
+    """Colorize GT instance masks. Returns list of [H, W, 3] uint8 arrays."""
+    from src.visualization.instance_viz import colorize_labels, make_color_lut
+
+    gt_np = gt_mask[0].detach().cpu().numpy().astype(np.int32)  # [V, H, W]
+    unique_ids = np.unique(gt_np)
+    unique_ids = unique_ids[unique_ids != 0]
+    gt_lut = make_color_lut(max(1, len(unique_ids) + 1), seed=palette_seed + 1)
+    id_map = {int(uid): j + 1 for j, uid in enumerate(unique_ids.tolist())}
+    gt_contig = np.zeros_like(gt_np, dtype=np.int32)
+    for uid, j in id_map.items():
+        gt_contig[gt_np == uid] = j
+    V = gt_np.shape[0]
+    return [colorize_labels(gt_contig[vi], gt_lut, ignore_label=0) for vi in range(V)]
+
+
+def _cluster_2d(
+    feat: Tensor, valid: Tensor | None, algo: str, cfg: OutputConfig,
+) -> np.ndarray:
+    """Cluster 2D instance feature maps. Returns labels [V, H, W] int32 numpy."""
+    from src.visualization.instance_viz import cluster_instance_embeddings
+
+    if algo == "kmeans":
+        return cluster_instance_embeddings(
+            feat, valid, k=cfg.k, max_points=cfg.max_points,
+            num_iters=cfg.kmeans_iters, seed=cfg.seed,
+        )
+
+    V, D, H, W = feat.shape
+    feat_flat = feat.permute(0, 2, 3, 1).reshape(-1, D)  # [V*H*W, D]
+    if valid is not None:
+        valid_idx = torch.nonzero(valid.reshape(-1), as_tuple=False).squeeze(1)
+    else:
+        valid_idx = torch.arange(feat_flat.shape[0], device=feat.device)
+
+    x = F.normalize(feat_flat[valid_idx].float(), p=2, dim=-1, eps=1e-8).cpu().numpy()
+
+    S = min(cfg.max_points, len(x))
+    if S < len(x):
+        rng = np.random.default_rng(cfg.seed)
+        sub_idx = rng.choice(len(x), S, replace=False)
+        x_fit = x[sub_idx]
+    else:
+        x_fit = x
+
+    if algo == "dbscan":
+        from sklearn.cluster import DBSCAN
+        cl = DBSCAN(
+            eps=cfg.dbscan_eps, min_samples=cfg.dbscan_min_samples,
+            metric="cosine", n_jobs=-1,
+        ).fit_predict(x_fit)
+    elif algo == "hdbscan":
+        import hdbscan
+        cl = hdbscan.HDBSCAN(
+            min_cluster_size=cfg.hdbscan_min_cluster_size,
+            min_samples=cfg.hdbscan_min_samples, metric="euclidean",
+        ).fit_predict(x_fit)
+    else:
+        raise ValueError(f"Unknown cluster algo: {algo}")
+
+    is_cluster = cl >= 0
+    n_clusters = int(cl[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    centers = np.zeros((n_clusters, D), dtype=np.float32)
+    for cid in range(n_clusters):
+        c = x_fit[cl == cid].mean(0)
+        centers[cid] = c / (np.linalg.norm(c) + 1e-8)
+
+    labels_flat = np.zeros(V * H * W, dtype=np.int32)
+    if n_clusters > 0:
+        sims = x @ centers.T
+        labels_flat[valid_idx.cpu().numpy()] = sims.argmax(axis=1).astype(np.int32) + 1
+    return labels_flat.reshape(V, H, W)
+
+
+# ---------------------------------------------------------------------------
+# Output: RGB images (top-level, deduplicated)
+# ---------------------------------------------------------------------------
+
+def output_rgb(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Save per-view RGB images to out_dir/rgb/."""
+    V = inp.images.shape[1]
+    view_indices = inp.meta.get("view_indices", list(range(V)))
+    rgb_dir = out_dir / "rgb"
+    for vi in range(V):
+        idx = view_indices[vi] if vi < len(view_indices) else vi
+        _save_image(rgb_dir / f"{idx:04d}.png", _to_uint8_rgb(inp.images[0, vi]))
+    print(f"[rgb] Saved {V} views to {rgb_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Output: GT instance masks (top-level, deduplicated)
+# ---------------------------------------------------------------------------
+
+def output_gt(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Save per-view colorized GT instance masks to out_dir/gt/."""
+    if inp.gt_instance_mask is None:
+        print("[gt] Skipped: no gt_instance_mask")
+        return
+    V = inp.images.shape[1]
+    view_indices = inp.meta.get("view_indices", list(range(V)))
+    gt_cols = _colorize_gt_masks(inp.gt_instance_mask, cfg.palette_seed)
+    gt_dir = out_dir / "gt"
+    for vi in range(V):
+        idx = view_indices[vi] if vi < len(view_indices) else vi
+        _save_image(gt_dir / f"{idx:04d}.png", gt_cols[vi])
+    print(f"[gt] Saved {V} views to {gt_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Output: 2D Segmentation Maps
+# ---------------------------------------------------------------------------
+
 def output_seg2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
-    """Cluster instance_feat_map and save per-view colored segmentation maps."""
-    from src.visualization.instance_viz import (
-        cluster_instance_embeddings,
-        colorize_labels,
-        make_color_lut,
-    )
+    """Cluster instance_feat_map with one or more algorithms and save selectively."""
+    from src.visualization.instance_viz import colorize_labels, make_color_lut
 
     feat_map = enc_out.instance_feat_map
     if feat_map is None:
         print("[seg2d] Skipped: instance_feat_map is None (need instance_feat_dim > 0)")
         return
 
-    feat = feat_map[0].float()  # [V, N, H, W]
+    feat = feat_map[0].float()  # [V, D, H, W]
     V = feat.shape[0]
 
     valid = None
@@ -446,41 +588,50 @@ def output_seg2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path)
     elif hasattr(enc_out, "valid_mask") and enc_out.valid_mask is not None:
         valid = enc_out.valid_mask[0].to(torch.bool).to(feat.device)
 
-    labels = cluster_instance_embeddings(
-        feat, valid, k=cfg.k, max_points=cfg.max_points, num_iters=cfg.kmeans_iters, seed=cfg.seed,
-    )
-    lut = make_color_lut(max(1, cfg.k + 1), seed=cfg.palette_seed)
-
-    seg_dir = out_dir / "seg2d"
     view_indices = inp.meta.get("view_indices", list(range(V)))
     images = inp.images[0]  # [V, 3, H, W]
+    outs = set(cfg.seg2d_outs)
 
-    for vi in range(V):
-        idx = view_indices[vi] if vi < len(view_indices) else vi
-        rgb = _to_uint8_rgb(images[vi])
-        seg_col = colorize_labels(labels[vi], lut, ignore_label=0)
-        _save_image(seg_dir / "rgb" / f"{idx:04d}.png", rgb)
-        _save_image(seg_dir / "seg" / f"{idx:04d}.png", seg_col)
-        trip = np.concatenate([rgb, seg_col], axis=1)
-        _save_image(seg_dir / "overlay" / f"{idx:04d}.png", trip)
+    compare_style = cfg.compare_style
+    if compare_style in ("gt_seg", "gt_rgb_seg") and inp.gt_instance_mask is None:
+        print(f"[seg2d] No GT available, falling back compare_style from '{compare_style}' to 'rgb_seg'")
+        compare_style = "rgb_seg"
 
-    gt_mask = inp.gt_instance_mask
-    if gt_mask is not None:
-        gt_np = gt_mask[0].detach().cpu().numpy().astype(np.int32)
-        unique_ids = np.unique(gt_np)
-        unique_ids = unique_ids[unique_ids != 0]
-        gt_lut = make_color_lut(max(1, len(unique_ids) + 1), seed=cfg.palette_seed + 1)
-        id_map = {int(uid): j + 1 for j, uid in enumerate(unique_ids.tolist())}
-        gt_contig = np.zeros_like(gt_np, dtype=np.int32)
-        for uid, j in id_map.items():
-            gt_contig[gt_np == uid] = j
+    need_rgb = outs & {"overlay", "compare"}
+    need_gt = ("compare" in outs
+               and compare_style in ("gt_seg", "gt_rgb_seg")
+               and inp.gt_instance_mask is not None)
+
+    gt_cols: list[np.ndarray] | None = None
+    if need_gt:
+        gt_cols = _colorize_gt_masks(inp.gt_instance_mask, cfg.palette_seed)
+
+    for algo in cfg.cluster_algos:
+        labels = _cluster_2d(feat, valid, algo, cfg)
+        tag = _algo_tag(cfg, algo)
+        algo_dir = out_dir / "seg2d" / tag
+        max_label = int(labels.max()) if labels.size > 0 else 0
+        lut = make_color_lut(max(1, max_label + 1), seed=cfg.palette_seed)
+
         for vi in range(V):
             idx = view_indices[vi] if vi < len(view_indices) else vi
-            gt_col = colorize_labels(gt_contig[vi], gt_lut, ignore_label=0)
-            _save_image(seg_dir / "gt" / f"{idx:04d}.png", gt_col)
+            seg_col = colorize_labels(labels[vi], lut, ignore_label=0)
+            rgb = _to_uint8_rgb(images[vi]) if need_rgb else None
+            gt_col = gt_cols[vi] if gt_cols is not None else None
 
-    np.save(seg_dir / "labels.npy", labels)
-    print(f"[seg2d] Saved {V} views to {seg_dir}")
+            if "seg" in outs:
+                _save_image(algo_dir / "seg" / f"{idx:04d}.png", seg_col)
+            if "overlay" in outs:
+                _save_image(algo_dir / "overlay" / f"{idx:04d}.png",
+                            _blend_overlay(rgb, seg_col))
+            if "compare" in outs:
+                cmp = _make_compare(compare_style, rgb, seg_col, gt_col)
+                if cmp is not None:
+                    _save_image(algo_dir / "compare" / f"{idx:04d}.png", cmp)
+
+        algo_dir.mkdir(parents=True, exist_ok=True)
+        np.save(algo_dir / "labels.npy", labels)
+        print(f"[seg2d] algo={tag} saved {V} views (outs={cfg.seg2d_outs}) to {algo_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +639,7 @@ def output_seg2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path)
 # ---------------------------------------------------------------------------
 
 def output_pca2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
-    """PCA-reduce instance_feat_map to 3-channel RGB and save per-view images."""
+    """PCA-reduce instance_feat_map to 3-channel RGB and save selectively."""
     from src.visualization.instance_viz import pca_visualize_embeddings
 
     feat_map = enc_out.instance_feat_map
@@ -496,7 +647,7 @@ def output_pca2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path)
         print("[pca2d] Skipped: instance_feat_map is None")
         return
 
-    feat = feat_map[0].float()  # [V, N, H, W]
+    feat = feat_map[0].float()  # [V, D, H, W]
     V = feat.shape[0]
 
     valid = None
@@ -508,17 +659,24 @@ def output_pca2d(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path)
     pca_dir = out_dir / "pca2d"
     view_indices = inp.meta.get("view_indices", list(range(V)))
     images = inp.images[0]
+    outs = set(cfg.pca2d_outs)
+    need_rgb = outs & {"overlay", "compare"}
 
     for vi in range(V):
         idx = view_indices[vi] if vi < len(view_indices) else vi
-        rgb = _to_uint8_rgb(images[vi])
         pca_rgb = _to_uint8_rgb(pca_vis[vi])
-        _save_image(pca_dir / "rgb" / f"{idx:04d}.png", rgb)
-        _save_image(pca_dir / "pca" / f"{idx:04d}.png", pca_rgb)
-        pair = np.concatenate([rgb, pca_rgb], axis=1)
-        _save_image(pca_dir / "overlay" / f"{idx:04d}.png", pair)
+        rgb = _to_uint8_rgb(images[vi]) if need_rgb else None
 
-    print(f"[pca2d] Saved {V} views to {pca_dir}")
+        if "pca" in outs:
+            _save_image(pca_dir / "pca" / f"{idx:04d}.png", pca_rgb)
+        if "overlay" in outs:
+            _save_image(pca_dir / "overlay" / f"{idx:04d}.png",
+                        _blend_overlay(rgb, pca_rgb))
+        if "compare" in outs:
+            _save_image(pca_dir / "compare" / f"{idx:04d}.png",
+                        np.concatenate([rgb, pca_rgb], axis=1))
+
+    print(f"[pca2d] Saved {V} views (outs={cfg.pca2d_outs}) to {pca_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +774,27 @@ def _cluster_3d_hdbscan(
     return labels, centers
 
 
+def _run_cluster_3d(
+    feat: Tensor, op: Tensor, algo: str, cfg: OutputConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    if algo == "kmeans":
+        return _cluster_3d_kmeans(
+            feat, op, k=cfg.k, iters=cfg.kmeans_iters, seed=cfg.seed,
+            max_points=cfg.max_points, threshold=cfg.opacity_threshold,
+        )
+    if algo == "dbscan":
+        return _cluster_3d_dbscan(
+            feat, op, eps=cfg.dbscan_eps,
+            min_samples=cfg.dbscan_min_samples, threshold=cfg.opacity_threshold,
+        )
+    if algo == "hdbscan":
+        return _cluster_3d_hdbscan(
+            feat, op, min_cluster_size=cfg.hdbscan_min_cluster_size,
+            min_samples=cfg.hdbscan_min_samples, threshold=cfg.opacity_threshold,
+        )
+    raise ValueError(f"Unknown cluster_algo: {algo}")
+
+
 def output_seg3d_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
     """Cluster gaussian_instance_feat, encode as SH colors, export PLY."""
     from src.model.ply_export import export_ply
@@ -631,55 +810,43 @@ def output_seg3d_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: P
     device = gaussians.means.device
     feat = g_feat[0].to(device).float()  # [G, N]
     op = gaussians.opacities[0].to(device)
+    pos_np = gaussians.means[0].detach().cpu().numpy().astype(np.float32)
 
-    if cfg.cluster_algo == "kmeans":
-        labels, centers = _cluster_3d_kmeans(
-            feat, op, k=cfg.k, iters=cfg.kmeans_iters, seed=cfg.seed,
-            max_points=cfg.max_points, threshold=cfg.opacity_threshold,
+    for algo in cfg.cluster_algos:
+        labels, centers = _run_cluster_3d(feat, op, algo, cfg)
+        tag = _algo_tag(cfg, algo)
+
+        max_label = int(labels.max()) if labels.size > 0 else 0
+        lut = make_color_lut(max_label + 1, seed=cfg.palette_seed)
+        rgb_u8 = lut[np.clip(labels, 0, max_label)]  # [G, 3]
+        rgb_f = torch.from_numpy(rgb_u8).to(device=device, dtype=torch.float32) / 255.0
+
+        sh_dc = rgb_to_sh(rgb_f)
+        harm = torch.zeros_like(gaussians.harmonics[0]).float()
+        harm[:, :, 0] = sh_dc
+
+        ply_dir = out_dir / "seg3d_ply" / tag
+        ply_dir.mkdir(parents=True, exist_ok=True)
+
+        export_ply(
+            gaussians.means[0], gaussians.scales[0], gaussians.rotations[0],
+            harm, gaussians.opacities[0], ply_dir / "gaussians_cluster_color.ply",
+            save_sh_dc_only=True,
         )
-    elif cfg.cluster_algo == "dbscan":
-        labels, centers = _cluster_3d_dbscan(
-            feat, op, eps=cfg.dbscan_eps,
-            min_samples=cfg.dbscan_min_samples, threshold=cfg.opacity_threshold,
-        )
-    elif cfg.cluster_algo == "hdbscan":
-        labels, centers = _cluster_3d_hdbscan(
-            feat, op, min_cluster_size=cfg.hdbscan_min_cluster_size,
-            min_samples=cfg.hdbscan_min_samples, threshold=cfg.opacity_threshold,
-        )
-    else:
-        raise ValueError(f"Unknown cluster_algo: {cfg.cluster_algo}")
 
-    max_label = int(labels.max()) if labels.size > 0 else 0
-    lut = make_color_lut(max_label + 1, seed=cfg.palette_seed)
-    rgb_u8 = lut[np.clip(labels, 0, max_label)]  # [G, 3]
-    rgb = torch.from_numpy(rgb_u8).to(device=device, dtype=torch.float32) / 255.0
+        from plyfile import PlyData, PlyElement
+        dtype = [("x", "f4"), ("y", "f4"), ("z", "f4"),
+                 ("red", "u1"), ("green", "u1"), ("blue", "u1")]
+        verts = np.empty(len(pos_np), dtype=dtype)
+        verts["x"], verts["y"], verts["z"] = pos_np[:, 0], pos_np[:, 1], pos_np[:, 2]
+        verts["red"], verts["green"], verts["blue"] = rgb_u8[:, 0], rgb_u8[:, 1], rgb_u8[:, 2]
+        PlyData([PlyElement.describe(verts, "vertex")]).write(
+            str(ply_dir / "colored_pointcloud.ply"))
 
-    sh_dc = rgb_to_sh(rgb)
-    harm = torch.zeros_like(gaussians.harmonics[0]).float()
-    harm[:, :, 0] = sh_dc
-
-    ply_dir = out_dir / "seg3d_ply"
-    ply_dir.mkdir(parents=True, exist_ok=True)
-
-    export_ply(
-        gaussians.means[0], gaussians.scales[0], gaussians.rotations[0],
-        harm, gaussians.opacities[0], ply_dir / "gaussians_cluster_color.ply",
-        save_sh_dc_only=True,
-    )
-
-    from plyfile import PlyData, PlyElement
-    pos = gaussians.means[0].detach().cpu().numpy().astype(np.float32)
-    dtype = [("x", "f4"), ("y", "f4"), ("z", "f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")]
-    verts = np.empty(len(pos), dtype=dtype)
-    verts["x"], verts["y"], verts["z"] = pos[:, 0], pos[:, 1], pos[:, 2]
-    verts["red"], verts["green"], verts["blue"] = rgb_u8[:, 0], rgb_u8[:, 1], rgb_u8[:, 2]
-    PlyData([PlyElement.describe(verts, "vertex")]).write(str(ply_dir / "colored_pointcloud.ply"))
-
-    np.save(ply_dir / "cluster_labels.npy", labels)
-    n_valid = int((labels > 0).sum())
-    print(f"[seg3d_ply] algo={cfg.cluster_algo} clusters={max_label} "
-          f"valid={n_valid}/{labels.size} -> {ply_dir}")
+        np.save(ply_dir / "cluster_labels.npy", labels)
+        n_valid = int((labels > 0).sum())
+        print(f"[seg3d_ply] algo={tag} clusters={max_label} "
+              f"valid={n_valid}/{labels.size} -> {ply_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +924,8 @@ def output_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -
 # ---------------------------------------------------------------------------
 
 OUTPUT_REGISTRY: dict[str, Callable] = {
+    "rgb": output_rgb,
+    "gt": output_gt,
     "seg2d": output_seg2d,
     "pca2d": output_pca2d,
     "seg3d_ply": output_seg3d_ply,
@@ -801,8 +970,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g_output.add_argument("--out_dir", type=str, default="outputs/anysplat_infer")
 
+    g_2d = ap.add_argument_group("2D output control")
+    g_2d.add_argument(
+        "--seg2d_outs", type=str, default="compare",
+        help="Comma-separated sub-outputs for seg2d: seg,overlay,compare (default: compare)",
+    )
+    g_2d.add_argument(
+        "--pca2d_outs", type=str, default="compare",
+        help="Comma-separated sub-outputs for pca2d: pca,overlay,compare (default: compare)",
+    )
+    g_2d.add_argument(
+        "--compare_style", type=str, default="rgb_seg",
+        choices=["rgb_seg", "gt_seg", "gt_rgb_seg"],
+        help="Compare layout for seg2d (default: rgb_seg)",
+    )
+
     g_cluster = ap.add_argument_group("Clustering parameters")
-    g_cluster.add_argument("--cluster_algo", type=str, default="kmeans", choices=["kmeans", "dbscan", "hdbscan"])
+    g_cluster.add_argument(
+        "--cluster_algos", type=str, default="kmeans",
+        help="Comma-separated clustering algorithms: kmeans,dbscan,hdbscan (default: kmeans)",
+    )
     g_cluster.add_argument("--k", type=int, default=20, help="K-means clusters")
     g_cluster.add_argument("--kmeans_iters", type=int, default=30)
     g_cluster.add_argument("--max_points", type=int, default=200_000, help="Max points for k-means fit")
@@ -842,14 +1029,23 @@ def main() -> None:
           f"gaussian_instance_feat={'yes' if enc_out.gaussian_instance_feat is not None else 'no'}")
 
     # --- Run outputs ---
+    cluster_algos = [s.strip() for s in args.cluster_algos.split(",") if s.strip()]
+    for a in cluster_algos:
+        if a not in ("kmeans", "dbscan", "hdbscan"):
+            raise ValueError(f"Unknown cluster algo: {a}. Choose from: kmeans, dbscan, hdbscan")
+    seg2d_outs = [s.strip() for s in args.seg2d_outs.split(",") if s.strip()]
+    pca2d_outs = [s.strip() for s in args.pca2d_outs.split(",") if s.strip()]
+
     out_cfg = OutputConfig(
-        k=args.k, cluster_algo=args.cluster_algo, kmeans_iters=args.kmeans_iters,
+        k=args.k, cluster_algos=cluster_algos, kmeans_iters=args.kmeans_iters,
         max_points=args.max_points, dbscan_eps=args.dbscan_eps,
         dbscan_min_samples=args.dbscan_min_samples,
         hdbscan_min_cluster_size=args.hdbscan_min_cluster_size,
         hdbscan_min_samples=args.hdbscan_min_samples,
         opacity_threshold=args.opacity_threshold, seed=args.seed,
         palette_seed=args.palette_seed,
+        seg2d_outs=seg2d_outs, pca2d_outs=pca2d_outs,
+        compare_style=args.compare_style,
     )
 
     for name in requested:
