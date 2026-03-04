@@ -105,6 +105,7 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         """
         seg_flat = seg_gt.reshape(-1)
         emb_flat = embedding.reshape(embedding.shape[0], -1)  # [C, N]
+        emb_flat = F.normalize(emb_flat, dim=0)
 
         unique_ids = torch.unique(seg_flat)
         unique_ids = unique_ids[unique_ids != ignore_id]
