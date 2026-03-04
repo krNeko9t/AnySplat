@@ -80,6 +80,7 @@ class OutputConfig:
     seg2d_outs: list[str] = field(default_factory=lambda: ["compare"])
     pca2d_outs: list[str] = field(default_factory=lambda: ["compare"])
     compare_style: str = "rgb_seg"
+    save_unclustered: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +851,67 @@ def output_seg3d_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: P
 
 
 # ---------------------------------------------------------------------------
+# Output: Split 3DGS into per-cluster PLY files
+# ---------------------------------------------------------------------------
+
+def output_seg3d_split(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
+    """Cluster gaussian_instance_feat, then export each cluster as an independent 3DGS PLY."""
+    from src.model.ply_export import export_ply
+
+    gaussians = enc_out.gaussians
+    g_feat = enc_out.gaussian_instance_feat
+    if g_feat is None:
+        print("[seg3d_split] Skipped: gaussian_instance_feat is None")
+        return
+
+    device = gaussians.means.device
+    feat = g_feat[0].to(device).float()  # [G, N]
+    op = gaussians.opacities[0].to(device)
+
+    for algo in cfg.cluster_algos:
+        labels, _ = _run_cluster_3d(feat, op, algo, cfg)
+        tag = _algo_tag(cfg, algo)
+        split_dir = out_dir / "seg3d_split" / tag
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        labels_t = torch.from_numpy(labels).to(device)
+        max_label = int(labels.max()) if labels.size > 0 else 0
+        n_saved = 0
+
+        for cid in range(1, max_label + 1):
+            mask = labels_t == cid
+            if mask.sum() == 0:
+                continue
+            export_ply(
+                gaussians.means[0][mask],
+                gaussians.scales[0][mask],
+                gaussians.rotations[0][mask],
+                gaussians.harmonics[0][mask],
+                gaussians.opacities[0][mask],
+                split_dir / f"cluster_{cid - 1:03d}.ply",
+                save_sh_dc_only=True,
+            )
+            n_saved += 1
+
+        if cfg.save_unclustered:
+            unc_mask = labels_t == 0
+            if unc_mask.sum() > 0:
+                export_ply(
+                    gaussians.means[0][unc_mask],
+                    gaussians.scales[0][unc_mask],
+                    gaussians.rotations[0][unc_mask],
+                    gaussians.harmonics[0][unc_mask],
+                    gaussians.opacities[0][unc_mask],
+                    split_dir / "unclustered.ply",
+                    save_sh_dc_only=True,
+                )
+
+        np.save(split_dir / "cluster_labels.npy", labels)
+        print(f"[seg3d_split] algo={tag} saved {n_saved} cluster PLYs "
+              f"(max_label={max_label}) -> {split_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Output: Interpolated RGB/Depth Video
 # ---------------------------------------------------------------------------
 
@@ -929,6 +991,7 @@ OUTPUT_REGISTRY: dict[str, Callable] = {
     "seg2d": output_seg2d,
     "pca2d": output_pca2d,
     "seg3d_ply": output_seg3d_ply,
+    "seg3d_split": output_seg3d_split,
     "video": output_video,
     "embedding": output_embedding,
     "ply": output_ply,
@@ -992,7 +1055,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g_cluster.add_argument("--k", type=int, default=20, help="K-means clusters")
     g_cluster.add_argument("--kmeans_iters", type=int, default=30)
-    g_cluster.add_argument("--max_points", type=int, default=50_000, help="Max points for all clustering algorithms")
+    g_cluster.add_argument("--max_points", type=int, default=200_000, help="Max points for all clustering algorithms")
     g_cluster.add_argument("--dbscan_eps", type=float, default=0.3)
     g_cluster.add_argument("--dbscan_min_samples", type=int, default=10)
     g_cluster.add_argument("--hdbscan_min_cluster_size", type=int, default=50)
@@ -1000,6 +1063,10 @@ def build_parser() -> argparse.ArgumentParser:
     g_cluster.add_argument("--opacity_threshold", type=float, default=1.0 / 255.0)
     g_cluster.add_argument("--seed", type=int, default=0)
     g_cluster.add_argument("--palette_seed", type=int, default=0)
+    g_cluster.add_argument(
+        "--save_unclustered", action="store_true", default=False,
+        help="Also save unclustered (label=0) Gaussians as unclustered.ply in seg3d_split",
+    )
 
     return ap
 
@@ -1046,6 +1113,7 @@ def main() -> None:
         palette_seed=args.palette_seed,
         seg2d_outs=seg2d_outs, pca2d_outs=pca2d_outs,
         compare_style=args.compare_style,
+        save_unclustered=args.save_unclustered,
     )
 
     for name in requested:

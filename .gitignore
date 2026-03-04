@@ -182,6 +182,7 @@ results*
 
 *.ply
 *.mp4
+examples
 !assets/pipeline.jpg
 !examples/video/*.mp4
 
