@@ -74,6 +74,7 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
     # Core discriminative loss.  Accepts any [C, *spatial] embedding
     # with a matching [*spatial] label map (works for single-view
     # [C, H, W] or multi-view merged [C, V*H*W]).
+    # l_var = pull loss; l_dist = push loss
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -279,9 +280,9 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
         self.extra_logs = {
-            "disc_loss_raw": total_loss.detach(),
-            "disc_var": total_var.detach(),
-            "disc_dist": total_dist.detach(),
+            "loss_disc_raw": total_loss.detach(),
+            "loss_pull": total_var.detach(),
+            "loss_push": total_dist.detach(),
         }
 
         return loss
