@@ -31,7 +31,10 @@ import json
 import random
 import sys
 import os
+import tempfile
 from copy import deepcopy
+
+import cv2
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -153,6 +156,50 @@ def load_input_images(args: argparse.Namespace) -> InferenceInput:
     return InferenceInput(images=images, meta=meta)
 
 
+def load_input_video(args: argparse.Namespace) -> InferenceInput:
+    """Load input by extracting frames from a video (e.g. 1 frame per second), then use image pipeline."""
+    video_path = Path(args.input_video)
+    if not video_path.is_file():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    fps_interval = float(getattr(args, "video_fps", 1.0))  # frames per second to sample
+    temp_dir = tempfile.mkdtemp(prefix="instseg_video_")
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_interval = max(1, int(fps * fps_interval))
+        count = 0
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            count += 1
+            if count % frame_interval == 0:
+                out_path = os.path.join(temp_dir, f"{frame_idx:06d}.png")
+                cv2.imwrite(out_path, frame)
+                frame_idx += 1
+        cap.release()
+    except Exception:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+    if frame_idx == 0:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise ValueError(f"No frames extracted from {video_path}")
+
+    arg_copy = argparse.Namespace(image_dir=temp_dir)
+    inp = load_input_images(arg_copy)
+    inp.meta["source"] = "video"
+    inp.meta["video_path"] = str(video_path)
+    inp.meta["temp_dir"] = temp_dir
+    inp.meta["num_frames_extracted"] = frame_idx
+    print(f"[input] Extracted {frame_idx} frames from {video_path} (1 every {frame_interval} frames)")
+    return inp
+
+
 def _find_scene_index(scenes: list[dict[str, Any]], scene_id: str) -> int:
     for i, s in enumerate(scenes):
         if str(s.get("scene_id", i)) == str(scene_id):
@@ -265,12 +312,13 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
 
 
 def load_input(args: argparse.Namespace) -> InferenceInput:
+    if getattr(args, "input_video", None):
+        return load_input_video(args)
     if getattr(args, "image_dir", None):
         return load_input_images(args)
-    elif getattr(args, "run_dir", None):
+    if getattr(args, "run_dir", None):
         return load_input_dataset(args)
-    else:
-        raise ValueError("Specify --image_dir (images mode) or --run_dir (dataset mode)")
+    raise ValueError("Specify --input_video, --image_dir (images mode), or --run_dir (dataset mode)")
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +778,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     g_input = ap.add_argument_group("Input (choose one)")
+    g_input.add_argument("--input_video", type=str, default=None, help="Input video path; frames extracted (e.g. 1/sec) then used as images")
+    g_input.add_argument("--video_fps", type=float, default=1.0, help="Sample 1 frame every N seconds from video (default: 1.0)")
     g_input.add_argument("--image_dir", type=str, default=None, help="Directory of input images (images mode)")
     g_input.add_argument("--run_dir", type=str, default=None, help="Hydra run dir with .hydra/config.yaml (dataset mode)")
     g_input.add_argument("--scene_id", type=str, default=None, help="Scene ID in the dataset (dataset mode)")
