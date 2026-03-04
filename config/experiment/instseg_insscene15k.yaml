@@ -1,8 +1,18 @@
 # @package _global_
-# InstSeg 在 InsScene-15K 完整数据集上多卡训练。
-# 先运行 scripts/extract_and_make_manifest_insscene.py 解压并生成 manifest，
-# 再本实验用 dataset.custom.root / manifest_path 指向解压目录和 manifest。
-# 多卡：CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m experiment=instseg_insscene15k
+# InstSeg 在完整 InsScene-15K（三个子集：processed_infinigen / processed_scannetpp_v2 / processed_re10k）上训练。
+#
+# 使用流程示例：
+#   1. 为每个子集生成 manifest：
+#        - scripts/extract_and_make_manifest_insscene.py                 -> manifest_infinigen.jsonl
+#        - scripts/make_manifest_inscene_scannetpp_v2.py                 -> manifest_scannetpp_v2.jsonl
+#        - scripts/make_manifest_inscene_re10k.py                        -> manifest_re10k.jsonl
+#   2. 合并为一个总的 InsScene-15K manifest：
+#        - scripts/merge_manifests_inscene15k.py \\
+#             --manifest_infinigen=.../manifest_infinigen.jsonl \\
+#             --manifest_scannetpp_v2=.../manifest_scannetpp_v2.jsonl \\
+#             --manifest_re10k=.../manifest_re10k.jsonl \\
+#             --out=.../manifest_inscene15k.jsonl
+#   3. 本实验用 dataset.custom.root / manifest_path 指向公共根目录和合并后的 manifest。
 
 defaults:
   - instseg_custom
@@ -11,21 +21,18 @@ wandb:
   name: instseg_insscene15k
   tags: [instseg, insscene15k]
 
-# 解压后的根目录与 manifest（请先跑 extract_and_make_manifest_insscene.py）
 dataset:
   custom:
-    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted
-    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted/manifest.jsonl
+    # TODO: 将 root 与 manifest_path 改成你实际的 InsScene-15K 三子集公共根与合并 manifest 路径。
+    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K
+    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/manifest_inscene15k.jsonl
 
-# 多卡时适当增加 num_workers
 data_loader:
   train:
     num_workers: 8
     batch_size: 4
 
 optimizer:
-  # Differential LRs:
-  # - instance head: lr
-  # - everything else: lr * backbone_lr_multiplier
   lr: 4.0e-4
   warm_up_steps: 3000
+

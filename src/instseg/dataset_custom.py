@@ -25,6 +25,23 @@ from .view_sampler import ViewSamplerCfg, sample_bounded
 
 @dataclass
 class DatasetCustomCfg:
+    """通用多视角 manifest 数据集配置（InsScene 各子集 / Infinigen / ScanNet++ / RE10K 等）。
+
+    manifest 文件可以是：
+    - .jsonl：每行一个 scene（dict）
+    - .json：list[scene] 或 {"scenes": [...]} 形式
+
+    每个 scene 推荐包含：
+    - scene_id: 可选场景 ID
+    - frames / views / images: 视角列表（长度 >= 2），每个元素至少包含：
+      - rgb_path / image_path / rgb: 相对 root 的 RGB 图像路径
+      - depth_path / depth: 深度图路径（可选；无深度的数据集可省略该字段）
+      - instance_mask_path / mask_path / instance_mask: 实例分割 mask 路径
+      - K_px / K / intrinsic: 像素坐标系下的 3x3 内参矩阵
+      - c2w / extrinsic_c2w / camtoworld: 4x4 相机位姿（camera-to-world）
+      - near / far: 可选的近平面/远平面（缺失时使用本配置 near/far）
+    """
+
     name: Literal["custom"]
     root: Path
     manifest_path: Path
@@ -40,7 +57,7 @@ class DatasetCustomCfg:
     near: float = 0.01
     far: float = 100.0
 
-    # Depth invalid sentinel filter (Infinigen often uses very large values, e.g. 1e10).
+    # Depth invalid sentinel filter for all datasets (e.g. InsScene/Infinigen often use very large values like 1e10).
     depth_invalid_value: float = 1e9
 
 
@@ -159,21 +176,22 @@ class DatasetCustom(Dataset):
             for i in indices.tolist():
                 fr = self._get_frame(scene, int(i))
                 rgb_path = _as_path(self.root, fr.get("rgb_path") or fr.get("image_path") or fr["rgb"])
-                depth_path = _as_path(self.root, fr.get("depth_path") or fr["depth"])
+                depth_key = fr.get("depth_path") or fr.get("depth")
+                depth_path = _as_path(self.root, depth_key) if depth_key is not None else None
                 mask_path = _as_path(
                     self.root,
                     fr.get("instance_mask_path") or fr.get("mask_path") or fr["instance_mask"],
                 )
 
                 rgb = _load_rgb(rgb_path)
-                depth = _load_depth(depth_path)
+                depth = _load_depth(depth_path) if depth_path is not None else None
                 inst = _load_instance_mask(mask_path)
 
                 h_in, w_in = rgb.shape[-2:]
                 h_out, w_out = self.cfg.input_image_shape
                 p = resize_to_cover_and_center_crop_params(h_in, w_in, h_out, w_out)
                 rgb = apply_resize_crop_rgb(rgb, p)
-                depth = apply_resize_crop_depth(depth, p)
+                depth = apply_resize_crop_depth(depth, p) if depth is not None else None
                 inst = apply_resize_crop_instance_mask(inst, p)
 
                 # Camera.
@@ -193,13 +211,25 @@ class DatasetCustom(Dataset):
                 fars.append(far)
 
             images = torch.stack(rgbs, dim=0)  # [V,3,H,W] in [0,1]
-            depths_t = torch.stack(depths, dim=0)  # [V,H,W]
+            if any(d is None for d in depths):
+                # 允许无深度数据集（例如 RE10K）；使用占位 0 深度和全 False valid_mask。
+                if not all(d is None or isinstance(d, torch.Tensor) for d in depths):
+                    raise ValueError("depths list must contain only Tensor or None")
+                if any(d is None for d in depths) and not all(d is None for d in depths):
+                    raise ValueError("Mixed depth presence per scene is not supported")
+                h_out, w_out = self.cfg.input_image_shape
+                depths_t = torch.zeros((len(depths), h_out, w_out), dtype=torch.float32)
+                valid_mask = torch.zeros_like(depths_t, dtype=torch.bool)
+            else:
+                depths_t = torch.stack(depths, dim=0)  # [V,H,W]
+                valid_mask = (depths_t > 0) & torch.isfinite(depths_t) & (
+                    depths_t < float(self.cfg.depth_invalid_value)
+                )  # [V,H,W]
             masks_t = torch.stack(masks, dim=0).to(torch.int64)  # [V,H,W]
             extr = torch.stack(c2ws, dim=0)  # [V,4,4]
             intr = torch.stack(Ks, dim=0)  # [V,3,3] normalized
             near_t = torch.tensor(nears, dtype=torch.float32)
             far_t = torch.tensor(fars, dtype=torch.float32)
-            valid_mask = (depths_t > 0) & torch.isfinite(depths_t) & (depths_t < float(self.cfg.depth_invalid_value))  # [V,H,W]
             return images, depths_t, masks_t, extr, intr, near_t, far_t, valid_mask
 
         ctx = load_stack(ctx_idx)

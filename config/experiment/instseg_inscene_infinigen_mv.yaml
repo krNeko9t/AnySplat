@@ -1,8 +1,8 @@
 # @package _global_
-# InstSeg 在 InsScene-15K 完整数据集上多卡训练。
+# InstSeg 在 InsScene-processed_infinigen 子集上多卡训练。
 # 先运行 scripts/extract_and_make_manifest_insscene.py 解压并生成 manifest，
 # 再本实验用 dataset.custom.root / manifest_path 指向解压目录和 manifest。
-# 多卡：CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m experiment=instseg_insscene15k
+# 多卡：CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m experiment=instseg_inscene_infinigen_mv
 
 defaults:
   - instseg_custom
@@ -13,8 +13,8 @@ train:
   video_use_gt_trajectory: true  # val 视频固定轨迹，便于对比训练进度
 
 wandb:
-  name: instseg_insscene15k
-  tags: [instseg, insscene15k]
+  name: instseg_inscene_infinigen
+  tags: [instseg, inscene, infinigen]
 
 # 解压后的根目录与 manifest（请先跑 extract_and_make_manifest_insscene.py）
 dataset:
@@ -54,3 +54,4 @@ loss:
     # soft_pull_weight: 0.1
     # soft_step: 20000       # 第 M 步开始把 soft 从 0 线性加到目标值
     # soft_ramp_steps: 5000   # ramp 持续步数
+

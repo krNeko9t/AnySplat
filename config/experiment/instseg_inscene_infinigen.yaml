@@ -1,0 +1,32 @@
+# @package _global_
+# InstSeg 在 InsScene-processed_infinigen 子集上单卡/基础设置训练。
+# 先运行 scripts/extract_and_make_manifest_insscene.py 解压并生成 manifest，
+# 再本实验用 dataset.custom.root / manifest_path 指向解压目录和 manifest。
+# 多卡：CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m experiment=instseg_inscene_infinigen_mv
+
+defaults:
+  - instseg_custom
+
+wandb:
+  name: instseg_inscene_infinigen
+  tags: [instseg, inscene, infinigen]
+
+# 解压后的根目录与 manifest（请先跑 extract_and_make_manifest_insscene.py）
+dataset:
+  custom:
+    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted
+    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted/manifest.jsonl
+
+# 多卡时适当增加 num_workers
+data_loader:
+  train:
+    num_workers: 8
+    batch_size: 4
+
+optimizer:
+  # Differential LRs:
+  # - instance head: lr
+  # - everything else: lr * backbone_lr_multiplier
+  lr: 4.0e-4
+  warm_up_steps: 3000
+

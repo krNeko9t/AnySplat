@@ -5,12 +5,18 @@ defaults:
 name: custom
 
 # Root directory for resolving relative paths in manifest_path.
+# 可以指向任意符合 manifest schema 的多视角数据集根目录，例如：
+# - InsScene-15K/processed_infinigen_extracted
+# - InsScene-15K/processed_scannetpp_v2_extracted/processed_scannetpp_v2
+# - InsScene-15K/processed_re10k
 root: infinigen/16255241
 
 # Manifest can be .jsonl (one scene per line) or .json.
+# - .jsonl: 每行一个 {"scene_id": ..., "frames": [...]} 或等价结构
+# - .json: list[scene] 或 {"scenes": [...]}
 manifest_path: manifest.jsonl
 
-# Infinigen raw resolution (H,W) for this scene.
+# 原始图像分辨率 (H,W)，用于从 HW 缺失时的回退；应与具体数据集保持一致。
 original_image_shape: [288, 512]
 
 # Network input resolution (H,W) after crop_shim.
@@ -18,7 +24,7 @@ input_image_shape: [224, 448]
 
 cameras_are_circular: false
 
-# Depth invalid sentinel filter (Infinigen uses huge values like 1e10).
+# Depth invalid sentinel filter for all datasets (e.g. some pipelines use very large values like 1e10).
 depth_invalid_value: 1.0e9
 
 near: 0.01

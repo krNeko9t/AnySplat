@@ -13,5 +13,5 @@ After changing the logging backend (wandb / tensorboard / local), run these chec
 
 ## Multi-GPU (e.g. 8 cards)
 
-- `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python src/main.py -m experiment=instseg_insscene15k_mv`  
-  With `instseg_insscene15k_mv` already setting `logger: tensorboard`, confirm a single TensorBoard log dir under the run output and no NCCL timeouts.
+- `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python src/main.py -m experiment=instseg_inscene_infinigen_mv`  
+  With `instseg_inscene_infinigen_mv` already setting `logger: tensorboard`, confirm a single TensorBoard log dir under the run output and no NCCL timeouts.

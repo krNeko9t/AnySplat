@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DatasetCustomCfg(DatasetCfgCommon):
+    """配置用于通用多视角 manifest 数据集的参数。
+
+    该数据集通过 manifest 文件描述一组多视角场景，可用于：
+    - InsScene 各子集（processed_infinigen / processed_scannetpp_v2 / processed_re10k 等）
+    - 其他任意符合相同 schema 的多视角数据集
+
+    manifest 中的每个 scene 应包含：
+    - scene_id: 可选的场景 ID
+    - frames / views / images: 视角列表，每个元素至少包含：
+      - rgb_path / image_path / rgb: 相对 root 的 RGB 图像路径
+      - depth_path / depth: 深度图路径（可选；例如 RE10K 可省略）
+      - instance_mask_path / mask_path / instance_mask: 实例分割 mask 路径
+      - K_px / K / intrinsic: 像素坐标系下的 3x3 内参矩阵
+      - c2w / extrinsic_c2w / camtoworld: 4x4 相机位姿（camera-to-world）
+      - HW: [H, W] 原始分辨率（可选，缺失时回退到 original_image_shape）
+      - near / far: 可选的近平面/远平面（缺失时回退到本配置的 near/far）
+    """
+
     name: Literal["custom"]
     root: Path
     manifest_path: Path
