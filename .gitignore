@@ -199,3 +199,4 @@ tmp_scripts/
 *.whl
 
 infinigen/
+deprecated_launch.json
