@@ -201,4 +201,6 @@ tmp_scripts/
 infinigen/
 deprecated_launch.json
 zipnerf/
+3dovs
 standalone_trace.py
+trace_output_*

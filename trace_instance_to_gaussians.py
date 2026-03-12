@@ -429,6 +429,378 @@ def load_precomputed_features(feat_dir, image_names, feat_dim):
 
 
 # ---------------------------------------------------------------------------
+# Post-processing: PCA visualization, clustering, PLY export
+# ---------------------------------------------------------------------------
+
+def load_xyz_from_ply(ply_path):
+    """Load only xyz positions from a PLY file (lightweight for postprocess)."""
+    plydata = PlyData.read(ply_path)
+    v = plydata.elements[0]
+    xyz = np.stack([np.asarray(v["x"]), np.asarray(v["y"]), np.asarray(v["z"])], axis=1)
+    return xyz.astype(np.float32)
+
+
+@torch.no_grad()
+def pca_colorize_gaussians(feat, valid_mask, low_p=0.02, high_p=0.98):
+    """PCA-reduce [G, D] instance features to [G, 3] uint8 RGB.
+
+    Only valid Gaussians (valid_mask == True) are used to fit PCA;
+    invalid ones get black (0, 0, 0).
+    """
+    G, D = feat.shape
+    feat_f = feat.float()
+
+    valid_feat = feat_f[valid_mask]
+    if valid_feat.shape[0] < 10:
+        print("[pca] Warning: fewer than 10 valid Gaussians, using all")
+        valid_feat = feat_f
+
+    if D < 3:
+        pad = torch.zeros(feat_f.shape[0], 3 - D, device=feat_f.device)
+        feat_f = torch.cat([feat_f, pad], dim=1)
+        pad_v = torch.zeros(valid_feat.shape[0], 3 - D, device=valid_feat.device)
+        valid_feat = torch.cat([valid_feat, pad_v], dim=1)
+
+    mean = valid_feat.mean(dim=0, keepdim=True)
+    std = valid_feat.std(dim=0, keepdim=True) + 1e-5
+    valid_std = (valid_feat - mean) / std
+    all_std = (feat_f - mean) / std
+
+    try:
+        _, _, v = torch.pca_lowrank(valid_std, q=min(valid_std.shape[1], 256))
+        proj = all_std @ v[:, :3]  # [G, 3]
+    except Exception as e:
+        print(f"[pca] PCA failed ({e}), returning black")
+        return np.zeros((G, 3), dtype=np.uint8)
+
+    # Percentile normalization using valid Gaussians for range
+    proj_valid = proj[valid_mask]
+    for i in range(3):
+        v_lo = torch.quantile(proj_valid[:, i], low_p)
+        v_hi = torch.quantile(proj_valid[:, i], high_p)
+        if v_hi > v_lo:
+            proj[:, i] = (proj[:, i] - v_lo) / (v_hi - v_lo)
+        else:
+            proj[:, i] = 0.5
+    proj = proj.clamp(0, 1)
+
+    rgb_f = proj.cpu().numpy()
+    rgb_u8 = (rgb_f * 255).astype(np.uint8)
+    rgb_u8[~valid_mask.cpu().numpy()] = 0
+    return rgb_u8
+
+
+@torch.no_grad()
+def cluster_gaussians(feat, valid_mask, algo, **kwargs):
+    """Cluster per-Gaussian features and return (labels [G] int32, centers).
+
+    Labels: 0 = invalid/unassigned, 1..K = cluster IDs.
+    Features are L2-normalized before clustering.
+    """
+    G, D = feat.shape
+    valid_idx = torch.nonzero(valid_mask, as_tuple=False).squeeze(1)
+    if valid_idx.numel() == 0:
+        return np.zeros(G, dtype=np.int32), np.zeros((0, D), dtype=np.float32)
+
+    feat_n = F.normalize(feat.float(), p=2, dim=-1, eps=1e-8)
+
+    if algo == "kmeans":
+        return _cluster_kmeans(feat_n, valid_idx, G, D, **kwargs)
+    elif algo == "dbscan":
+        return _cluster_dbscan(feat_n, valid_idx, G, D, **kwargs)
+    elif algo == "hdbscan":
+        return _cluster_hdbscan(feat_n, valid_idx, G, D, **kwargs)
+    else:
+        raise ValueError(f"Unknown clustering algo: {algo}")
+
+
+def _cluster_kmeans(feat_n, valid_idx, G, D, k=20, iters=30, seed=0, max_points=200000):
+    from src.instseg.kmeans import kmeans_torch
+
+    S = min(max_points, valid_idx.numel())
+    g = torch.Generator(device=feat_n.device)
+    g.manual_seed(seed)
+    perm = torch.randperm(valid_idx.numel(), generator=g, device=feat_n.device)[:S]
+    x = feat_n[valid_idx[perm]]
+    _, centers = kmeans_torch(x, k=k, num_iters=iters, seed=seed)
+
+    centers_n = F.normalize(centers.float(), p=2, dim=-1, eps=1e-8)
+    pred = (feat_n @ centers_n.T).argmax(dim=1).to(torch.int64)
+
+    valid_bool = torch.zeros(G, dtype=torch.bool, device=feat_n.device)
+    valid_bool[valid_idx] = True
+    pred[~valid_bool] = -1
+
+    labels = torch.zeros(G, dtype=torch.int32, device=feat_n.device)
+    labels[pred >= 0] = (pred[pred >= 0] + 1).to(torch.int32)
+    return labels.cpu().numpy(), centers.cpu().numpy()
+
+
+def _cluster_dbscan(feat_n, valid_idx, G, D, eps=0.3, min_samples=10, max_points=200000):
+    from sklearn.cluster import DBSCAN
+
+    x_np = feat_n[valid_idx].cpu().numpy()
+    if x_np.shape[0] > max_points:
+        rng = np.random.default_rng(0)
+        idx_sub = rng.choice(x_np.shape[0], max_points, replace=False)
+        sub_labels = DBSCAN(
+            eps=eps, min_samples=min_samples, metric="cosine", n_jobs=-1,
+        ).fit_predict(x_np[idx_sub])
+        mask_clustered = sub_labels >= 0
+        n_sub_clusters = int(sub_labels.max() + 1) if mask_clustered.any() else 0
+        if n_sub_clusters >= 2:
+            from sklearn.neighbors import NearestCentroid
+            nc = NearestCentroid()
+            nc.fit(x_np[idx_sub][mask_clustered], sub_labels[mask_clustered])
+            db_labels = nc.predict(x_np)
+        elif n_sub_clusters == 1:
+            db_labels = np.zeros(x_np.shape[0], dtype=np.int32)
+        else:
+            db_labels = np.full(x_np.shape[0], -1, dtype=np.int32)
+    else:
+        db_labels = DBSCAN(
+            eps=eps, min_samples=min_samples, metric="cosine", n_jobs=-1,
+        ).fit_predict(x_np)
+
+    labels = np.zeros(G, dtype=np.int32)
+    valid_np = valid_idx.cpu().numpy()
+    is_cluster = db_labels >= 0
+    if np.any(is_cluster):
+        labels[valid_np[is_cluster]] = (db_labels[is_cluster] + 1).astype(np.int32)
+
+    n_clusters = int(db_labels[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    centers = np.zeros((n_clusters, feat_n.shape[1]), dtype=np.float32)
+    for cid in range(n_clusters):
+        mem = valid_np[db_labels == cid]
+        c = feat_n[torch.from_numpy(mem).to(feat_n.device)].float().mean(0)
+        centers[cid] = F.normalize(c, p=2, dim=-1, eps=1e-8).cpu().numpy()
+    return labels, centers
+
+
+def _cluster_hdbscan(feat_n, valid_idx, G, D,
+                     min_cluster_size=50, min_samples=10, max_points=200000):
+    import hdbscan as hdb_lib
+
+    x_np = feat_n[valid_idx].cpu().numpy()
+    if x_np.shape[0] > max_points:
+        rng = np.random.default_rng(0)
+        idx_sub = rng.choice(x_np.shape[0], max_points, replace=False)
+        hdb_labels_sub = hdb_lib.HDBSCAN(
+            min_cluster_size=min_cluster_size, min_samples=min_samples,
+            metric="euclidean",
+        ).fit_predict(x_np[idx_sub])
+        mask_clustered = hdb_labels_sub >= 0
+        n_sub_clusters = int(hdb_labels_sub.max() + 1) if mask_clustered.any() else 0
+        if n_sub_clusters >= 2:
+            from sklearn.neighbors import NearestCentroid
+            nc = NearestCentroid()
+            nc.fit(x_np[idx_sub][mask_clustered], hdb_labels_sub[mask_clustered])
+            hdb_labels = nc.predict(x_np)
+        elif n_sub_clusters == 1:
+            hdb_labels = np.zeros(x_np.shape[0], dtype=np.int32)
+        else:
+            hdb_labels = np.full(x_np.shape[0], -1, dtype=np.int32)
+    else:
+        hdb_labels = hdb_lib.HDBSCAN(
+            min_cluster_size=min_cluster_size, min_samples=min_samples,
+            metric="euclidean",
+        ).fit_predict(x_np)
+
+    labels = np.zeros(G, dtype=np.int32)
+    valid_np = valid_idx.cpu().numpy()
+    is_cluster = hdb_labels >= 0
+    if np.any(is_cluster):
+        labels[valid_np[is_cluster]] = (hdb_labels[is_cluster] + 1).astype(np.int32)
+
+    n_clusters = int(hdb_labels[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    centers = np.zeros((n_clusters, feat_n.shape[1]), dtype=np.float32)
+    for cid in range(n_clusters):
+        mem = valid_np[hdb_labels == cid]
+        c = feat_n[torch.from_numpy(mem).to(feat_n.device)].float().mean(0)
+        centers[cid] = F.normalize(c, p=2, dim=-1, eps=1e-8).cpu().numpy()
+    return labels, centers
+
+
+def save_colored_pointcloud(xyz_np, rgb_u8, path):
+    """Write a simple (x,y,z,red,green,blue) PLY file."""
+    from plyfile import PlyData as PD, PlyElement as PE
+
+    dtype = [("x", "f4"), ("y", "f4"), ("z", "f4"),
+             ("red", "u1"), ("green", "u1"), ("blue", "u1")]
+    verts = np.empty(len(xyz_np), dtype=dtype)
+    verts["x"], verts["y"], verts["z"] = xyz_np[:, 0], xyz_np[:, 1], xyz_np[:, 2]
+    verts["red"], verts["green"], verts["blue"] = rgb_u8[:, 0], rgb_u8[:, 1], rgb_u8[:, 2]
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    PD([PE.describe(verts, "vertex")]).write(str(path))
+    print(f"  Saved PLY: {path}")
+
+
+def save_colored_gaussians_ply(ply_path, rgb_u8, out_path):
+    """Clone the original 3DGS PLY but replace SH DC with given RGB colors.
+
+    All other attributes (scales, rotations, opacities, f_rest, etc.) are
+    preserved verbatim, so the output can be rendered in any 3DGS viewer.
+    """
+    plydata = PlyData.read(ply_path)
+    v = plydata.elements[0]
+
+    C0 = 0.28209479177387814
+    rgb_f = rgb_u8.astype(np.float32) / 255.0
+    sh_dc = (rgb_f - 0.5) / C0  # [G, 3]
+
+    data = v.data.copy()
+    data["f_dc_0"] = sh_dc[:, 0].astype(np.float32)
+    data["f_dc_1"] = sh_dc[:, 1].astype(np.float32)
+    data["f_dc_2"] = sh_dc[:, 2].astype(np.float32)
+
+    from plyfile import PlyData as PD, PlyElement as PE
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    PD([PE.describe(data, "vertex")]).write(str(out_path))
+    print(f"  Saved 3DGS PLY: {out_path}")
+
+
+def run_postprocess(feat, num_ray, ply_path, output_dir, args):
+    """Dispatch post-processing: PCA and/or clustering."""
+    from src.visualization.instance_viz import make_color_lut
+
+    modes = [s.strip() for s in args.postprocess.split(",") if s.strip()]
+    if not modes:
+        return
+
+    valid_mask = num_ray > 0
+    n_valid = valid_mask.sum().item()
+    G = feat.shape[0]
+    print(f"\n[postprocess] {G:,} Gaussians, {n_valid:,} valid ({100*n_valid/G:.1f}%)")
+    print(f"[postprocess] Modes: {modes}")
+
+    xyz_np = load_xyz_from_ply(ply_path)
+    assert xyz_np.shape[0] == G, (
+        f"PLY has {xyz_np.shape[0]} points but feat has {G} Gaussians"
+    )
+
+    post_dir = os.path.join(output_dir, "postprocess")
+
+    feat_gpu = feat.cuda() if not feat.is_cuda else feat
+    valid_gpu = valid_mask.cuda() if not valid_mask.is_cuda else valid_mask
+
+    if "pca" in modes:
+        print("\n--- PCA visualization ---")
+        rgb_pca = pca_colorize_gaussians(feat_gpu, valid_gpu)
+        save_colored_pointcloud(xyz_np, rgb_pca,
+                                os.path.join(post_dir, "pca_pointcloud.ply"))
+        save_colored_gaussians_ply(ply_path, rgb_pca,
+                                   os.path.join(post_dir, "pca_gaussians.ply"))
+
+    for algo in ["kmeans", "dbscan", "hdbscan"]:
+        if algo not in modes:
+            continue
+        print(f"\n--- Clustering: {algo} ---")
+        if algo == "kmeans":
+            kw = dict(k=args.k, iters=args.kmeans_iters,
+                      seed=args.seed, max_points=args.max_cluster_pts)
+        elif algo == "dbscan":
+            kw = dict(eps=args.dbscan_eps, min_samples=args.dbscan_min_samples,
+                      max_points=args.max_cluster_pts)
+        else:
+            kw = dict(min_cluster_size=args.hdbscan_min_cluster_size,
+                      min_samples=args.hdbscan_min_samples,
+                      max_points=args.max_cluster_pts)
+
+        labels, centers = cluster_gaussians(feat_gpu, valid_gpu, algo, **kw)
+        max_label = int(labels.max()) if labels.size > 0 else 0
+        n_clustered = int((labels > 0).sum())
+        print(f"  Clusters: {max_label}, assigned: {n_clustered:,}/{n_valid:,}")
+
+        lut = make_color_lut(max_label + 1, seed=args.palette_seed)
+        rgb_cluster = lut[np.clip(labels, 0, max_label)]  # [G, 3] uint8
+        rgb_cluster[labels == 0] = 0
+
+        algo_dir = os.path.join(post_dir, algo)
+        save_colored_pointcloud(xyz_np, rgb_cluster,
+                                os.path.join(algo_dir, "colored_pointcloud.ply"))
+        save_colored_gaussians_ply(ply_path, rgb_cluster,
+                                   os.path.join(algo_dir, "colored_gaussians.ply"))
+        np.save(os.path.join(algo_dir, "cluster_labels.npy"), labels)
+        print(f"  Saved labels: {os.path.join(algo_dir, 'cluster_labels.npy')}")
+
+    print(f"\n[postprocess] Done -> {post_dir}")
+
+
+def render_colored_views(source_path, ply_path, output_dir, args):
+    """Render original + PCA + cluster PLYs from random views and save images."""
+    import random
+
+    n_views = args.render_views
+    if n_views <= 0:
+        return
+
+    post_dir = os.path.join(output_dir, "postprocess")
+    render_dir = os.path.join(post_dir, "renders")
+    os.makedirs(render_dir, exist_ok=True)
+
+    plys = {"original": ply_path}
+    if os.path.isfile(os.path.join(post_dir, "pca_gaussians.ply")):
+        plys["pca"] = os.path.join(post_dir, "pca_gaussians.ply")
+    for algo in ["kmeans", "dbscan", "hdbscan"]:
+        path = os.path.join(post_dir, algo, "colored_gaussians.ply")
+        if os.path.isfile(path):
+            plys[algo] = path
+
+    if len(plys) <= 1:
+        print("[render] No PCA/cluster PLYs found, skip rendering")
+        return
+
+    print(f"\n[render] Loading cameras from {source_path} ...")
+    cameras = load_colmap_cameras(
+        source_path, args.images_folder, args.render_resolution
+    )
+    n_avail = min(n_views, len(cameras))
+    random.seed(args.seed)
+    selected = random.sample(cameras, n_avail)
+    print(f"  Selected {n_avail} views: {[c.image_name for c in selected]}")
+
+    bg = torch.tensor([1.0, 1.0, 1.0], device="cuda")
+
+    for ply_name, ply_path_i in plys.items():
+        print(f"  Rendering {ply_name} ...")
+        means, quats, scales, opacities, colors = load_gaussians_from_ply(ply_path_i)
+
+        for cam in selected:
+            H, W = cam.image_height, cam.image_width
+            img_sem = torch.zeros(H, W, TRACE_CHANNELS, device="cuda")
+            img_mask = torch.ones(H, W, dtype=torch.int32, device="cuda")
+
+            with torch.no_grad():
+                _, _, _, out_color = trace_single_view(
+                    means, quats, scales, opacities, colors,
+                    img_sem, img_mask, cam, bg,
+                )
+
+            img_np = (
+                out_color.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255
+            ).astype(np.uint8)
+            Image.fromarray(img_np).save(
+                os.path.join(render_dir, f"{cam.image_name}_{ply_name}.png")
+            )
+
+    # Comparison grids (all PLYs side by side)
+    ply_names = list(plys.keys())
+    print(f"  Creating comparison grids ({' | '.join(ply_names)}) ...")
+    for cam in selected:
+        imgs = []
+        for ply_name in ply_names:
+            path = os.path.join(render_dir, f"{cam.image_name}_{ply_name}.png")
+            imgs.append(np.array(Image.open(path)))
+        grid = np.concatenate(imgs, axis=1)
+        Image.fromarray(grid).save(
+            os.path.join(render_dir, f"{cam.image_name}_compare.png")
+        )
+
+    print(f"  Saved to {render_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -437,8 +809,8 @@ def main():
         description="Trace 2D instance features onto pre-trained 2DGS Gaussians"
     )
     g_scene = parser.add_argument_group("Scene")
-    g_scene.add_argument("--source_path", "-s", required=True)
-    g_scene.add_argument("--ply_path", "-p", required=True)
+    g_scene.add_argument("--source_path", "-s", default=None)
+    g_scene.add_argument("--ply_path", "-p", default=None)
     g_scene.add_argument("--images_folder", default="images")
     g_scene.add_argument("--resolution", "-r", type=int, default=1)
     g_scene.add_argument("--output_dir", "-o", default="trace_output")
@@ -461,12 +833,73 @@ def main():
     g_run.add_argument("--save_render", action="store_true",
                        help="Save per-view trace RGB renders")
 
+    g_post = parser.add_argument_group("Post-processing")
+    g_post.add_argument("--postprocess", default=None,
+                        help="Comma-separated: pca, kmeans, dbscan, hdbscan")
+    g_post.add_argument("--load_traced", default=None,
+                        help="Load saved .pt file, skip trace, run postprocess only")
+    g_post.add_argument("--k", type=int, default=20,
+                        help="K-means clusters (default: 20)")
+    g_post.add_argument("--kmeans_iters", type=int, default=30)
+    g_post.add_argument("--max_cluster_pts", type=int, default=200_000,
+                        help="Max points sampled for clustering (default: 200000)")
+    g_post.add_argument("--dbscan_eps", type=float, default=0.3)
+    g_post.add_argument("--dbscan_min_samples", type=int, default=10)
+    g_post.add_argument("--hdbscan_min_cluster_size", type=int, default=50)
+    g_post.add_argument("--hdbscan_min_samples", type=int, default=10)
+    g_post.add_argument("--seed", type=int, default=0)
+    g_post.add_argument("--palette_seed", type=int, default=0)
+    g_post.add_argument("--render_views", type=int, default=0,
+                        help="Render N random views of original/pca/cluster PLYs (0=skip)")
+    g_post.add_argument("--render_resolution", type=int, default=4,
+                        help="Resolution divisor for render (1/2/4/8, default 4)")
+
     args = parser.parse_args()
+
+    output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ==================================================================
+    # Postprocess-only mode: load saved .pt and skip trace
+    # ==================================================================
+    if args.load_traced is not None:
+        print(f"[load_traced] Loading {args.load_traced} ...")
+        ckpt = torch.load(args.load_traced, map_location="cpu", weights_only=True)
+        final_feat = ckpt["feat"]       # [G, D]
+        num_ray = ckpt["num_ray"]       # [G]
+        ply_path = args.ply_path or ckpt.get("ply_path", None)
+        if ply_path is None:
+            parser.error("--ply_path is required (not found in .pt either)")
+        ply_path = os.path.abspath(ply_path)
+
+        G = final_feat.shape[0]
+        n_valid = (num_ray > 0).sum().item()
+        print(f"  Loaded feat [{G}, {final_feat.shape[1]}], "
+              f"valid: {n_valid:,}/{G:,} ({100*n_valid/G:.1f}%)")
+
+        if args.postprocess is None:
+            parser.error("--postprocess is required in --load_traced mode")
+
+        run_postprocess(final_feat, num_ray, ply_path, output_dir, args)
+
+        if args.render_views > 0:
+            source_path = args.source_path or ckpt.get("source_path")
+            if source_path is None:
+                print("[render] Skipped: --source_path required for render_views")
+            else:
+                render_colored_views(
+                    os.path.abspath(source_path), ply_path, output_dir, args
+                )
+        return
+
+    # ==================================================================
+    # Normal trace mode
+    # ==================================================================
+    if args.source_path is None or args.ply_path is None:
+        parser.error("--source_path and --ply_path are required for trace mode")
 
     source_path = os.path.abspath(args.source_path)
     ply_path = os.path.abspath(args.ply_path)
-    output_dir = os.path.abspath(args.output_dir)
-    os.makedirs(output_dir, exist_ok=True)
 
     mode_a = args.run_dir is not None and args.ckpt is not None
     mode_b = args.feat_dir is not None
@@ -522,7 +955,6 @@ def main():
     sum_gau_sem = torch.zeros(N, feat_dim, device=device, dtype=torch.float32)
     sum_num_ray = torch.zeros(N, device=device, dtype=torch.float32)
 
-    # For Mode A: process views through encoder in batches
     if mode_a:
         batch_size = args.encoder_batch_size
         all_feat_maps = []
@@ -535,7 +967,7 @@ def main():
             batch_paths = image_paths[start:end]
             feat_batch = run_encoder_batch(encoder, batch_paths, device)
             for vi in range(feat_batch.shape[0]):
-                all_feat_maps.append(feat_batch[vi])  # [D, H_feat, W_feat]
+                all_feat_maps.append(feat_batch[vi])
 
         del encoder
         torch.cuda.empty_cache()
@@ -546,21 +978,18 @@ def main():
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
         H, W = cam.image_height, cam.image_width
 
-        # Get feature map for this view
         if mode_a:
-            feat_2d = all_feat_maps[idx]  # [D, H_feat, W_feat]
+            feat_2d = all_feat_maps[idx]
         else:
-            feat_2d = precomp_feats[idx]  # [D, H_feat, W_feat]
+            feat_2d = precomp_feats[idx]
 
-        # Resize feature map to match trace rendering resolution
         if feat_2d.shape[1] != H or feat_2d.shape[2] != W:
             feat_2d = F.interpolate(
                 feat_2d.unsqueeze(0), size=(H, W),
                 mode="bilinear", align_corners=False,
             ).squeeze(0)
 
-        # Pad to TRACE_CHANNELS: [D, H, W] -> [H, W, TRACE_CHANNELS]
-        feat_hwc = feat_2d.permute(1, 2, 0).contiguous()  # [H, W, D]
+        feat_hwc = feat_2d.permute(1, 2, 0).contiguous()
         if feat_dim < TRACE_CHANNELS:
             pad = torch.zeros(
                 H, W, TRACE_CHANNELS - feat_dim,
@@ -575,7 +1004,6 @@ def main():
             feat_hwc, img_mask, cam, bg_color,
         )
 
-        # Accumulate (only first feat_dim channels)
         sum_gau_sem += gau_sem[:, :feat_dim]
         sum_num_ray += num_ray.float()
 
@@ -600,7 +1028,6 @@ def main():
     print(f"  Feature dim:       {feat_dim}")
     print(f"  Views used:        {len(cam_list)}")
 
-    # Save
     out_path_pt = os.path.join(output_dir, "gaussian_instance_feat.pt")
     torch.save({
         "feat": final_feat.cpu(),
@@ -617,7 +1044,6 @@ def main():
     np.save(out_path_npy, final_feat.cpu().numpy())
     print(f"  Saved to {out_path_npy}")
 
-    # Stats
     feat_norms = final_feat[valid_mask].norm(dim=1)
     print(f"\n  Feature stats (valid Gaussians):")
     print(f"    norm  min={feat_norms.min():.4f}  mean={feat_norms.mean():.4f}  "
@@ -625,6 +1051,14 @@ def main():
     print(f"    num_ray  min={sum_num_ray[valid_mask].min():.0f}  "
           f"mean={sum_num_ray[valid_mask].mean():.1f}  "
           f"max={sum_num_ray[valid_mask].max():.0f}")
+
+    # ---- 7. Post-processing (optional) ----
+    if args.postprocess:
+        run_postprocess(final_feat, sum_num_ray, ply_path, output_dir, args)
+
+    # ---- 8. Render colored views (optional) ----
+    if args.render_views > 0:
+        render_colored_views(source_path, ply_path, output_dir, args)
 
 
 if __name__ == "__main__":
