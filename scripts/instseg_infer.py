@@ -11,6 +11,12 @@ Examples:
       --outputs seg2d,pca2d \
       --out_dir outputs/my_result
 
+  # Randomly sample 8 views from image_dir (use --seed for reproducibility):
+  python scripts/anysplat_infer.py \
+      --image_dir examples/vrnerf/riverview \
+      --max_views 8 \
+      --outputs seg2d
+
   # Multiple clustering algorithms with overlay + compare (gt|rgb|seg):
   python scripts/anysplat_infer.py \
       --run_dir output/my_run --ckpt path/to.ckpt \
@@ -147,6 +153,13 @@ def load_input_images(args: argparse.Namespace) -> InferenceInput:
     if not paths:
         raise ValueError(f"No images found in {image_dir}")
 
+    max_views = getattr(args, "max_views", None)
+    if max_views is not None and max_views < len(paths):
+        rng = random.Random(getattr(args, "seed", 0))
+        paths = rng.sample(paths, max_views)
+        paths = sorted(paths)  # keep deterministic order for reproducibility
+        print(f"[input] Randomly sampled {max_views} views (seed={getattr(args, 'seed', 0)})")
+
     imgs = torch.stack([process_image(str(p)) for p in paths], dim=0)  # [V, 3, 448, 448] in [-1, 1]
     imgs_01 = (imgs + 1.0) * 0.5  # -> [0, 1]
     images = imgs_01.unsqueeze(0)  # [1, V, 3, H, W]
@@ -195,7 +208,11 @@ def load_input_video(args: argparse.Namespace) -> InferenceInput:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise ValueError(f"No frames extracted from {video_path}")
 
-    arg_copy = argparse.Namespace(image_dir=temp_dir)
+    arg_copy = argparse.Namespace(
+        image_dir=temp_dir,
+        max_views=getattr(args, "max_views", None),
+        seed=getattr(args, "seed", 0),
+    )
     inp = load_input_images(arg_copy)
     inp.meta["source"] = "video"
     inp.meta["video_path"] = str(video_path)
@@ -1013,6 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_input.add_argument("--input_video", type=str, default=None, help="Input video path; frames extracted (e.g. 1/sec) then used as images")
     g_input.add_argument("--video_fps", type=float, default=1.0, help="Sample 1 frame every N seconds from video (default: 1.0)")
     g_input.add_argument("--image_dir", type=str, default=None, help="Directory of input images (images mode)")
+    g_input.add_argument("--max_views", type=int, default=None, help="Randomly sample N views from image_dir (default: use all)")
     g_input.add_argument("--run_dir", type=str, default=None, help="Hydra run dir with .hydra/config.yaml (dataset mode)")
     g_input.add_argument("--scene_id", type=str, default=None, help="Scene ID in the dataset (dataset mode)")
     g_input.add_argument("--context_views", type=str, default=None, help="Comma-separated context view indices")
