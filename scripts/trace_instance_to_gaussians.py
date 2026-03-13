@@ -16,14 +16,14 @@ Dependencies (anysplat conda env):
 
 Example:
   # Mode B – pre-saved feature maps
-  python trace_instance_to_gaussians.py \
+  python scripts/trace_instance_to_gaussians.py \
       --source_path zipnerf/alameda \
       --ply_path zipnerf/alameda/point_cloud.ply \
       --feat_dir precomputed_feats/ \
       --feat_dim 8 --max_views 5
 
   # Mode A – online inference (--ckpt optional, defaults to run_dir/checkpoints/last.ckpt)
-  python trace_instance_to_gaussians.py \
+  python scripts/trace_instance_to_gaussians.py \
       --source_path zipnerf/alameda \
       --ply_path zipnerf/alameda/point_cloud.ply \
       --run_dir output/exp_instseg_custom/2026-02-22_17-15-07 \
@@ -43,7 +43,7 @@ from PIL import Image
 from tqdm import tqdm
 from plyfile import PlyData
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.misc.colmap_utils import (
     read_extrinsics_binary, read_intrinsics_binary,
     read_extrinsics_text, read_intrinsics_text,
