@@ -270,7 +270,7 @@ def _cluster_gaussians_hdbscan(
 def _main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run_dir", type=str, required=True, help="Hydra run dir containing .hydra/config.yaml and fixed_views.json")
-    ap.add_argument("--ckpt", type=str, required=True, help="Path to Lightning .ckpt")
+    ap.add_argument("--ckpt", type=str, default=None, help="Path to Lightning .ckpt (default: run_dir/checkpoints/last.ckpt)")
     ap.add_argument("--out_dir", type=str, default="outputs/instseg_cluster_ply")
     ap.add_argument("--out_name", type=str, default="gaussians_cluster_color.ply")
     ap.add_argument("--device", type=str, default="cuda")
@@ -329,7 +329,9 @@ def _main() -> None:
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir)
-    ckpt_path = Path(args.ckpt)
+    ckpt_path = Path(args.ckpt) if args.ckpt else run_dir / "checkpoints" / "last.ckpt"
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

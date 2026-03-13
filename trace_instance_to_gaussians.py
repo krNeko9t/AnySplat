@@ -22,12 +22,11 @@ Example:
       --feat_dir precomputed_feats/ \
       --feat_dim 8 --max_views 5
 
-  # Mode A – online inference
+  # Mode A – online inference (--ckpt optional, defaults to run_dir/checkpoints/last.ckpt)
   python trace_instance_to_gaussians.py \
       --source_path zipnerf/alameda \
       --ply_path zipnerf/alameda/point_cloud.ply \
       --run_dir output/exp_instseg_custom/2026-02-22_17-15-07 \
-      --ckpt output/exp_instseg_custom/2026-02-22_17-15-07/checkpoints/last.ckpt \
       --max_views 5
 """
 
@@ -872,7 +871,7 @@ def main():
     g_feat.add_argument("--run_dir", default=None,
                         help="Mode A: Hydra run directory")
     g_feat.add_argument("--ckpt", default=None,
-                        help="Mode A: Lightning checkpoint path")
+                        help="Mode A: Lightning checkpoint path (default: run_dir/checkpoints/last.ckpt)")
     g_feat.add_argument("--encoder_batch_size", type=int, default=4,
                         help="Mode A: views per encoder forward pass")
 
@@ -908,6 +907,12 @@ def main():
                         help="Resolution divisor for render (1/2/4/8, default 4)")
 
     args = parser.parse_args()
+
+    # Auto-resolve ckpt when run_dir is set but ckpt is not
+    if args.run_dir is not None and args.ckpt is None:
+        args.ckpt = str(Path(args.run_dir) / "checkpoints" / "last.ckpt")
+        if not os.path.exists(args.ckpt):
+            parser.error(f"--ckpt not specified and default {args.ckpt} not found")
 
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -954,10 +959,10 @@ def main():
     source_path = os.path.abspath(args.source_path)
     ply_path = os.path.abspath(args.ply_path)
 
-    mode_a = args.run_dir is not None and args.ckpt is not None
+    mode_a = args.run_dir is not None
     mode_b = args.feat_dir is not None
     if not mode_a and not mode_b:
-        parser.error("Specify --feat_dir (Mode B) or --run_dir + --ckpt (Mode A)")
+        parser.error("Specify --feat_dir (Mode B) or --run_dir (Mode A; ckpt defaults to run_dir/checkpoints/last.ckpt)")
 
     device = "cuda"
     bg_val = [1.0, 1.0, 1.0] if args.white_background else [0.0, 0.0, 0.0]

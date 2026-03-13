@@ -18,8 +18,9 @@ Examples:
       --outputs seg2d
 
   # Multiple clustering algorithms with overlay + compare (gt|rgb|seg):
+  # (--ckpt optional, defaults to run_dir/checkpoints/last.ckpt)
   python scripts/anysplat_infer.py \
-      --run_dir output/my_run --ckpt path/to.ckpt \
+      --run_dir output/my_run \
       --outputs rgb,gt,seg2d \
       --cluster_algos kmeans,dbscan,hdbscan \
       --seg2d_outs seg,overlay,compare \
@@ -1039,7 +1040,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_input.add_argument("--num_target", type=int, default=1, help="Random target views count (dataset mode)")
 
     g_model = ap.add_argument_group("Model")
-    g_model.add_argument("--ckpt", type=str, default=None, help="Lightning .ckpt path (with --run_dir)")
+    g_model.add_argument("--ckpt", type=str, default=None, help="Lightning .ckpt path (default: run_dir/checkpoints/last.ckpt when --run_dir is set)")
     g_model.add_argument("--hf_model", type=str, default="lhjiang/anysplat", help="HuggingFace model ID")
     g_model.add_argument("--instance_feat_dim", type=int, default=16, help="Instance feature dim (0 to disable)")
     g_model.add_argument("--device", type=str, default="cuda")
@@ -1091,6 +1092,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    # Auto-resolve ckpt when run_dir is set but ckpt is not (only if default path exists)
+    if getattr(args, "run_dir", None) and getattr(args, "ckpt", None) is None:
+        default_ckpt = Path(args.run_dir) / "checkpoints" / "last.ckpt"
+        if default_ckpt.exists():
+            args.ckpt = str(default_ckpt)
+        # else: leave ckpt=None, load_model will use HF pretrained (run_dir may be for dataset only)
+
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

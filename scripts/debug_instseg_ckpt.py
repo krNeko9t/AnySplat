@@ -211,7 +211,7 @@ def _main() -> None:
         epilog=__doc__,
     )
     ap.add_argument("--run_dir", type=str, required=True, help="Hydra run dir (must contain .hydra/config.yaml)")
-    ap.add_argument("--ckpt", type=str, required=True, help="Path to Lightning .ckpt")
+    ap.add_argument("--ckpt", type=str, default=None, help="Path to Lightning .ckpt (default: run_dir/checkpoints/last.ckpt)")
     ap.add_argument("--out_dir", type=str, default="outputs/instseg_debug")
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--scene", type=str, default=None, help="Scene: scene_id (str) or index (int). Default: 0")
@@ -226,7 +226,9 @@ def _main() -> None:
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir)
-    ckpt_path = Path(args.ckpt)
+    ckpt_path = Path(args.ckpt) if args.ckpt else run_dir / "checkpoints" / "last.ckpt"
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg_path = run_dir / ".hydra" / "config.yaml"
