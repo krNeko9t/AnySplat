@@ -52,6 +52,7 @@ from src.misc.colmap_utils import (
 )
 
 TRACE_CHANNELS = 20  # compiled into diff_surfel_rasterization CUDA kernel
+ENCODER_CROP_SIZE = 448  # prepare_encoder_image center-crop size
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +118,51 @@ class TraceCamera:
         self.tanfovx = math.tan(FoVx / 2)
         self.tanfovy = math.tan(FoVy / 2)
         self.campos = torch.linalg.inv(self.viewmatrix.T)[:3, 3].cuda()
+
+
+def compute_encoder_crop_params(orig_w, orig_h):
+    """Match prepare_encoder_image: resize (shorter side 448) then center-crop 448x448.
+
+    Returns (enc_w, enc_h, crop_left, crop_top) for the resized image before crop.
+    """
+    if orig_w > orig_h:
+        enc_h = ENCODER_CROP_SIZE
+        enc_w = int(orig_w * (enc_h / orig_h))
+    else:
+        enc_w = ENCODER_CROP_SIZE
+        enc_h = int(orig_h * (enc_w / orig_w))
+    crop_left = (enc_w - ENCODER_CROP_SIZE) // 2
+    crop_top = (enc_h - ENCODER_CROP_SIZE) // 2
+    return enc_w, enc_h, crop_left, crop_top
+
+
+def create_virtual_crop_camera(full_cam, orig_w, orig_h, fx, fy, cx, cy):
+    """Create a TraceCamera for the 448x448 center crop, aligned with encoder output.
+
+    Uses same R,T; intrinsics adjusted for the crop (cx_crop = cx_enc - crop_left, etc).
+    """
+    enc_w, enc_h, crop_left, crop_top = compute_encoder_crop_params(orig_w, orig_h)
+
+    scale_x = enc_w / orig_w
+    scale_y = enc_h / orig_h
+    fx_enc = fx * scale_x
+    fy_enc = fy * scale_y
+    cx_enc = cx * scale_x
+    cy_enc = cy * scale_y
+
+    cx_crop = cx_enc - crop_left
+    cy_crop = cy_enc - crop_top
+
+    FoVx = focal2fov(fx_enc, ENCODER_CROP_SIZE)
+    FoVy = focal2fov(fy_enc, ENCODER_CROP_SIZE)
+
+    return TraceCamera(
+        R=full_cam.R, T=full_cam.T,
+        FoVx=FoVx, FoVy=FoVy,
+        image_name=full_cam.image_name,
+        width=ENCODER_CROP_SIZE, height=ENCODER_CROP_SIZE,
+        image_path=full_cam.image_path,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +292,9 @@ def load_colmap_cameras(source_path, images_folder, resolution):
             image_name=os.path.splitext(os.path.basename(image_path))[0],
             width=new_w, height=new_h, image_path=image_path,
         )
+        cam.fx_raw, cam.fy_raw = fx, fy
+        cam.cx_raw, cam.cy_raw = cx, cy
+        cam.orig_width, cam.orig_height = orig_w, orig_h
         cameras.append(cam)
 
     cameras.sort(key=lambda c: c.image_name)
@@ -832,6 +881,10 @@ def main():
     g_run.add_argument("--white_background", action="store_true")
     g_run.add_argument("--save_render", action="store_true",
                        help="Save per-view trace RGB renders")
+    g_run.add_argument("--trace_crop_aligned", action="store_true", default=True,
+                       help="Mode A: trace at 448x448 with virtual camera aligned to encoder crop (default: True)")
+    g_run.add_argument("--no_trace_crop_aligned", dest="trace_crop_aligned", action="store_false",
+                       help="Disable trace_crop_aligned (use full camera resolution)")
 
     g_post = parser.add_argument_group("Post-processing")
     g_post.add_argument("--postprocess", default=None,
@@ -972,11 +1025,23 @@ def main():
         del encoder
         torch.cuda.empty_cache()
 
+    if mode_a and args.trace_crop_aligned:
+        print(f"\n[Mode A] Using 448x448 virtual camera (crop-aligned with encoder)")
     print(f"\nTracing {len(cam_list)} views (feat_dim={feat_dim}, "
           f"TRACE_CHANNELS={TRACE_CHANNELS}) ...")
 
+    use_crop_aligned = mode_a and args.trace_crop_aligned
+
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
-        H, W = cam.image_height, cam.image_width
+        if use_crop_aligned:
+            trace_cam = create_virtual_crop_camera(
+                cam, cam.orig_width, cam.orig_height,
+                cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
+            )
+            H, W = ENCODER_CROP_SIZE, ENCODER_CROP_SIZE
+        else:
+            trace_cam = cam
+            H, W = cam.image_height, cam.image_width
 
         if mode_a:
             feat_2d = all_feat_maps[idx]
@@ -1001,7 +1066,7 @@ def main():
 
         gau_sem, num_ray, radii, out_color = trace_single_view(
             means, quats, scales, opacities, colors,
-            feat_hwc, img_mask, cam, bg_color,
+            feat_hwc, img_mask, trace_cam, bg_color,
         )
 
         sum_gau_sem += gau_sem[:, :feat_dim]
