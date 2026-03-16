@@ -204,3 +204,4 @@ zipnerf/
 3dovs
 standalone_trace.py
 trace_output_*
+trace_output/

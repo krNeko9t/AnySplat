@@ -6,9 +6,10 @@ Uses diff_surfel_rasterization.trace() to back-project per-pixel instance
 features (from AnySplat's instance head) onto a high-quality pre-trained
 Gaussian scene, accumulating across multiple views.
 
-Two feature-map sources:
-  Mode A (online):  Run AnySplat encoder with instance head on scene images.
-  Mode B (offline): Load pre-computed feature maps from .pt / .npy files.
+Three feature-map sources:
+  Mode A/AnySplat (online):  Run AnySplat encoder with instance head.
+  Mode A/IGGT    (online):  Run IGGT model for part features.
+  Mode B         (offline): Load pre-computed feature maps from .pt / .npy files.
 
 Dependencies (anysplat conda env):
   torch, numpy, Pillow, plyfile, tqdm, diff_surfel_rasterization
@@ -22,11 +23,18 @@ Example:
       --feat_dir precomputed_feats/ \
       --feat_dim 8 --max_views 5
 
-  # Mode A – online inference (--ckpt optional, defaults to run_dir/checkpoints/last.ckpt)
+  # Mode A/AnySplat – online inference
   python scripts/trace_instance_to_gaussians.py \
       --source_path zipnerf/alameda \
       --ply_path zipnerf/alameda/point_cloud.ply \
       --run_dir output/exp_instseg_custom/2026-02-22_17-15-07 \
+      --max_views 5
+
+  # Mode A/IGGT – online inference with IGGT
+  python scripts/trace_instance_to_gaussians.py \
+      --source_path zipnerf/alameda \
+      --ply_path zipnerf/alameda/point_cloud.ply \
+      --model_type iggt --iggt_model_path /path/to/iggt_ckpt.pth \
       --max_views 5
 """
 
@@ -52,6 +60,7 @@ from src.misc.colmap_utils import (
 
 TRACE_CHANNELS = 20  # compiled into diff_surfel_rasterization CUDA kernel
 ENCODER_CROP_SIZE = 448  # prepare_encoder_image center-crop size
+IGGT_IMAGE_SIZE = (504, 336)  # (W, H) default resize target for IGGT
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +169,29 @@ def create_virtual_crop_camera(full_cam, orig_w, orig_h, fx, fy, cx, cy):
         FoVx=FoVx, FoVy=FoVy,
         image_name=full_cam.image_name,
         width=ENCODER_CROP_SIZE, height=ENCODER_CROP_SIZE,
+        image_path=full_cam.image_path,
+    )
+
+
+def create_virtual_resize_camera(full_cam, orig_w, orig_h, fx, fy, cx, cy,
+                                 target_w, target_h):
+    """Create a TraceCamera for a resized image (e.g. IGGT's resize preprocessing).
+
+    Scales all intrinsics proportionally to the resize ratio.
+    """
+    scale_x = target_w / orig_w
+    scale_y = target_h / orig_h
+    fx_new = fx * scale_x
+    fy_new = fy * scale_y
+
+    FoVx = focal2fov(fx_new, target_w)
+    FoVy = focal2fov(fy_new, target_h)
+
+    return TraceCamera(
+        R=full_cam.R, T=full_cam.T,
+        FoVx=FoVx, FoVy=FoVy,
+        image_name=full_cam.image_name,
+        width=target_w, height=target_h,
         image_path=full_cam.image_path,
     )
 
@@ -442,6 +474,145 @@ def run_encoder_batch(encoder, image_paths, device="cuda"):
         )
     # [1, V, D, H, W] -> [V, D, H, W]
     return feat_map[0].float()
+
+
+# ---------------------------------------------------------------------------
+# Mode A (IGGT): online model inference with IGGT
+# ---------------------------------------------------------------------------
+
+def align_and_update_state_dicts_minimal(model_state_dict, ckpt_state_dict):
+    """Keep only ckpt tensors that exist in model with matching shape."""
+    aligned = {}
+    matched = 0
+    mismatched = 0
+    for k, v in model_state_dict.items():
+        if k not in ckpt_state_dict:
+            continue
+        ckpt_v = ckpt_state_dict[k]
+        if hasattr(ckpt_v, "shape") and ckpt_v.shape == v.shape:
+            aligned[k] = ckpt_v
+            matched += 1
+        else:
+            mismatched += 1
+    unused = len(ckpt_state_dict) - len(aligned)
+    print(
+        f"[IGGT-Lite] state_dict aligned: matched={matched}, "
+        f"mismatched={mismatched}, unused={unused}"
+    )
+    return aligned
+
+
+class IGGTLiteForTrace(torch.nn.Module):
+    """Trace-only IGGT assembly using local AnySplat modules."""
+    def __init__(self, embed_dim=1024, patch_size=14, feat_dim=8):
+        super().__init__()
+        from src.model.encoder.vggt.models.vggt import VGGT
+        from src.model.encoder.iggt_heads import PartHead, SamProjector
+
+        base = VGGT(img_size=518, patch_size=patch_size, embed_dim=embed_dim)
+        self.aggregator = base.aggregator
+        self.point_head = base.point_head
+        self.part_adaptor = SamProjector(
+            dim_in=2 * embed_dim,
+            patch_size=patch_size,
+            pos_embed=False,
+            out_channels=[256, 256, 256, 256],
+        )
+        self.part_head = PartHead(
+            in_channels=[256, 256, 256, 256],
+            features=256,
+            output_dim=feat_dim,
+            patch_size=patch_size,
+            window_size=8,
+        )
+        self._intermediate_layer_idx = [4, 11, 17, 23]
+
+    def forward(self, images):
+        # Support both [V, 3, H, W] and [1, V, 3, H, W].
+        if images.dim() == 4:
+            images = images.unsqueeze(0)
+
+        aggregated_tokens_list, patch_start_idx = self.aggregator(
+            images, intermediate_layer_idx=self._intermediate_layer_idx
+        )
+        _, _, point_intermediate = self.point_head(
+            aggregated_tokens_list,
+            images=images,
+            patch_start_idx=patch_start_idx,
+            return_intermediate=True,
+        )
+        adaptor_out, _ = self.part_adaptor(
+            aggregated_tokens_list,
+            images=images,
+            patch_start_idx=patch_start_idx,
+        )
+        part_feat = self.part_head(
+            list(adaptor_out.values()),
+            images=images,
+            patch_start_idx=patch_start_idx,
+            point_feature=list(point_intermediate),
+        )  # [1, V, D, H, W]
+        return {"part_feat": part_feat}
+
+
+def load_and_preprocess_images_resize(image_path_list, resize_target_size):
+    """Resize all input images to target (W, H), output [V, 3, H, W]."""
+    import torchvision.transforms as T
+
+    if not image_path_list:
+        raise ValueError("At least 1 image is required")
+    if not (isinstance(resize_target_size, (tuple, list)) and len(resize_target_size) == 2):
+        raise ValueError("resize_target_size must be (width, height)")
+
+    target_w, target_h = int(resize_target_size[0]), int(resize_target_size[1])
+    to_tensor = T.ToTensor()
+    images = []
+    for image_path in image_path_list:
+        img = Image.open(image_path)
+        if img.mode == "RGBA":
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(bg, img)
+        img = img.convert("RGB")
+        img = img.resize((target_w, target_h), Image.Resampling.BICUBIC)
+        images.append(to_tensor(img))
+    return torch.stack(images, dim=0)
+
+
+def load_iggt_model(model_path, device="cuda"):
+    """Load the IGGT model for part-feature extraction."""
+    model = IGGTLiteForTrace()
+    state_dict = torch.load(model_path, map_location=device)
+    if isinstance(state_dict, dict) and "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    state_dict = align_and_update_state_dicts_minimal(model.state_dict(), state_dict)
+    model.load_state_dict(state_dict, strict=False)
+
+    model.eval().to(device)
+    for p in model.parameters():
+        p.requires_grad = False
+
+    feat_dim = 8  # IGGT PartHead output_dim
+    print(f"[IGGT] Loaded model from {model_path}, feat_dim={feat_dim}")
+    return model, feat_dim
+
+
+@torch.no_grad()
+def run_iggt_batch(model, image_paths, iggt_image_size, device="cuda"):
+    """Run IGGT on a batch of images, return part_feat.
+
+    Returns: feat_map [V, D, H_feat, W_feat] where D=8.
+    """
+    images = load_and_preprocess_images_resize(
+        image_paths, resize_target_size=iggt_image_size
+    ).to(device)  # [V, 3, H, W]
+
+    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    with torch.amp.autocast("cuda", dtype=dtype):
+        predictions = model(images)
+
+    part_feat = predictions["part_feat"]  # [1, V, 8, H, W]
+    return part_feat[0].float()  # [V, 8, H, W]
 
 
 # ---------------------------------------------------------------------------
@@ -869,11 +1040,17 @@ def main():
     g_feat.add_argument("--feat_dim", type=int, default=8,
                         help="Feature dimension (Mode B; Mode A reads from ckpt)")
     g_feat.add_argument("--run_dir", default=None,
-                        help="Mode A: Hydra run directory")
+                        help="Mode A: Hydra run directory (AnySplat)")
     g_feat.add_argument("--ckpt", default=None,
                         help="Mode A: Lightning checkpoint path (default: run_dir/checkpoints/last.ckpt)")
     g_feat.add_argument("--encoder_batch_size", type=int, default=4,
                         help="Mode A: views per encoder forward pass")
+    g_feat.add_argument("--model_type", choices=["anysplat", "iggt"], default="anysplat",
+                        help="Model to use for online inference (default: anysplat)")
+    g_feat.add_argument("--iggt_model_path", default=None,
+                        help="Mode A (IGGT): path to IGGT checkpoint")
+    g_feat.add_argument("--iggt_image_size", default="504,336",
+                        help="Mode A (IGGT): resize target as W,H (default: 504,336)")
 
     g_run = parser.add_argument_group("Runtime")
     g_run.add_argument("--max_views", type=int, default=None)
@@ -908,11 +1085,19 @@ def main():
 
     args = parser.parse_args()
 
-    # Auto-resolve ckpt when run_dir is set but ckpt is not
-    if args.run_dir is not None and args.ckpt is None:
+    # Parse IGGT image size
+    iggt_w, iggt_h = [int(x) for x in args.iggt_image_size.split(",")]
+    args._iggt_image_size = (iggt_w, iggt_h)
+
+    # Auto-resolve ckpt when run_dir is set but ckpt is not (AnySplat only)
+    if args.model_type == "anysplat" and args.run_dir is not None and args.ckpt is None:
         args.ckpt = str(Path(args.run_dir) / "checkpoints" / "last.ckpt")
         if not os.path.exists(args.ckpt):
             parser.error(f"--ckpt not specified and default {args.ckpt} not found")
+
+    # Validate IGGT args
+    if args.model_type == "iggt" and args.iggt_model_path is None:
+        parser.error("--iggt_model_path is required when --model_type=iggt")
 
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -959,10 +1144,12 @@ def main():
     source_path = os.path.abspath(args.source_path)
     ply_path = os.path.abspath(args.ply_path)
 
-    mode_a = args.run_dir is not None
+    use_iggt = args.model_type == "iggt"
+    mode_a = args.run_dir is not None or use_iggt
     mode_b = args.feat_dir is not None
     if not mode_a and not mode_b:
-        parser.error("Specify --feat_dir (Mode B) or --run_dir (Mode A; ckpt defaults to run_dir/checkpoints/last.ckpt)")
+        parser.error("Specify --feat_dir (Mode B), --run_dir (Mode A/AnySplat), "
+                     "or --model_type iggt --iggt_model_path ... (Mode A/IGGT)")
 
     device = "cuda"
     bg_val = [1.0, 1.0, 1.0] if args.white_background else [0.0, 0.0, 0.0]
@@ -984,11 +1171,16 @@ def main():
 
     # ---- 3. Prepare feature source ----
     encoder = None
+    iggt_model = None
     feat_dim = args.feat_dim
 
     if mode_a:
-        print("\n[Mode A] Loading AnySplat encoder ...")
-        encoder, feat_dim = load_anysplat_encoder(args.run_dir, args.ckpt, device)
+        if use_iggt:
+            print("\n[Mode A/IGGT] Loading IGGT model ...")
+            iggt_model, feat_dim = load_iggt_model(args.iggt_model_path, device)
+        else:
+            print("\n[Mode A/AnySplat] Loading AnySplat encoder ...")
+            encoder, feat_dim = load_anysplat_encoder(args.run_dir, args.ckpt, device)
         print(f"  Feature dim = {feat_dim}")
 
     if feat_dim > TRACE_CHANNELS:
@@ -1018,20 +1210,35 @@ def main():
         all_feat_maps = []
         image_paths = [c.image_path for c in cam_list]
 
-        print(f"\n[Mode A] Running encoder on {len(cam_list)} views "
-              f"(batch_size={batch_size}) ...")
-        for start in range(0, len(cam_list), batch_size):
-            end = min(start + batch_size, len(cam_list))
-            batch_paths = image_paths[start:end]
-            feat_batch = run_encoder_batch(encoder, batch_paths, device)
-            for vi in range(feat_batch.shape[0]):
-                all_feat_maps.append(feat_batch[vi])
-
-        del encoder
+        if use_iggt:
+            print(f"\n[Mode A/IGGT] Running IGGT on {len(cam_list)} views "
+                  f"(batch_size={batch_size}, image_size={iggt_w}x{iggt_h}) ...")
+            for start in range(0, len(cam_list), batch_size):
+                end = min(start + batch_size, len(cam_list))
+                batch_paths = image_paths[start:end]
+                feat_batch = run_iggt_batch(
+                    iggt_model, batch_paths, args._iggt_image_size, device,
+                )
+                for vi in range(feat_batch.shape[0]):
+                    all_feat_maps.append(feat_batch[vi])
+            del iggt_model
+        else:
+            print(f"\n[Mode A/AnySplat] Running encoder on {len(cam_list)} views "
+                  f"(batch_size={batch_size}) ...")
+            for start in range(0, len(cam_list), batch_size):
+                end = min(start + batch_size, len(cam_list))
+                batch_paths = image_paths[start:end]
+                feat_batch = run_encoder_batch(encoder, batch_paths, device)
+                for vi in range(feat_batch.shape[0]):
+                    all_feat_maps.append(feat_batch[vi])
+            del encoder
         torch.cuda.empty_cache()
 
     if mode_a and args.trace_crop_aligned:
-        print(f"\n[Mode A] Using 448x448 virtual camera (crop-aligned with encoder)")
+        if use_iggt:
+            print(f"\n[Mode A/IGGT] Using {iggt_w}x{iggt_h} virtual camera (resize-aligned)")
+        else:
+            print(f"\n[Mode A/AnySplat] Using 448x448 virtual camera (crop-aligned)")
     print(f"\nTracing {len(cam_list)} views (feat_dim={feat_dim}, "
           f"TRACE_CHANNELS={TRACE_CHANNELS}) ...")
 
@@ -1039,11 +1246,19 @@ def main():
 
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
         if use_crop_aligned:
-            trace_cam = create_virtual_crop_camera(
-                cam, cam.orig_width, cam.orig_height,
-                cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
-            )
-            H, W = ENCODER_CROP_SIZE, ENCODER_CROP_SIZE
+            if use_iggt:
+                trace_cam = create_virtual_resize_camera(
+                    cam, cam.orig_width, cam.orig_height,
+                    cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
+                    iggt_w, iggt_h,
+                )
+                H, W = iggt_h, iggt_w
+            else:
+                trace_cam = create_virtual_crop_camera(
+                    cam, cam.orig_width, cam.orig_height,
+                    cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
+                )
+                H, W = ENCODER_CROP_SIZE, ENCODER_CROP_SIZE
         else:
             trace_cam = cam
             H, W = cam.image_height, cam.image_width
