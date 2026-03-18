@@ -106,10 +106,10 @@ def _build_iggt_lite(embed_dim=1024, patch_size=14, feat_dim=8):
             aggregated_tokens_list, patch_start_idx = self.aggregator(
                 images, intermediate_layer_idx=self._intermediate_layer_idx,
             )
-            _, _, point_intermediate = self.point_head(
+            pts3d, _, point_intermediate = self.point_head(
                 aggregated_tokens_list, images=images,
                 patch_start_idx=patch_start_idx, return_intermediate=True,
-            )
+            )  # pts3d: [B, V, H, W, 3]
             adaptor_out, _ = self.part_adaptor(
                 aggregated_tokens_list, images=images,
                 patch_start_idx=patch_start_idx,
@@ -118,8 +118,8 @@ def _build_iggt_lite(embed_dim=1024, patch_size=14, feat_dim=8):
                 list(adaptor_out.values()), images=images,
                 patch_start_idx=patch_start_idx,
                 point_feature=list(point_intermediate),
-            )  # [1, V, D, H, W]
-            return part_feat
+            )  # [B, V, D, H, W]
+            return part_feat, pts3d
 
     return IGGTLite()
 
@@ -185,24 +185,70 @@ def load_and_preprocess_images_resize(image_path_list, resize_target_size):
 
 @torch.no_grad()
 def run_inference(model, image_paths, image_size, device="cuda", batch_size=4):
-    """Run IGGT on all images and return part_feat [V, D, H, W]."""
+    """Run IGGT on all images and return (part_feat [V, D, H, W], pts3d [V, 3, H, W])."""
     dtype = (torch.bfloat16
              if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
              else torch.float16)
 
     all_feats = []
+    all_pts3d = []
     for start in range(0, len(image_paths), batch_size):
         end = min(start + batch_size, len(image_paths))
         batch_paths = image_paths[start:end]
         images = load_and_preprocess_images_resize(batch_paths, image_size).to(device)
         with torch.amp.autocast("cuda", dtype=dtype):
-            part_feat = model(images)  # [1, V_batch, D, H, W]
-        part_feat = part_feat[0].float()  # [V_batch, D, H, W]
+            part_feat, pts3d = model(images)
+        part_feat = part_feat[0].float()   # [V_batch, D, H, W]
+        pts3d = pts3d[0].float()           # [V_batch, H, W, 3]
+        pts3d = pts3d.permute(0, 3, 1, 2)  # [V_batch, 3, H, W]
         for vi in range(part_feat.shape[0]):
             all_feats.append(part_feat[vi].cpu())
+            all_pts3d.append(pts3d[vi].cpu())
         logger.info("  Processed views %d-%d / %d", start, end, len(image_paths))
 
-    return torch.stack(all_feats, dim=0)  # [V, D, H, W]
+    return torch.stack(all_feats, dim=0), torch.stack(all_pts3d, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# 3D KNN feature smoothing (lightweight scipy replacement for torch_geometric)
+# ---------------------------------------------------------------------------
+
+def knn_smooth_features(
+    pts3d: torch.Tensor,
+    feat: torch.Tensor,
+    k: int = 20,
+) -> torch.Tensor:
+    """Smooth instance features by averaging k nearest neighbours in 3D space.
+
+    Replaces ``knn_avg_features_pyg`` from the original IGGT pipeline without
+    requiring torch_geometric / torch_scatter.
+
+    Args:
+        pts3d: [V, 3, H, W] world coordinates.
+        feat:  [V, D, H, W] instance features (should already be L2-normalised).
+        k:     Number of 3D nearest neighbours.
+
+    Returns:
+        Smoothed features [V, D, H, W].
+    """
+    from scipy.spatial import cKDTree
+
+    V, D, H, W = feat.shape
+    N = V * H * W
+
+    points_np = pts3d.permute(0, 2, 3, 1).reshape(N, 3).numpy()   # (N, 3)
+    feat_np = feat.permute(0, 2, 3, 1).reshape(N, D).numpy()       # (N, D)
+
+    logger.info("Building cKDTree for %d points (k=%d) ...", N, k)
+    tree = cKDTree(points_np)
+    _, indices = tree.query(points_np, k=k + 1)  # +1 because self is included
+    indices = indices[:, 1:]                       # exclude self
+
+    logger.info("Averaging neighbour features ...")
+    smoothed = feat_np[indices].mean(axis=1)       # (N, D)
+
+    smoothed_t = torch.from_numpy(smoothed).reshape(V, H, W, D).permute(0, 3, 1, 2)
+    return smoothed_t
 
 
 # ---------------------------------------------------------------------------
@@ -216,16 +262,12 @@ def cluster_features_hdbscan(
     min_cluster_size: int = 500,
     max_cluster_points: int = 200_000,
 ) -> np.ndarray:
-    """L2-normalise, subsample -> HDBSCAN -> NearestCentroid assign all pixels.
+    """Subsample -> HDBSCAN -> NearestCentroid assign all pixels.
 
-    Strategy (same as trace_instance_to_gaussians._cluster_hdbscan):
-      1. L2-normalise all pixels.
-      2. Randomly sample up to *max_cluster_points* for HDBSCAN fitting.
-      3. Compute cluster centroids from the subsample.
-      4. Assign every pixel to the nearest centroid (fast, O(n*k)).
+    Expects features to be already normalised by the caller.
 
     Args:
-        feat_vdhw: [V, D, H, W] feature tensor.
+        feat_vdhw: [V, D, H, W] feature tensor (pre-normalised).
         max_cluster_points: Max pixels fed into HDBSCAN (default 200k).
 
     Returns:
@@ -236,9 +278,7 @@ def cluster_features_hdbscan(
 
     V, D, H, W = feat_vdhw.shape
     N = V * H * W
-    feat = feat_vdhw.permute(0, 2, 3, 1).contiguous()
-    feat = F.normalize(feat.float(), dim=-1)
-    all_pixels = feat.reshape(-1, D).numpy()  # (N, D)
+    all_pixels = feat_vdhw.permute(0, 2, 3, 1).contiguous().reshape(-1, D).float().numpy()
 
     # --- subsample for HDBSCAN ---
     S = min(max_cluster_points, N)
@@ -379,6 +419,11 @@ def parse_args():
                         help="HDBSCAN min_cluster_size")
     parser.add_argument("--max_cluster_points", type=int, default=200_000,
                         help="Max pixels subsampled for HDBSCAN (default: 200000)")
+    parser.add_argument("--knn_k", type=int, default=20,
+                        help="K for 3D KNN feature smoothing (0 to disable)")
+    parser.add_argument("--spatial_weight", type=float, default=0.0,
+                        help="Weight for appending normalised xyz to clustering features "
+                             "(0 = disabled, try 0.1~0.5)")
     parser.add_argument("--device", type=str, default="cuda")
     return parser.parse_args()
 
@@ -396,23 +441,45 @@ def main():
     model = load_model(args.model_path, args.device)
 
     logger.info("Running inference (image_size=%dx%d) ...", iggt_w, iggt_h)
-    feat = run_inference(model, image_paths, image_size,
-                         device=args.device, batch_size=args.batch_size)
-    # feat: [V, 8, H, W]
+    feat, pts3d = run_inference(model, image_paths, image_size,
+                                device=args.device, batch_size=args.batch_size)
+    # feat: [V, D, H, W], pts3d: [V, 3, H, W]
     del model
     torch.cuda.empty_cache()
 
+    # L2 normalise part features
+    V, D, H, W = feat.shape
+    feat = F.normalize(feat.float(), dim=1)
+
+    # 3D KNN feature smoothing
+    if args.knn_k > 0:
+        logger.info("3D KNN smoothing (k=%d) ...", args.knn_k)
+        feat = knn_smooth_features(pts3d, feat, k=args.knn_k)
+
+    # PCA on smoothed features (before spatial concat)
+    logger.info("Computing PCA visualization ...")
+    pca_rgb = pca_visualize(feat)
+
+    # Optionally append normalised spatial coordinates for clustering
+    cluster_feat = feat
+    if args.spatial_weight > 0:
+        logger.info("Appending spatial coords (weight=%.3f) ...", args.spatial_weight)
+        xyz = pts3d.float()                                  # [V, 3, H, W]
+        xyz_flat = xyz.permute(1, 0, 2, 3).reshape(3, -1)   # [3, V*H*W]
+        xyz_mean = xyz_flat.mean(dim=1)                      # [3]
+        xyz_std = xyz_flat.std(dim=1).clamp(min=1e-6)        # [3]
+        xyz_norm = (xyz - xyz_mean.view(1, 3, 1, 1)) / xyz_std.view(1, 3, 1, 1)
+        xyz_norm = xyz_norm * args.spatial_weight
+        cluster_feat = torch.cat([feat, xyz_norm], dim=1)    # [V, D+3, H, W]
+
     logger.info("Clustering features to ID map ...")
     id_maps = cluster_features_hdbscan(
-        feat,
+        cluster_feat,
         eps=args.eps,
         min_samples=args.hdbscan_min_samples,
         min_cluster_size=args.hdbscan_min_cluster_size,
         max_cluster_points=args.max_cluster_points,
     )
-
-    logger.info("Computing PCA visualization ...")
-    pca_rgb = pca_visualize(feat)
 
     save_results(id_maps, pca_rgb, image_paths, args.output_dir)
     logger.info("Done in %.1f seconds", time.time() - t0)
