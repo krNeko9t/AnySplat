@@ -480,13 +480,36 @@ def run_encoder_batch(encoder, image_paths, device="cuda"):
 # Mode A (IGGT): online model inference with IGGT
 # ---------------------------------------------------------------------------
 
+def _remap_iggt_checkpoint_keys(ckpt_state_dict):
+    """Remap IGGT checkpoint keys to match local IGGTLiteForTrace layout.
+
+    The original IGGT PartHead inherits DPTHead and stores layer_rn, refinenet,
+    output_conv under ``self.scratch.*``.  The local PartHead uses them as direct
+    attributes (no ``scratch.`` prefix).  This function strips that prefix so
+    weights can be loaded correctly.
+    """
+    remapped = {}
+    n_remapped = 0
+    for k, v in ckpt_state_dict.items():
+        new_k = k
+        if k.startswith("part_head.scratch."):
+            new_k = "part_head." + k[len("part_head.scratch."):]
+            n_remapped += 1
+        remapped[new_k] = v
+    if n_remapped:
+        print(f"[IGGT-Lite] Remapped {n_remapped} part_head.scratch.* keys")
+    return remapped
+
+
 def align_and_update_state_dicts_minimal(model_state_dict, ckpt_state_dict):
     """Keep only ckpt tensors that exist in model with matching shape."""
     aligned = {}
     matched = 0
     mismatched = 0
+    not_in_ckpt = 0
     for k, v in model_state_dict.items():
         if k not in ckpt_state_dict:
+            not_in_ckpt += 1
             continue
         ckpt_v = ckpt_state_dict[k]
         if hasattr(ckpt_v, "shape") and ckpt_v.shape == v.shape:
@@ -494,10 +517,12 @@ def align_and_update_state_dicts_minimal(model_state_dict, ckpt_state_dict):
             matched += 1
         else:
             mismatched += 1
-    unused = len(ckpt_state_dict) - len(aligned)
+            print(f"  [IGGT-Lite] shape mismatch: {k}  "
+                  f"model={tuple(v.shape)}  ckpt={tuple(ckpt_v.shape)}")
+    unused = len(ckpt_state_dict) - matched - mismatched
     print(
         f"[IGGT-Lite] state_dict aligned: matched={matched}, "
-        f"mismatched={mismatched}, unused={unused}"
+        f"mismatched={mismatched}, not_in_ckpt={not_in_ckpt}, unused_in_ckpt={unused}"
     )
     return aligned
 
@@ -585,6 +610,7 @@ def load_iggt_model(model_path, device="cuda"):
     if isinstance(state_dict, dict) and "state_dict" in state_dict:
         state_dict = state_dict["state_dict"]
     state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    state_dict = _remap_iggt_checkpoint_keys(state_dict)
     state_dict = align_and_update_state_dicts_minimal(model.state_dict(), state_dict)
     model.load_state_dict(state_dict, strict=False)
 
