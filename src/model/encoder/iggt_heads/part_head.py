@@ -203,15 +203,15 @@ class PartHead(nn.Module):
         del layer_3_rn
 
         # Cross-attention at scale 3→2.
+        # NOTE: original IGGT passes `out` (pre-cross-attention) to refinenet2,
+        # not `out3` (post-cross-attention). The checkpoint was trained this way.
         if point_feat is not None:
             out3 = out.flatten(2).permute(0, 2, 1)
             pf3 = point_feat[1].flatten(2).permute(0, 2, 1)
             out3 = self.cross_attention_1(out3, pf3, pf3)
             out3 = out3.permute(0, 2, 1).view_as(out)
-        else:
-            out3 = out
 
-        out = self.refinenet2(out3, layer_2_rn, size=layer_1_rn.shape[2:])
+        out = self.refinenet2(out, layer_2_rn, size=layer_1_rn.shape[2:])
         del layer_2_rn
 
         # Window cross-attention at scale 2→1.

@@ -1,0 +1,422 @@
+"""
+IGGT Multi-View Feature Clustering ID Map
+==========================================
+
+Uses IGGTLiteForTrace (lightweight, no detectron2/torch_geometric deps) to
+extract per-pixel part features from multi-view images, then performs
+cross-view HDBSCAN clustering to produce consistent ID maps.
+
+Usage:
+    python iggt_idmap.py \
+        --image_dir <directory containing multi-view images> \
+        --model_path <path to IGGT checkpoint> \
+        --output_dir output_idmap \
+        --image_size 504,336 \
+        --hdbscan_min_cluster_size 500 \
+        --hdbscan_min_samples 100 \
+        --eps 0.06
+"""
+
+import os
+import sys
+import argparse
+import logging
+import time
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+
+
+# ---------------------------------------------------------------------------
+# Model loading (from trace_instance_to_gaussians.py, lightweight)
+# ---------------------------------------------------------------------------
+
+def _remap_iggt_checkpoint_keys(ckpt_state_dict):
+    """Strip ``part_head.scratch.`` prefix so weights load into the local PartHead."""
+    remapped = {}
+    n_remapped = 0
+    for k, v in ckpt_state_dict.items():
+        new_k = k
+        if k.startswith("part_head.scratch."):
+            new_k = "part_head." + k[len("part_head.scratch."):]
+            n_remapped += 1
+        remapped[new_k] = v
+    if n_remapped:
+        logger.info("Remapped %d part_head.scratch.* keys", n_remapped)
+    return remapped
+
+
+def _align_state_dicts(model_state_dict, ckpt_state_dict):
+    """Keep only ckpt tensors that exist in model with matching shape."""
+    aligned = {}
+    matched = mismatched = not_in_ckpt = 0
+    for k, v in model_state_dict.items():
+        if k not in ckpt_state_dict:
+            not_in_ckpt += 1
+            continue
+        ckpt_v = ckpt_state_dict[k]
+        if hasattr(ckpt_v, "shape") and ckpt_v.shape == v.shape:
+            aligned[k] = ckpt_v
+            matched += 1
+        else:
+            mismatched += 1
+            logger.warning("Shape mismatch: %s  model=%s  ckpt=%s",
+                           k, tuple(v.shape), tuple(ckpt_v.shape))
+    unused = len(ckpt_state_dict) - matched - mismatched
+    logger.info("state_dict aligned: matched=%d, mismatched=%d, "
+                "not_in_ckpt=%d, unused_in_ckpt=%d",
+                matched, mismatched, not_in_ckpt, unused)
+    return aligned
+
+
+def _build_iggt_lite(embed_dim=1024, patch_size=14, feat_dim=8):
+    """Build IGGTLiteForTrace using local AnySplat modules (no IGGT/ deps)."""
+    from src.model.encoder.vggt.models.vggt import VGGT
+    from src.model.encoder.iggt_heads import PartHead, SamProjector
+
+    class IGGTLite(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            base = VGGT(img_size=518, patch_size=patch_size, embed_dim=embed_dim)
+            self.aggregator = base.aggregator
+            self.point_head = base.point_head
+            self.part_adaptor = SamProjector(
+                dim_in=2 * embed_dim, patch_size=patch_size,
+                pos_embed=False, out_channels=[256, 256, 256, 256],
+            )
+            self.part_head = PartHead(
+                in_channels=[256, 256, 256, 256], features=256,
+                output_dim=feat_dim, patch_size=patch_size, window_size=8,
+            )
+            self._intermediate_layer_idx = [4, 11, 17, 23]
+
+        def forward(self, images):
+            if images.dim() == 4:
+                images = images.unsqueeze(0)
+            aggregated_tokens_list, patch_start_idx = self.aggregator(
+                images, intermediate_layer_idx=self._intermediate_layer_idx,
+            )
+            _, _, point_intermediate = self.point_head(
+                aggregated_tokens_list, images=images,
+                patch_start_idx=patch_start_idx, return_intermediate=True,
+            )
+            adaptor_out, _ = self.part_adaptor(
+                aggregated_tokens_list, images=images,
+                patch_start_idx=patch_start_idx,
+            )
+            part_feat = self.part_head(
+                list(adaptor_out.values()), images=images,
+                patch_start_idx=patch_start_idx,
+                point_feature=list(point_intermediate),
+            )  # [1, V, D, H, W]
+            return part_feat
+
+    return IGGTLite()
+
+
+def load_model(model_path: str, device: str = "cuda"):
+    """Load the lightweight IGGT model for part-feature extraction."""
+    logger.info("Loading IGGT model from %s ...", model_path)
+    model = _build_iggt_lite()
+
+    state_dict = torch.load(model_path, map_location=device)
+    if isinstance(state_dict, dict) and "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    state_dict = _remap_iggt_checkpoint_keys(state_dict)
+    state_dict = _align_state_dicts(model.state_dict(), state_dict)
+    model.load_state_dict(state_dict, strict=False)
+
+    model.eval().to(device)
+    for p in model.parameters():
+        p.requires_grad = False
+
+    logger.info("Model loaded (feat_dim=8)")
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Image loading (lightweight, no IGGT/ deps)
+# ---------------------------------------------------------------------------
+
+def discover_images(image_dir: str) -> list[str]:
+    """Find all image files in *image_dir* (non-recursive), sorted by name."""
+    paths = []
+    for p in sorted(os.listdir(image_dir)):
+        if os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS:
+            paths.append(os.path.join(image_dir, p))
+    if not paths:
+        raise FileNotFoundError(f"No images found in {image_dir}")
+    logger.info("Found %d images in %s", len(paths), image_dir)
+    return paths
+
+
+def load_and_preprocess_images_resize(image_path_list, resize_target_size):
+    """Resize all input images to target (W, H), output [V, 3, H, W]."""
+    import torchvision.transforms as T
+
+    target_w, target_h = int(resize_target_size[0]), int(resize_target_size[1])
+    to_tensor = T.ToTensor()
+    images = []
+    for image_path in image_path_list:
+        img = Image.open(image_path)
+        if img.mode == "RGBA":
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(bg, img)
+        img = img.convert("RGB")
+        img = img.resize((target_w, target_h), Image.Resampling.BICUBIC)
+        images.append(to_tensor(img))
+    return torch.stack(images, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def run_inference(model, image_paths, image_size, device="cuda", batch_size=4):
+    """Run IGGT on all images and return part_feat [V, D, H, W]."""
+    dtype = (torch.bfloat16
+             if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+             else torch.float16)
+
+    all_feats = []
+    for start in range(0, len(image_paths), batch_size):
+        end = min(start + batch_size, len(image_paths))
+        batch_paths = image_paths[start:end]
+        images = load_and_preprocess_images_resize(batch_paths, image_size).to(device)
+        with torch.amp.autocast("cuda", dtype=dtype):
+            part_feat = model(images)  # [1, V_batch, D, H, W]
+        part_feat = part_feat[0].float()  # [V_batch, D, H, W]
+        for vi in range(part_feat.shape[0]):
+            all_feats.append(part_feat[vi].cpu())
+        logger.info("  Processed views %d-%d / %d", start, end, len(image_paths))
+
+    return torch.stack(all_feats, dim=0)  # [V, D, H, W]
+
+
+# ---------------------------------------------------------------------------
+# Clustering (HDBSCAN, no torch_geometric / torch_scatter)
+# ---------------------------------------------------------------------------
+
+def cluster_features_hdbscan(
+    feat_vdhw: torch.Tensor,
+    eps: float = 0.06,
+    min_samples: int = 100,
+    min_cluster_size: int = 500,
+    max_cluster_points: int = 200_000,
+) -> np.ndarray:
+    """L2-normalise, subsample -> HDBSCAN -> NearestCentroid assign all pixels.
+
+    Strategy (same as trace_instance_to_gaussians._cluster_hdbscan):
+      1. L2-normalise all pixels.
+      2. Randomly sample up to *max_cluster_points* for HDBSCAN fitting.
+      3. Compute cluster centroids from the subsample.
+      4. Assign every pixel to the nearest centroid (fast, O(n*k)).
+
+    Args:
+        feat_vdhw: [V, D, H, W] feature tensor.
+        max_cluster_points: Max pixels fed into HDBSCAN (default 200k).
+
+    Returns:
+        id_maps: [V, H, W] int32, contiguous IDs starting from 0.
+    """
+    import hdbscan as hdb_lib
+    from sklearn.neighbors import NearestCentroid
+
+    V, D, H, W = feat_vdhw.shape
+    N = V * H * W
+    feat = feat_vdhw.permute(0, 2, 3, 1).contiguous()
+    feat = F.normalize(feat.float(), dim=-1)
+    all_pixels = feat.reshape(-1, D).numpy()  # (N, D)
+
+    # --- subsample for HDBSCAN ---
+    S = min(max_cluster_points, N)
+    rng = np.random.default_rng(0)
+    if S < N:
+        idx_sub = rng.choice(N, S, replace=False)
+        logger.info("Subsampled %d / %d pixels for HDBSCAN", S, N)
+        sub_pixels = all_pixels[idx_sub]
+    else:
+        idx_sub = None
+        sub_pixels = all_pixels
+
+    logger.info("Running HDBSCAN on %d pixels (D=%d) ...", sub_pixels.shape[0], D)
+    sub_labels = hdb_lib.HDBSCAN(
+        cluster_selection_epsilon=eps,
+        min_samples=min_samples,
+        min_cluster_size=min_cluster_size,
+    ).fit_predict(sub_pixels)
+
+    mask_clustered = sub_labels >= 0
+    n_clusters = int(sub_labels.max() + 1) if mask_clustered.any() else 0
+    n_noise_sub = int((~mask_clustered).sum())
+    logger.info("HDBSCAN done: %d clusters, %d/%d noise in subsample",
+                n_clusters, n_noise_sub, len(sub_labels))
+
+    # --- assign all pixels via NearestCentroid ---
+    if n_clusters >= 2:
+        nc = NearestCentroid()
+        nc.fit(sub_pixels[mask_clustered], sub_labels[mask_clustered])
+        labels = nc.predict(all_pixels)
+    elif n_clusters == 1:
+        labels = np.zeros(N, dtype=np.int32)
+    else:
+        labels = np.zeros(N, dtype=np.int32)
+
+    # Re-label to contiguous 0-based IDs
+    unique = np.unique(labels)
+    remap = {old: new for new, old in enumerate(unique)}
+    id_maps = np.vectorize(remap.get)(labels).astype(np.int32).reshape(V, H, W)
+
+    logger.info("Assigned %d unique IDs to %d pixels", len(unique), N)
+    return id_maps
+
+
+# ---------------------------------------------------------------------------
+# PCA visualization (from src/visualization/instance_viz.py, lightweight)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def pca_visualize(feat_vdhw: torch.Tensor, low_p=0.02, high_p=0.98) -> np.ndarray:
+    """PCA-reduce [V, D, H, W] features to [V, H, W, 3] uint8 RGB."""
+    V, D, H, W = feat_vdhw.shape
+    feat_flat = feat_vdhw.permute(0, 2, 3, 1).reshape(-1, D).float()
+    feat_flat = F.normalize(feat_flat, dim=-1)
+
+    mean = feat_flat.mean(dim=0, keepdim=True)
+    feat_centered = feat_flat - mean
+
+    _, _, v = torch.pca_lowrank(feat_centered, q=min(D, 256))
+    proj = feat_centered @ v[:, :3]
+
+    for i in range(3):
+        ch = proj[:, i]
+        v_lo = torch.quantile(ch, low_p)
+        v_hi = torch.quantile(ch, high_p)
+        if v_hi > v_lo:
+            proj[:, i] = (ch - v_lo) / (v_hi - v_lo)
+        else:
+            proj[:, i] = 0.5
+    proj = proj.clamp(0, 1)
+
+    return (proj.view(V, H, W, 3).numpy() * 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Save results
+# ---------------------------------------------------------------------------
+
+def make_color_lut(num_colors: int, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    lut = rng.integers(32, 255, size=(num_colors, 3), dtype=np.uint8)
+    return lut
+
+
+def save_results(
+    id_maps: np.ndarray,
+    pca_rgb: np.ndarray,
+    image_paths: list[str],
+    output_dir: str,
+):
+    """Save ID maps (.npy), coloured ID map images, and PCA images."""
+    idmap_dir = os.path.join(output_dir, "id_maps")
+    vis_dir = os.path.join(output_dir, "id_maps_vis")
+    pca_dir = os.path.join(output_dir, "pca_vis")
+    os.makedirs(idmap_dir, exist_ok=True)
+    os.makedirs(vis_dir, exist_ok=True)
+    os.makedirs(pca_dir, exist_ok=True)
+
+    num_ids = int(id_maps.max()) + 1
+    lut = make_color_lut(num_ids)
+
+    V = id_maps.shape[0]
+    for i in range(V):
+        stem = os.path.splitext(os.path.basename(image_paths[i]))[0]
+
+        np.save(os.path.join(idmap_dir, f"{stem}.npy"), id_maps[i])
+
+        colored = lut[id_maps[i]]
+        Image.fromarray(colored).save(os.path.join(vis_dir, f"{stem}.png"))
+
+        Image.fromarray(pca_rgb[i]).save(os.path.join(pca_dir, f"{stem}.png"))
+
+    np.save(os.path.join(output_dir, "id_maps.npy"), id_maps)
+    logger.info("Saved %d ID maps (%d unique IDs) to %s", V, num_ids, output_dir)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="IGGT multi-view feature clustering ID map")
+    parser.add_argument("--image_dir", type=str, required=True,
+                        help="Directory containing multi-view images")
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Path to IGGT model checkpoint")
+    parser.add_argument("--output_dir", type=str, default="output_idmap",
+                        help="Output directory")
+    parser.add_argument("--image_size", type=str, default="504,336",
+                        help="Resize target as W,H (default: 504,336)")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Views per forward pass")
+    parser.add_argument("--eps", type=float, default=0.06,
+                        help="HDBSCAN cluster_selection_epsilon")
+    parser.add_argument("--hdbscan_min_samples", type=int, default=100,
+                        help="HDBSCAN min_samples")
+    parser.add_argument("--hdbscan_min_cluster_size", type=int, default=500,
+                        help="HDBSCAN min_cluster_size")
+    parser.add_argument("--max_cluster_points", type=int, default=200_000,
+                        help="Max pixels subsampled for HDBSCAN (default: 200000)")
+    parser.add_argument("--device", type=str, default="cuda")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    t0 = time.time()
+
+    iggt_w, iggt_h = [int(x) for x in args.image_size.split(",")]
+    image_size = (iggt_w, iggt_h)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    image_paths = discover_images(args.image_dir)
+    model = load_model(args.model_path, args.device)
+
+    logger.info("Running inference (image_size=%dx%d) ...", iggt_w, iggt_h)
+    feat = run_inference(model, image_paths, image_size,
+                         device=args.device, batch_size=args.batch_size)
+    # feat: [V, 8, H, W]
+    del model
+    torch.cuda.empty_cache()
+
+    logger.info("Clustering features to ID map ...")
+    id_maps = cluster_features_hdbscan(
+        feat,
+        eps=args.eps,
+        min_samples=args.hdbscan_min_samples,
+        min_cluster_size=args.hdbscan_min_cluster_size,
+        max_cluster_points=args.max_cluster_points,
+    )
+
+    logger.info("Computing PCA visualization ...")
+    pca_rgb = pca_visualize(feat)
+
+    save_results(id_maps, pca_rgb, image_paths, args.output_dir)
+    logger.info("Done in %.1f seconds", time.time() - t0)
+
+
+if __name__ == "__main__":
+    main()
