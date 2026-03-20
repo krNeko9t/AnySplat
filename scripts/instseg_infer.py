@@ -366,7 +366,7 @@ def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
     from src.model.arch import get_model
-    from src.model.model_wrapper import ModelWrapper
+    from src.model.anysplat_wrapper import ModelWrapper
 
     run_dir = Path(args.run_dir)
     cfg_path = run_dir / ".hydra" / "config.yaml"

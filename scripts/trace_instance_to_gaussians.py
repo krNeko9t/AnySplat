@@ -410,7 +410,7 @@ def load_anysplat_encoder(run_dir, ckpt_path, device="cuda"):
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
     from src.model.arch import get_model
-    from src.model.model_wrapper import ModelWrapper
+    from src.model.anysplat_wrapper import ModelWrapper
 
     cfg_path = Path(run_dir) / ".hydra" / "config.yaml"
     cfg_dict = OmegaConf.load(str(cfg_path))

@@ -38,7 +38,7 @@ with install_import_hook(
     from src.misc.wandb_tools import update_checkpoint_path
     from src.model.decoder import get_decoder
     from src.model.encoder import get_encoder
-    from src.model.model_wrapper import ModelWrapper
+    from src.model.anysplat_wrapper import ModelWrapper
 
 
 logging_logger = logging.getLogger(__name__)
