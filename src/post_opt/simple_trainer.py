@@ -60,7 +60,7 @@ from jaxtyping import Float
 from torch import Tensor
 from scipy.spatial.transform import Rotation as R
 
-from src.model.model.anysplat import AnySplat
+from src.model.arch.anysplat import AnySplat
 
 
 # pytorch3d/pytorch3d/transforms/rotation_conversions.py at main · facebookresearch/pytorch3d

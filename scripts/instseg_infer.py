@@ -365,7 +365,7 @@ def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.
     from src.global_cfg import set_cfg
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
-    from src.model.model import get_model
+    from src.model.arch import get_model
     from src.model.model_wrapper import ModelWrapper
 
     run_dir = Path(args.run_dir)
@@ -387,7 +387,7 @@ def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.
 
 def load_model_pretrained(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
     """Load model via AnySplat.from_pretrained, optionally with instance head."""
-    from src.model.model.anysplat import AnySplat
+    from src.model.arch.anysplat import AnySplat
 
     hf_id = getattr(args, "hf_model", "lhjiang/anysplat")
     instance_dim = int(getattr(args, "instance_feat_dim", 0))

@@ -22,7 +22,7 @@ build/
 .venv/
 venv/
 env/
-__pycache__/
+*_pycache__/
 
 examples/
 assets/

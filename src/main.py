@@ -18,7 +18,7 @@ from hydra.core.hydra_config import HydraConfig
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.model.model import get_model
+from src.model.arch import get_model
 from src.misc.weight_modify import checkpoint_filter_fn
 
 import warnings

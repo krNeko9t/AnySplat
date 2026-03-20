@@ -18,7 +18,7 @@ from PIL import Image
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.misc.image_io import save_interpolated_video
-from src.model.model.anysplat import AnySplat
+from src.model.arch.anysplat import AnySplat
 from src.model.ply_export import export_ply
 from src.utils.image import process_image
 
