@@ -164,18 +164,27 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
 
     def forward(
         self,
-        prediction: DecoderOutput,
+        prediction,
         batch: BatchedExample,
-        gaussians: Gaussians,
+        gaussians,
         depth_dict: dict | None,
         global_step: int,
     ) -> Float[Tensor, ""]:
         self.extra_logs: dict[str, Tensor] = {}
 
+        def _fallback_device():
+            if prediction is not None and hasattr(prediction, "color"):
+                return prediction.color.device
+            if depth_dict is not None:
+                for v in depth_dict.values():
+                    if hasattr(v, "device"):
+                        return v.device
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         if depth_dict is None:
             if global_step % 100 == 0:
                 logger.info(f"[LossDisc dbg step={global_step}] depth_dict is None → return 0")
-            return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
+            return torch.tensor(0.0, device=_fallback_device(), dtype=torch.float32)
 
         feat_map: Tensor | None = depth_dict.get("instance_feat_map")
         inst_mask: Tensor | None = depth_dict.get("instance_mask")
@@ -184,7 +193,7 @@ class LossDisc(Loss[LossDiscCfg, LossDiscCfgWrapper]):
         if feat_map is None or inst_mask is None:
             if global_step % 100 == 0:
                 logger.info(f"[LossDisc dbg step={global_step}] feat_map={feat_map is not None}, inst_mask={inst_mask is not None} → return 0")
-            return torch.tensor(0.0, device=prediction.color.device, dtype=torch.float32)
+            return torch.tensor(0.0, device=_fallback_device(), dtype=torch.float32)
 
         B, V, C, H, W = feat_map.shape
         device = feat_map.device

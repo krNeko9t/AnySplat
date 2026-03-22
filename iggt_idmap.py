@@ -2,7 +2,7 @@
 IGGT Multi-View Feature Clustering ID Map
 ==========================================
 
-Uses IGGTLiteForTrace (lightweight, no detectron2/torch_geometric deps) to
+Uses IGGTModel (lightweight, no detectron2/torch_geometric deps) to
 extract per-pixel part features from multi-view images, then performs
 cross-view HDBSCAN clustering to produce consistent ID maps.
 
@@ -38,105 +38,22 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 
 
 # ---------------------------------------------------------------------------
-# Model loading (from trace_instance_to_gaussians.py, lightweight)
+# Model loading -- uses the new IGGTModel from src/model/arch/iggt.py
 # ---------------------------------------------------------------------------
 
-def _remap_iggt_checkpoint_keys(ckpt_state_dict):
-    """Strip ``part_head.scratch.`` prefix so weights load into the local PartHead."""
-    remapped = {}
-    n_remapped = 0
-    for k, v in ckpt_state_dict.items():
-        new_k = k
-        if k.startswith("part_head.scratch."):
-            new_k = "part_head." + k[len("part_head.scratch."):]
-            n_remapped += 1
-        remapped[new_k] = v
-    if n_remapped:
-        logger.info("Remapped %d part_head.scratch.* keys", n_remapped)
-    return remapped
-
-
-def _align_state_dicts(model_state_dict, ckpt_state_dict):
-    """Keep only ckpt tensors that exist in model with matching shape."""
-    aligned = {}
-    matched = mismatched = not_in_ckpt = 0
-    for k, v in model_state_dict.items():
-        if k not in ckpt_state_dict:
-            not_in_ckpt += 1
-            continue
-        ckpt_v = ckpt_state_dict[k]
-        if hasattr(ckpt_v, "shape") and ckpt_v.shape == v.shape:
-            aligned[k] = ckpt_v
-            matched += 1
-        else:
-            mismatched += 1
-            logger.warning("Shape mismatch: %s  model=%s  ckpt=%s",
-                           k, tuple(v.shape), tuple(ckpt_v.shape))
-    unused = len(ckpt_state_dict) - matched - mismatched
-    logger.info("state_dict aligned: matched=%d, mismatched=%d, "
-                "not_in_ckpt=%d, unused_in_ckpt=%d",
-                matched, mismatched, not_in_ckpt, unused)
-    return aligned
-
-
-def _build_iggt_lite(embed_dim=1024, patch_size=14, feat_dim=8):
-    """Build IGGTLiteForTrace using local AnySplat modules (no IGGT/ deps)."""
-    from src.model.encoder.vggt.models.vggt import VGGT
-    from src.model.encoder.iggt_heads import PartHead, SamProjector
-
-    class IGGTLite(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            base = VGGT(img_size=518, patch_size=patch_size, embed_dim=embed_dim)
-            self.aggregator = base.aggregator
-            self.point_head = base.point_head
-            self.part_adaptor = SamProjector(
-                dim_in=2 * embed_dim, patch_size=patch_size,
-                pos_embed=False, out_channels=[256, 256, 256, 256],
-            )
-            self.part_head = PartHead(
-                in_channels=[256, 256, 256, 256], features=256,
-                output_dim=feat_dim, patch_size=patch_size, window_size=8,
-            )
-            self._intermediate_layer_idx = [4, 11, 17, 23]
-
-        def forward(self, images):
-            if images.dim() == 4:
-                images = images.unsqueeze(0)
-            aggregated_tokens_list, patch_start_idx = self.aggregator(
-                images, intermediate_layer_idx=self._intermediate_layer_idx,
-            )
-            pts3d, _, point_intermediate = self.point_head(
-                aggregated_tokens_list, images=images,
-                patch_start_idx=patch_start_idx, return_intermediate=True,
-            )  # pts3d: [B, V, H, W, 3]
-            adaptor_out, _ = self.part_adaptor(
-                aggregated_tokens_list, images=images,
-                patch_start_idx=patch_start_idx,
-            )
-            part_feat = self.part_head(
-                list(adaptor_out.values()), images=images,
-                patch_start_idx=patch_start_idx,
-                point_feature=list(point_intermediate),
-            )  # [B, V, D, H, W]
-            return part_feat, pts3d
-
-    return IGGTLite()
-
-
 def load_model(model_path: str, device: str = "cuda"):
-    """Load the lightweight IGGT model for part-feature extraction."""
+    """Load the IGGT model for part-feature extraction using the integrated module."""
+    from src.model.encoder.iggt import EncoderIGGTCfg
+    from src.model.arch.iggt import IGGTModel
+
     logger.info("Loading IGGT model from %s ...", model_path)
-    model = _build_iggt_lite()
-
-    state_dict = torch.load(model_path, map_location=device)
-    if isinstance(state_dict, dict) and "state_dict" in state_dict:
-        state_dict = state_dict["state_dict"]
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    state_dict = _remap_iggt_checkpoint_keys(state_dict)
-    state_dict = _align_state_dicts(model.state_dict(), state_dict)
-    model.load_state_dict(state_dict, strict=False)
-
+    cfg = EncoderIGGTCfg(
+        name="iggt",
+        instance_feat_dim=8,
+        freeze_backbone=True,
+        pretrained_weights="",
+    )
+    model = IGGTModel.from_checkpoint(cfg, model_path, device=device)
     model.eval().to(device)
     for p in model.parameters():
         p.requires_grad = False
@@ -186,20 +103,16 @@ def load_and_preprocess_images_resize(image_path_list, resize_target_size):
 @torch.no_grad()
 def run_inference(model, image_paths, image_size, device="cuda", batch_size=4):
     """Run IGGT on all images and return (part_feat [V, D, H, W], pts3d [V, 3, H, W])."""
-    dtype = (torch.bfloat16
-             if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
-             else torch.float16)
-
     all_feats = []
     all_pts3d = []
     for start in range(0, len(image_paths), batch_size):
         end = min(start + batch_size, len(image_paths))
         batch_paths = image_paths[start:end]
         images = load_and_preprocess_images_resize(batch_paths, image_size).to(device)
-        with torch.amp.autocast("cuda", dtype=dtype):
-            part_feat, pts3d = model(images)
-        part_feat = part_feat[0].float()   # [V_batch, D, H, W]
-        pts3d = pts3d[0].float()           # [V_batch, H, W, 3]
+        images_batch = images.unsqueeze(0)  # [1, V_batch, 3, H, W]
+        enc_out, _ = model(images_batch)
+        part_feat = enc_out.instance_feat_map[0].float()  # [V_batch, D, H, W]
+        pts3d = enc_out.depth_dict["world_points"][0].float()  # [V_batch, H, W, 3]
         pts3d = pts3d.permute(0, 3, 1, 2)  # [V_batch, 3, H, W]
         for vi in range(part_feat.shape[0]):
             all_feats.append(part_feat[vi].cpu())

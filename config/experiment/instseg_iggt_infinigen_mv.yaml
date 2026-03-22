@@ -1,0 +1,44 @@
+# @package _global_
+# IGGT instance segmentation on InsScene-processed_infinigen, multi-GPU.
+# Usage: CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m experiment=instseg_iggt_infinigen_mv
+
+defaults:
+  - instseg_iggt_custom
+
+logger: tensorboard
+
+train:
+  video_use_gt_trajectory: true
+
+wandb:
+  name: instseg_iggt_inscene_infinigen
+  tags: [instseg, iggt, inscene, infinigen]
+
+dataset:
+  custom:
+    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted
+    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted/manifest.jsonl
+
+data_loader:
+  train:
+    num_workers: 8
+    batch_size: 8
+
+optimizer:
+  lr: 2.0e-4
+  warm_up_steps: 3000
+
+trainer:
+  max_steps: 60000
+  val_check_interval: 500
+
+loss:
+  disc:
+    weight: 1.0
+    delta_v: 0.5
+    delta_d: 1.5
+    ignore_id: 0
+    multi_view: true
+    multi_view_step: 15000
+    alpha_var: 1.0
+    alpha_dist: 2.0

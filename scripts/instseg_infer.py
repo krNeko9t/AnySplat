@@ -358,7 +358,7 @@ def _load_lightning_ckpt(ckpt_path: Path) -> dict:
 
 
 def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
-    """Load model via ModelWrapper + Lightning checkpoint."""
+    """Load model via Lightning wrapper + checkpoint, dispatching AnySplat vs IGGT."""
     from omegaconf import OmegaConf
 
     from src.config import load_typed_root_config
@@ -366,7 +366,7 @@ def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
     from src.model.arch import get_model
-    from src.model.anysplat_wrapper import ModelWrapper
+    from src.model.encoder.iggt import EncoderIGGTCfg
 
     run_dir = Path(args.run_dir)
     cfg_path = run_dir / ".hydra" / "config.yaml"
@@ -375,8 +375,16 @@ def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.
     set_cfg(cfg_dict)
 
     step_tracker = StepTracker()
-    model = get_model(cfg.model.encoder, cfg.model.decoder)
-    wrapper = ModelWrapper(cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker)
+    decoder_cfg = getattr(cfg.model, "decoder", None)
+    model = get_model(cfg.model.encoder, decoder_cfg)
+
+    if isinstance(cfg.model.encoder, EncoderIGGTCfg):
+        from src.model.iggt_wrapper import IGGTWrapper
+        wrapper = IGGTWrapper(cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker)
+    else:
+        from src.model.anysplat_wrapper import AnySplatWrapper
+        wrapper = AnySplatWrapper(cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker)
+
     state_dict = _load_lightning_ckpt(Path(args.ckpt))
     missing, unexpected = wrapper.load_state_dict(state_dict, strict=False)
     print(f"[model] Loaded ckpt={args.ckpt} (missing={len(missing)}, unexpected={len(unexpected)})")
@@ -1118,7 +1126,8 @@ def main() -> None:
     # --- Inference ---
     print("[infer] Running encoder forward ...")
     enc_out = run_inference(model, inp, device)
-    print(f"[infer] Gaussians: {tuple(enc_out.gaussians.means.shape)}, "
+    gs_info = f"Gaussians: {tuple(enc_out.gaussians.means.shape)}" if enc_out.gaussians is not None else "Gaussians: None (encoder-only)"
+    print(f"[infer] {gs_info}, "
           f"instance_feat_map={'yes' if enc_out.instance_feat_map is not None else 'no'}, "
           f"gaussian_instance_feat={'yes' if enc_out.gaussian_instance_feat is not None else 'no'}")
 

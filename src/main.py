@@ -38,7 +38,7 @@ with install_import_hook(
     from src.misc.wandb_tools import update_checkpoint_path
     from src.model.decoder import get_decoder
     from src.model.encoder import get_encoder
-    from src.model.anysplat_wrapper import ModelWrapper
+    from src.model.encoder.iggt import EncoderIGGTCfg
 
 
 logging_logger = logging.getLogger(__name__)
@@ -122,16 +122,19 @@ def train(cfg_dict: DictConfig):
     )
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
     
-    model = get_model(cfg.model.encoder, cfg.model.decoder)
-    
-    model_wrapper = ModelWrapper(
-        cfg.optimizer,
-        cfg.test,
-        cfg.train,
-        model,
-        get_losses(cfg.loss),
-        step_tracker
-    )
+    decoder_cfg = getattr(cfg.model, "decoder", None)
+    model = get_model(cfg.model.encoder, decoder_cfg)
+
+    if isinstance(cfg.model.encoder, EncoderIGGTCfg):
+        from src.model.iggt_wrapper import IGGTWrapper
+        model_wrapper = IGGTWrapper(
+            cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
+        )
+    else:
+        from src.model.anysplat_wrapper import AnySplatWrapper
+        model_wrapper = AnySplatWrapper(
+            cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
+        )
     data_module = DataModule(
         cfg.dataset,
         cfg.data_loader,

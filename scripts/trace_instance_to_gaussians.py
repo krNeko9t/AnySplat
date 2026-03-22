@@ -410,18 +410,27 @@ def load_anysplat_encoder(run_dir, ckpt_path, device="cuda"):
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
     from src.model.arch import get_model
-    from src.model.anysplat_wrapper import ModelWrapper
+    from src.model.encoder.iggt import EncoderIGGTCfg
 
     cfg_path = Path(run_dir) / ".hydra" / "config.yaml"
     cfg_dict = OmegaConf.load(str(cfg_path))
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
 
-    model = get_model(cfg.model.encoder, cfg.model.decoder)
-    wrapper = ModelWrapper(
-        cfg.optimizer, cfg.test, cfg.train,
-        model, get_losses(cfg.loss), StepTracker(),
-    )
+    decoder_cfg = getattr(cfg.model, "decoder", None)
+    model = get_model(cfg.model.encoder, decoder_cfg)
+    if isinstance(cfg.model.encoder, EncoderIGGTCfg):
+        from src.model.iggt_wrapper import IGGTWrapper
+        wrapper = IGGTWrapper(
+            cfg.optimizer, cfg.test, cfg.train,
+            model, get_losses(cfg.loss), StepTracker(),
+        )
+    else:
+        from src.model.anysplat_wrapper import AnySplatWrapper
+        wrapper = AnySplatWrapper(
+            cfg.optimizer, cfg.test, cfg.train,
+            model, get_losses(cfg.loss), StepTracker(),
+        )
     state_dict = _load_lightning_ckpt(ckpt_path)
     missing, unexpected = wrapper.load_state_dict(state_dict, strict=False)
     print(f"[model] Loaded ckpt (missing={len(missing)}, unexpected={len(unexpected)})")
@@ -480,106 +489,6 @@ def run_encoder_batch(encoder, image_paths, device="cuda"):
 # Mode A (IGGT): online model inference with IGGT
 # ---------------------------------------------------------------------------
 
-def _remap_iggt_checkpoint_keys(ckpt_state_dict):
-    """Remap IGGT checkpoint keys to match local IGGTLiteForTrace layout.
-
-    The original IGGT PartHead inherits DPTHead and stores layer_rn, refinenet,
-    output_conv under ``self.scratch.*``.  The local PartHead uses them as direct
-    attributes (no ``scratch.`` prefix).  This function strips that prefix so
-    weights can be loaded correctly.
-    """
-    remapped = {}
-    n_remapped = 0
-    for k, v in ckpt_state_dict.items():
-        new_k = k
-        if k.startswith("part_head.scratch."):
-            new_k = "part_head." + k[len("part_head.scratch."):]
-            n_remapped += 1
-        remapped[new_k] = v
-    if n_remapped:
-        print(f"[IGGT-Lite] Remapped {n_remapped} part_head.scratch.* keys")
-    return remapped
-
-
-def align_and_update_state_dicts_minimal(model_state_dict, ckpt_state_dict):
-    """Keep only ckpt tensors that exist in model with matching shape."""
-    aligned = {}
-    matched = 0
-    mismatched = 0
-    not_in_ckpt = 0
-    for k, v in model_state_dict.items():
-        if k not in ckpt_state_dict:
-            not_in_ckpt += 1
-            continue
-        ckpt_v = ckpt_state_dict[k]
-        if hasattr(ckpt_v, "shape") and ckpt_v.shape == v.shape:
-            aligned[k] = ckpt_v
-            matched += 1
-        else:
-            mismatched += 1
-            print(f"  [IGGT-Lite] shape mismatch: {k}  "
-                  f"model={tuple(v.shape)}  ckpt={tuple(ckpt_v.shape)}")
-    unused = len(ckpt_state_dict) - matched - mismatched
-    print(
-        f"[IGGT-Lite] state_dict aligned: matched={matched}, "
-        f"mismatched={mismatched}, not_in_ckpt={not_in_ckpt}, unused_in_ckpt={unused}"
-    )
-    return aligned
-
-
-class IGGTLiteForTrace(torch.nn.Module):
-    """Trace-only IGGT assembly using local AnySplat modules."""
-    def __init__(self, embed_dim=1024, patch_size=14, feat_dim=8):
-        super().__init__()
-        from src.model.encoder.vggt.models.vggt import VGGT
-        from src.model.encoder.iggt_heads import PartHead, SamProjector
-
-        base = VGGT(img_size=518, patch_size=patch_size, embed_dim=embed_dim)
-        self.aggregator = base.aggregator
-        self.point_head = base.point_head
-        self.part_adaptor = SamProjector(
-            dim_in=2 * embed_dim,
-            patch_size=patch_size,
-            pos_embed=False,
-            out_channels=[256, 256, 256, 256],
-        )
-        self.part_head = PartHead(
-            in_channels=[256, 256, 256, 256],
-            features=256,
-            output_dim=feat_dim,
-            patch_size=patch_size,
-            window_size=8,
-        )
-        self._intermediate_layer_idx = [4, 11, 17, 23]
-
-    def forward(self, images):
-        # Support both [V, 3, H, W] and [1, V, 3, H, W].
-        if images.dim() == 4:
-            images = images.unsqueeze(0)
-
-        aggregated_tokens_list, patch_start_idx = self.aggregator(
-            images, intermediate_layer_idx=self._intermediate_layer_idx
-        )
-        _, _, point_intermediate = self.point_head(
-            aggregated_tokens_list,
-            images=images,
-            patch_start_idx=patch_start_idx,
-            return_intermediate=True,
-        )
-        adaptor_out, _ = self.part_adaptor(
-            aggregated_tokens_list,
-            images=images,
-            patch_start_idx=patch_start_idx,
-        )
-        part_feat = self.part_head(
-            list(adaptor_out.values()),
-            images=images,
-            patch_start_idx=patch_start_idx,
-            point_feature=list(point_intermediate),
-        )  # [1, V, D, H, W]
-        return {"part_feat": part_feat}
-
-
 def load_and_preprocess_images_resize(image_path_list, resize_target_size):
     """Resize all input images to target (W, H), output [V, 3, H, W]."""
     import torchvision.transforms as T
@@ -604,21 +513,22 @@ def load_and_preprocess_images_resize(image_path_list, resize_target_size):
 
 
 def load_iggt_model(model_path, device="cuda"):
-    """Load the IGGT model for part-feature extraction."""
-    model = IGGTLiteForTrace()
-    state_dict = torch.load(model_path, map_location=device)
-    if isinstance(state_dict, dict) and "state_dict" in state_dict:
-        state_dict = state_dict["state_dict"]
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    state_dict = _remap_iggt_checkpoint_keys(state_dict)
-    state_dict = align_and_update_state_dicts_minimal(model.state_dict(), state_dict)
-    model.load_state_dict(state_dict, strict=False)
+    """Load the IGGT model for part-feature extraction using the integrated module."""
+    from src.model.encoder.iggt import EncoderIGGTCfg
+    from src.model.arch.iggt import IGGTModel
 
+    cfg = EncoderIGGTCfg(
+        name="iggt",
+        instance_feat_dim=8,
+        freeze_backbone=True,
+        pretrained_weights="",
+    )
+    model = IGGTModel.from_checkpoint(cfg, model_path, device=device)
     model.eval().to(device)
     for p in model.parameters():
         p.requires_grad = False
 
-    feat_dim = 8  # IGGT PartHead output_dim
+    feat_dim = 8
     print(f"[IGGT] Loaded model from {model_path}, feat_dim={feat_dim}")
     return model, feat_dim
 
@@ -632,13 +542,11 @@ def run_iggt_batch(model, image_paths, iggt_image_size, device="cuda"):
     images = load_and_preprocess_images_resize(
         image_paths, resize_target_size=iggt_image_size
     ).to(device)  # [V, 3, H, W]
+    images_batch = images.unsqueeze(0)  # [1, V, 3, H, W]
 
-    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    with torch.amp.autocast("cuda", dtype=dtype):
-        predictions = model(images)
-
-    part_feat = predictions["part_feat"]  # [1, V, 8, H, W]
-    return part_feat[0].float()  # [V, 8, H, W]
+    enc_out, _ = model(images_batch)
+    part_feat = enc_out.instance_feat_map  # [1, V, D, H, W]
+    return part_feat[0].float()  # [V, D, H, W]
 
 
 # ---------------------------------------------------------------------------

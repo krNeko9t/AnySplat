@@ -3,12 +3,14 @@ from typing import Optional, Union
 from .encoder import Encoder
 from .visualization.encoder_visualizer import EncoderVisualizer
 from .anysplat import EncoderAnySplat, EncoderAnySplatCfg
+from .iggt import EncoderIGGT, EncoderIGGTCfg
 
 ENCODERS = {
     "anysplat": (EncoderAnySplat, None),
+    "iggt": (EncoderIGGT, None),
 }
 
-EncoderCfg = Union[EncoderAnySplatCfg]
+EncoderCfg = Union[EncoderAnySplatCfg, EncoderIGGTCfg]
 
 
 def get_encoder(cfg: EncoderCfg) -> tuple[Encoder, Optional[EncoderVisualizer]]:

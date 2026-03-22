@@ -10,7 +10,7 @@ from .dataset.data_module import DataLoaderCfg
 from .loss import LossCfgWrapper
 from .model.decoder import DecoderCfg
 from .model.encoder import EncoderCfg
-from .model.anysplat_wrapper import OptimizerCfg, TestCfg, TrainCfg
+from .model.base_wrapper import OptimizerCfg, TestCfg, TrainCfg
 
 
 @dataclass
@@ -23,8 +23,8 @@ class CheckpointingCfg:
 
 @dataclass
 class ModelCfg:
-    decoder: DecoderCfg
     encoder: EncoderCfg
+    decoder: Optional[DecoderCfg] = None
 
 
 @dataclass

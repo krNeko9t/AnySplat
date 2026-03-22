@@ -12,7 +12,7 @@ T = TypeVar("T")
 
 @dataclass
 class EncoderOutput:
-    gaussians: Gaussians
+    gaussians: Gaussians | None
     pred_pose_enc_list: list[Float[Tensor, "batch view 6"]] | None
     pred_context_pose: dict | None
     depth_dict: dict | None
@@ -35,7 +35,7 @@ class Encoder(nn.Module, ABC, Generic[T]):
     def forward(
         self,
         context: BatchedViews,
-    ) -> Gaussians:
+    ) -> EncoderOutput:
         pass
 
     def get_data_shim(self) -> DataShim:

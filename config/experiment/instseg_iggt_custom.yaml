@@ -1,0 +1,56 @@
+# @package _global_
+# IGGT instance segmentation on a custom dataset.
+# Usage: python src/main.py experiment=instseg_iggt_custom
+
+defaults:
+  - /dataset@_group_.custom: custom
+  - override /model/encoder: iggt
+  - override /loss: [disc]
+
+wandb:
+  name: instseg_iggt_custom
+  tags: [instseg, iggt, custom]
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    pretrained_weights: ""
+    instance_feat_dim: 8
+    freeze_backbone: true
+    intermediate_layer_idx: [4, 11, 17, 23]
+  decoder: null
+
+optimizer:
+  lr: 1.0e-4
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 0.1
+  new_param_keywords: ["part_adaptor", "part_head", "point_head"]
+
+trainer:
+  max_steps: 60000
+  val_check_interval: 500
+  precision: bf16-mixed
+  limit_val_batches: 1
+
+checkpointing:
+  load: null
+  every_n_train_steps: 500
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  disc:
+    weight: 1.0
+    delta_v: 0.5
+    delta_d: 1.5
+    ignore_id: 0
+
+dataset:
+  custom: {}
