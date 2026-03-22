@@ -11,13 +11,15 @@ wandb:
   name: instseg_iggt_custom
   tags: [instseg, iggt, custom]
 
+logger: tensorboard
+
 data_loader:
   train:
     batch_size: 1
 
 model:
   encoder:
-    pretrained_weights: ""
+    pretrained_weights: "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/iggt_checkpoint.pth"
     instance_feat_dim: 8
     freeze_backbone: true
     intermediate_layer_idx: [4, 11, 17, 23]
