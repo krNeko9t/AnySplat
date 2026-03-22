@@ -53,6 +53,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ParamGroupCfg:
+    """Learning rate group: params whose name contains any keyword get lr * lr_multiplier."""
+    keywords: list[str]
+    lr_multiplier: float
+
+
+@dataclass
 class OptimizerCfg:
     lr: float
     warm_up_steps: int
@@ -60,6 +67,11 @@ class OptimizerCfg:
     new_param_keywords: list[str] = field(
         default_factory=lambda: ["gaussian_param_head", "interm"]
     )
+    # Keyword-based control: freeze params matching any keyword. Overrides encoder freeze.
+    freeze_keywords: list[str] = field(default_factory=list)
+    # Declarative LR groups. First match wins. Unmatched params use backbone_lr_multiplier.
+    # When non-empty, overrides new_param_keywords logic.
+    param_groups: list[ParamGroupCfg] = field(default_factory=list)
 
 
 @dataclass
@@ -472,31 +484,78 @@ class BaseModelWrapper(LightningModule):
     # ---- Optimizer ----
 
     def configure_optimizers(self):
-        new_params, new_param_names = [], []
-        pretrained_params, pretrained_param_names = [], []
-        keywords = list(getattr(self.optimizer_cfg, "new_param_keywords", []))
-        if not keywords:
-            keywords = ["gaussian_param_head", "interm"]
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if any(kw in name for kw in keywords):
-                new_params.append(param)
-                new_param_names.append(name)
-            else:
-                pretrained_params.append(param)
-                pretrained_param_names.append(name)
+        cfg = self.optimizer_cfg
+        base_lr = cfg.lr
 
-        if getattr(self, "global_rank", 0) == 0:
-            logger.info(
-                "[configure_optimizers] new_param_keywords=%s; new=%d params, backbone=%d params",
-                keywords, len(new_param_names), len(pretrained_param_names),
-            )
+        # 1. Apply freeze_keywords: override encoder, freeze params matching any keyword
+        freeze_kw = list(getattr(cfg, "freeze_keywords", []) or [])
+        if freeze_kw:
+            for name, param in self.named_parameters():
+                if any(kw in name for kw in freeze_kw):
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
 
-        param_dicts = [
-            {"params": new_params, "lr": self.optimizer_cfg.lr},
-            {"params": pretrained_params, "lr": self.optimizer_cfg.lr * self.optimizer_cfg.backbone_lr_multiplier},
-        ]
+        # 2. Build param groups
+        param_groups_cfg = list(getattr(cfg, "param_groups", []) or [])
+        if param_groups_cfg:
+            # Declarative: assign each param to first matching group
+            group_params: list[list] = [[] for _ in range(len(param_groups_cfg) + 1)]
+            for name, param in self.named_parameters():
+                if not param.requires_grad:
+                    continue
+                assigned = False
+                for i, grp in enumerate(param_groups_cfg):
+                    if any(kw in name for kw in grp.keywords):
+                        group_params[i].append(param)
+                        assigned = True
+                        break
+                if not assigned:
+                    group_params[-1].append(param)  # default group
+
+            param_dicts = []
+            for i, grp in enumerate(param_groups_cfg):
+                if group_params[i]:
+                    param_dicts.append({
+                        "params": group_params[i],
+                        "lr": base_lr * grp.lr_multiplier,
+                    })
+            if group_params[-1]:
+                param_dicts.append({
+                    "params": group_params[-1],
+                    "lr": base_lr * cfg.backbone_lr_multiplier,
+                })
+
+            param_dicts = [d for d in param_dicts if d["params"]]
+
+            if getattr(self, "global_rank", 0) == 0:
+                for i, grp in enumerate(param_groups_cfg):
+                    logger.info("[configure_optimizers] param_groups[%d] keywords=%s lr_mult=%.2f -> %d params", i, grp.keywords, grp.lr_multiplier, len(group_params[i]))
+                logger.info("[configure_optimizers] default (backbone_lr_mult=%.2f) -> %d params", cfg.backbone_lr_multiplier, len(group_params[-1]))
+        else:
+            # Legacy: new_param_keywords + backbone_lr_multiplier
+            keywords = list(getattr(cfg, "new_param_keywords", []) or [])
+            if not keywords:
+                keywords = ["gaussian_param_head", "interm"]
+            new_params, pretrained_params = [], []
+            for name, param in self.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if any(kw in name for kw in keywords):
+                    new_params.append(param)
+                else:
+                    pretrained_params.append(param)
+
+            if getattr(self, "global_rank", 0) == 0:
+                logger.info(
+                    "[configure_optimizers] new_param_keywords=%s; new=%d params, backbone=%d params",
+                    keywords, len(new_params), len(pretrained_params),
+                )
+
+            param_dicts = [
+                {"params": new_params, "lr": base_lr},
+                {"params": pretrained_params, "lr": base_lr * cfg.backbone_lr_multiplier},
+            ]
         optimizer = torch.optim.AdamW(
             param_dicts, lr=self.optimizer_cfg.lr, weight_decay=0.05, betas=(0.9, 0.95),
         )

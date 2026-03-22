@@ -1,7 +1,6 @@
 name: iggt
 
 instance_feat_dim: 8
-freeze_backbone: true
 pretrained_weights: ""
 intermediate_layer_idx: [4, 11, 17, 23]
 pred_pose: true
