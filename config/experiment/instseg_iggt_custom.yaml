@@ -25,7 +25,7 @@ model:
   decoder: null
 
 optimizer:
-  lr: 1.0e-4
+  lr: 3.0e-5
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
   freeze_keywords: [aggregator, camera_head]
@@ -33,7 +33,7 @@ optimizer:
     - keywords: [part_adaptor, part_head]
       lr_multiplier: 1.0
     - keywords: [point_head, depth_head]
-      lr_multiplier: 0.2
+      lr_multiplier: 0.1
 
 trainer:
   max_steps: 60000

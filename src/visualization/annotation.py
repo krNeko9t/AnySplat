@@ -39,7 +39,7 @@ def add_label(
     image: Float[Tensor, "3 width height"],
     label: str,
     font: Path = Path("assets/Inter-Regular.otf"),
-    font_size: int = 24,
+    font_size: int = 100,
 ) -> Float[Tensor, "3 width_with_label height_with_label"]:
     return vcat(
         draw_label(label, font, font_size, image.device),
