@@ -11,6 +11,76 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+logger = logging.getLogger(__name__)
+
+
+def knn_smooth_instance_features(
+    feat_map: Tensor,
+    depth_dict: dict,
+    k: int = 20,
+) -> Tensor:
+    """Smooth instance features by averaging k nearest neighbours in 3D space.
+
+    Aligns with iggt_idmap.py pipeline for consistent cross-view instance IDs.
+    Requires depth_dict["world_points"] (e.g. from IGGT encoder).
+
+    Args:
+        feat_map: [V, N, H, W] instance embeddings.
+        depth_dict: Dict with "world_points" [B, V, H', W', 3] (batch 0 used).
+        k: Number of 3D nearest neighbours.
+
+    Returns:
+        Smoothed feat_map [V, N, H, W], or original if world_points unavailable.
+    """
+    world_pts = depth_dict.get("world_points")
+    if world_pts is None:
+        return feat_map
+
+    try:
+        # world_points: [B, V, H', W', 3] or [V, H', W', 3] -> [V, 3, H', W']
+        pts3d = world_pts.float()
+        if pts3d.dim() == 5:
+            pts3d = pts3d[0]  # [V, H', W', 3]
+        pts3d = pts3d.permute(0, 3, 1, 2)  # [V, 3, H', W']
+
+        V, N, H, W = feat_map.shape
+        if pts3d.shape[2] != H or pts3d.shape[3] != W:
+            pts3d = F.interpolate(
+                pts3d,
+                size=(H, W),
+                mode="bilinear",
+                align_corners=True,
+            )
+
+        feat = F.normalize(feat_map.float(), p=2, dim=1, eps=1e-8)
+        smoothed = _knn_smooth_features_impl(pts3d.cpu(), feat.cpu(), k=k)
+        return smoothed.to(device=feat_map.device, dtype=feat_map.dtype)
+    except Exception as e:
+        logger.warning("knn_smooth_instance_features failed (%s), using raw features", e)
+        return feat_map
+
+
+def _knn_smooth_features_impl(
+    pts3d: Tensor,
+    feat: Tensor,
+    k: int = 20,
+) -> Tensor:
+    """Core KNN smoothing using scipy cKDTree (no torch_geometric)."""
+    from scipy.spatial import cKDTree
+
+    V, D, H, W = feat.shape
+    N = V * H * W
+
+    points_np = pts3d.permute(0, 2, 3, 1).reshape(N, 3).numpy()
+    feat_np = feat.permute(0, 2, 3, 1).reshape(N, D).numpy()
+
+    tree = cKDTree(points_np)
+    _, indices = tree.query(points_np, k=k + 1)
+    indices = indices[:, 1:]
+
+    smoothed = feat_np[indices].mean(axis=1)
+    return torch.from_numpy(smoothed).reshape(V, H, W, D).permute(0, 3, 1, 2)
+
 
 def make_color_lut(num_colors: int, seed: int = 0) -> np.ndarray:
     """Create a deterministic color lookup table for instance IDs."""
@@ -99,6 +169,8 @@ def pca_visualize_embeddings(
 ) -> Tensor:
     """Reduce instance embeddings to 3 channels via PCA for RGB visualization.
 
+    Aligns with iggt_idmap.py: L2 normalize first, then center (no std division).
+
     Args:
         feat_vnhw: [V, N, H, W] instance embeddings.
         valid_vhw: [V, H, W] bool mask; if None, all pixels are valid.
@@ -112,6 +184,8 @@ def pca_visualize_embeddings(
 
     V, N, H, W = feat_vnhw.shape
     feat_flat = feat_vnhw.permute(0, 2, 3, 1).reshape(-1, N).float()
+    feat_flat = F.normalize(feat_flat, p=2, dim=-1, eps=1e-8)
+
     if valid_vhw is not None:
         valid_flat = valid_vhw.reshape(-1)
         feat_valid = feat_flat[valid_flat]
@@ -138,17 +212,16 @@ def pca_visualize_embeddings(
         feat_flat = torch.cat([feat_flat, pad_flat], dim=1)
         C = 3
 
-    # Run PCA in float32; autocast can make tensors bfloat16 and pca_lowrank does not support it
+    # Align with iggt_idmap: center only (no std). PCA on L2-normalized features.
     with torch.amp.autocast(device_type="cuda", enabled=False):
         feat_valid = feat_valid.float()
         feat_flat = feat_flat.float()
         mean = feat_valid.mean(dim=0, keepdim=True)
-        std = feat_valid.std(dim=0, keepdim=True) + 1e-5
-        feat_valid = (feat_valid - mean) / std
-        feat_flat = (feat_flat - mean) / std
+        feat_centered_valid = feat_valid - mean
+        feat_centered_flat = feat_flat - mean
         try:
-            _, _, v = torch.pca_lowrank(feat_valid, q=min(C, 256))
-            proj = torch.matmul(feat_flat, v[:, :3])
+            _, _, v = torch.pca_lowrank(feat_centered_valid, q=min(C, 256))
+            proj = torch.matmul(feat_centered_flat, v[:, :3])
         except Exception as e:
             logging.warning(
                 "pca_visualize_embeddings: PCA 失败 (%s)，改用全图重试",
@@ -157,10 +230,9 @@ def pca_visualize_embeddings(
             )
             try:
                 mean = feat_flat.mean(dim=0, keepdim=True)
-                std = feat_flat.std(dim=0, keepdim=True) + 1e-5
-                feat_std = (feat_flat - mean) / std
-                _, _, v = torch.pca_lowrank(feat_std, q=min(C, 256))
-                proj = torch.matmul(feat_std, v[:, :3])
+                feat_centered_flat = feat_flat - mean
+                _, _, v = torch.pca_lowrank(feat_centered_flat, q=min(C, 256))
+                proj = torch.matmul(feat_centered_flat, v[:, :3])
             except Exception as e2:
                 logging.warning(
                     "pca_visualize_embeddings: 全图 PCA 仍失败，返回全黑 (%s)",

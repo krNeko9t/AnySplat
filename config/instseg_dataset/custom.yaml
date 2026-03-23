@@ -10,7 +10,8 @@ root: datasets/custom
 manifest_path: datasets/custom/manifest.jsonl
 
 # Network input resolution (H, W).
-input_image_shape: [224, 448]
+input_image_shape: [504, 336] # for iggt
+# input_image_shape: [224, 448] # anysplat default
 
 # If set, only train on a single scene_id.
 overfit_to_scene: null

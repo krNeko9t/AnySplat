@@ -38,6 +38,7 @@ from ..visualization.annotation import add_label
 from ..visualization.instance_viz import (
     cluster_instance_embeddings,
     colorize_labels,
+    knn_smooth_instance_features,
     make_color_lut,
     pca_visualize_embeddings,
 )
@@ -158,13 +159,18 @@ def visualize_instance_features(
     pl_logger,
     global_step: int,
 ) -> None:
-    """Build and log the instance head comparison image (shared by all wrappers)."""
+    """Build and log the instance head comparison image (shared by all wrappers).
+
+    Aligns with iggt_idmap.py: 3D KNN smoothing (when world_points available)
+    and PCA on L2-normalized + centered features.
+    """
     if encoder_output.instance_feat_map is None:
         return
     if "instance_mask" not in batch.get("context", {}):
         return
 
     feat_map = encoder_output.instance_feat_map[0].float()
+    feat_map = knn_smooth_instance_features(feat_map, depth_dict, k=20)
     V, N, H, W = feat_map.shape
     valid = depth_dict.get("conf_valid_mask")
     valid_vhw = valid[0] if valid is not None else None
