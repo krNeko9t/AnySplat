@@ -253,12 +253,20 @@ def pca_visualize(feat_vdhw: torch.Tensor, low_p=0.02, high_p=0.98) -> np.ndarra
     _, _, v = torch.pca_lowrank(feat_centered, q=min(D, 256))
     proj = feat_centered @ v[:, :3]
 
+    # Subsample for quantile when tensor is large (torch.quantile fails on >2^31 elements)
+    max_quantile_elems = 1_000_000
     for i in range(3):
-        ch = proj[:, i]
-        v_lo = torch.quantile(ch, low_p)
-        v_hi = torch.quantile(ch, high_p)
+        ch = proj[:, i].flatten()
+        n = ch.numel()
+        if n > max_quantile_elems:
+            step = max(1, n // max_quantile_elems)
+            ch_sub = ch[::step]  # deterministic stride sampling
+        else:
+            ch_sub = ch
+        v_lo = torch.quantile(ch_sub, low_p)
+        v_hi = torch.quantile(ch_sub, high_p)
         if v_hi > v_lo:
-            proj[:, i] = (ch - v_lo) / (v_hi - v_lo)
+            proj[:, i] = (proj[:, i] - v_lo) / (v_hi - v_lo)
         else:
             proj[:, i] = 0.5
     proj = proj.clamp(0, 1)
