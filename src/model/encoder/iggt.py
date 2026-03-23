@@ -132,6 +132,9 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             patch_start_idx=patch_start_idx,
             point_feature=list(point_intermediate) if point_intermediate is not None else None,
         )
+        # hard code normalize for iggt
+        instance_feat_map = F.normalize(instance_feat_map.float(), p=2, dim=2, eps=1e-8).to(instance_feat_map.dtype)
+
 
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()
