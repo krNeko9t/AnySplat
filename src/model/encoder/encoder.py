@@ -23,6 +23,8 @@ class EncoderOutput:
     instance_feat_map: Float[Tensor, "batch view n height width"] | None = None
     # gaussian_instance_feat: [B, G, N] (aligned with gaussians order)
     gaussian_instance_feat: Float[Tensor, "batch gaussian n"] | None = None
+    # Dense physics feature map from PhysicsHead: [B, V, C, H, W]
+    physics_feat_map: Float[Tensor, "batch view c height width"] | None = None
 
 class Encoder(nn.Module, ABC, Generic[T]):
     cfg: T

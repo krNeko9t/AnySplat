@@ -78,6 +78,8 @@ class IGGTWrapper(BaseModelWrapper):
 
         if encoder_output.instance_feat_map is not None:
             depth_dict_for_loss["instance_feat_map"] = encoder_output.instance_feat_map
+        if encoder_output.physics_feat_map is not None:
+            depth_dict_for_loss["physics_feat_map"] = encoder_output.physics_feat_map
         if "context" in batch and "instance_mask" in batch["context"] and "target" in batch and "instance_mask" in batch["target"]:
             depth_dict_for_loss["instance_mask"] = torch.cat(
                 [batch["context"]["instance_mask"], batch["target"]["instance_mask"]], dim=1,
@@ -90,6 +92,9 @@ class IGGTWrapper(BaseModelWrapper):
             )
         elif "context" in batch and "valid_mask" in batch["context"]:
             depth_dict_for_loss["instance_valid_mask"] = batch["context"]["valid_mask"]
+        # Physics label map (scene-level, shared across context/target)
+        if "context" in batch and "phys_label_map" in batch["context"]:
+            depth_dict_for_loss["phys_label_map"] = batch["context"]["phys_label_map"]
 
         with torch.amp.autocast("cuda", enabled=False):
             total_loss, loss_values = self.compute_and_log_losses(

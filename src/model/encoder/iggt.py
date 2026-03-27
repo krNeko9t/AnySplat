@@ -30,7 +30,7 @@ from src.model.encoder.vggt.utils.geometry import (
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 from .encoder import Encoder, EncoderOutput
-from .iggt_heads import PartHead, SamProjector
+from .iggt_heads import PartHead, PhysicsHead, SamProjector
 from .vggt.models.vggt import VGGT
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,11 @@ class EncoderIGGTCfg:
     input_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
     input_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
     pred_pose: bool = True
+    # Physics head
+    phys_head_enabled: bool = False
+    phys_feat_dim: int = 32
+    phys_use_point_feat: bool = True
+    phys_use_window_cross_attn: bool = True
 
 
 class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
@@ -85,6 +90,18 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             patch_size=patch_size,
             window_size=8,
         )
+
+        self.phys_head_enabled = cfg.phys_head_enabled
+        if self.phys_head_enabled:
+            self.physics_head = PhysicsHead(
+                in_channels=[256, 256, 256, 256],
+                features=256,
+                output_dim=cfg.phys_feat_dim,
+                patch_size=patch_size,
+                window_size=8,
+                use_point_feat=cfg.phys_use_point_feat,
+                use_window_cross_attn=cfg.phys_use_window_cross_attn,
+            )
 
     def forward(
         self,
@@ -126,15 +143,25 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             images=image,
             patch_start_idx=patch_start_idx,
         )
+        point_feat_list = list(point_intermediate) if point_intermediate is not None else None
+
         instance_feat_map = self.part_head(
             list(adaptor_out.values()),
             images=image,
             patch_start_idx=patch_start_idx,
-            point_feature=list(point_intermediate) if point_intermediate is not None else None,
+            point_feature=point_feat_list,
         )
         # hard code normalize for iggt
         instance_feat_map = F.normalize(instance_feat_map.float(), p=2, dim=2, eps=1e-8).to(instance_feat_map.dtype)
 
+        physics_feat_map = None
+        if self.phys_head_enabled:
+            physics_feat_map = self.physics_head(
+                list(adaptor_out.values()),
+                images=image,
+                patch_start_idx=patch_start_idx,
+                point_feature=point_feat_list,
+            )
 
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()
@@ -172,6 +199,7 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             distill_infos=None,
             instance_feat_map=instance_feat_map,
             gaussian_instance_feat=None,
+            physics_feat_map=physics_feat_map,
         )
 
     def get_data_shim(self) -> DataShim:

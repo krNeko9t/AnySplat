@@ -1,0 +1,78 @@
+# @package _global_
+# IGGT physics property classification on a custom dataset.
+# Usage: python src/main.py experiment=phys_iggt_custom
+
+defaults:
+  - /dataset@_group_.custom: custom
+  - override /model/encoder: iggt
+  - override /loss: [disc, phys]
+
+wandb:
+  name: phys_iggt_custom
+  tags: [physics, iggt, custom]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    pretrained_weights: "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/iggt_checkpoint.pth"
+    instance_feat_dim: 8
+    intermediate_layer_idx: [4, 11, 17, 23]
+    phys_head_enabled: true
+    phys_feat_dim: 32
+    phys_use_point_feat: true
+    phys_use_window_cross_attn: true
+  decoder: null
+
+optimizer:
+  lr: 3.0e-5
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 0.1
+  freeze_keywords: [aggregator, camera_head]
+  param_groups:
+    - keywords: [part_adaptor, part_head]
+      lr_multiplier: 0.0
+    - keywords: [physics_head]
+      lr_multiplier: 1.0
+    - keywords: [point_head, depth_head]
+      lr_multiplier: 0.1
+
+trainer:
+  max_steps: 60000
+  val_check_interval: 500
+  precision: bf16-mixed
+  limit_val_batches: 1
+
+checkpointing:
+  load: null
+  every_n_train_steps: 500
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  disc:
+    weight: 1.0
+    delta_v: 0.5
+    delta_d: 1.0
+    ignore_id: 0
+  phys:
+    weight: 1.0
+    num_classes: 4
+    ignore_id: 0
+    focal_gamma: 2.0
+    phys_feat_dim: 32
+    classifier_hidden: 64
+    use_inst_feat: false
+    cross_view_pool: true
+    dense_aux_weight: 0.0
+
+dataset:
+  custom: {}

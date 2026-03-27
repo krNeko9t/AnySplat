@@ -1,0 +1,11 @@
+phys:
+  weight: 1.0
+  num_classes: 4
+  ignore_id: 0
+  focal_gamma: 2.0
+  phys_feat_dim: 32
+  classifier_hidden: 64
+  use_inst_feat: false
+  inst_feat_dim: 8
+  cross_view_pool: true
+  dense_aux_weight: 0.0
