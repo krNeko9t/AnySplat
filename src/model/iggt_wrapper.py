@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import json
+
 import numpy as np
 import torch
 from einops import rearrange
@@ -156,6 +158,88 @@ class IGGTWrapper(BaseModelWrapper):
                     encoder_output, batch, context_img, depth_dict,
                     self.logger, self.global_step,
                 )
+
+            self._log_physics_predictions(encoder_output, batch)
+
+    # ------------------------------------------------------------------
+    # Physics prediction logging
+    # ------------------------------------------------------------------
+
+    PHYS_CLASS_NAMES = {0: "static", 1: "rigid", 2: "soft", 3: "unknown"}
+
+    def _get_phys_classifier(self):
+        """Find the LossPhys classifier among registered losses."""
+        for loss_fn in self.losses:
+            if hasattr(loss_fn, "classifier") and loss_fn.name == "phys":
+                return loss_fn
+        return None
+
+    @torch.no_grad()
+    def _log_physics_predictions(self, encoder_output, batch):
+        """Log per-instance physics predictions during validation."""
+        phys_feat_map = encoder_output.physics_feat_map
+        if phys_feat_map is None:
+            return
+
+        inst_mask = batch["context"].get("instance_mask")
+        phys_lut = batch["context"].get("phys_label_map")
+        if inst_mask is None:
+            return
+
+        loss_phys = self._get_phys_classifier()
+        if loss_phys is None:
+            return
+
+        B, V, C, H, W = phys_feat_map.shape
+        results = []
+
+        for b_idx in range(B):
+            feat_b = phys_feat_map[b_idx]  # [V, C, H, W]
+            mask_b = inst_mask[b_idx]       # [V, H, W]
+
+            unique_ids = torch.unique(mask_b)
+            unique_ids = unique_ids[unique_ids != 0]
+
+            for inst_id in unique_ids:
+                id_int = inst_id.item()
+                per_view_mask = (mask_b == id_int)  # [V, H, W]
+                count = per_view_mask.sum()
+                if count == 0:
+                    continue
+
+                feat_flat = feat_b.reshape(V, C, -1)  # [V, C, H*W]
+                mask_flat = per_view_mask.reshape(V, -1)  # [V, H*W]
+                masked = feat_flat * mask_flat.unsqueeze(1).to(feat_flat.dtype)
+                pooled = masked.sum(dim=(0, 2)) / count.clamp(min=1).to(feat_flat.dtype)
+
+                logits = loss_phys.classifier(pooled.float().unsqueeze(0))
+                probs = torch.softmax(logits, dim=-1)[0]
+                pred_idx = probs.argmax().item()
+                pred_label = self.PHYS_CLASS_NAMES.get(pred_idx, f"class_{pred_idx}")
+                confidence = probs[pred_idx].item()
+
+                gt_label = "N/A"
+                if phys_lut is not None:
+                    lut = phys_lut[b_idx]
+                    if id_int < lut.shape[0] and lut[id_int] > 0:
+                        gt_idx = lut[id_int].item() - 1
+                        gt_label = self.PHYS_CLASS_NAMES.get(gt_idx, f"class_{gt_idx}")
+
+                results.append({
+                    "id": id_int,
+                    "predicted": pred_label,
+                    "confidence": round(confidence, 3),
+                    "gt": gt_label,
+                })
+
+        if results:
+            results.sort(key=lambda x: x["id"])
+            scene = batch.get("scene", "?")
+            logger.info(
+                "[PhysPred step=%d scene=%s]\n%s",
+                self.global_step, scene,
+                json.dumps(results, indent=2, ensure_ascii=False),
+            )
 
     # ------------------------------------------------------------------
     # Test

@@ -219,26 +219,48 @@ class DatasetCustom(Dataset):
         )
         t_sample = time.monotonic() - t_sample0
 
+        # Check once whether this scene has depth (all frames consistent).
+        scene_has_depth = any(
+            (fr.get("depth_path") or fr.get("depth")) is not None for fr in frames
+        )
+
         # Load selected frames.
         def load_stack(indices: Tensor):
             imgs, depths, insts, Ks = [], [], [], []
             for i in indices.tolist():
                 fr = frames[int(i)]
                 rgb_path = self._as_path(fr.get("rgb_path") or fr.get("image_path") or fr["rgb"])
-                depth_path = self._as_path(fr.get("depth_path") or fr["depth"])
                 inst_path = self._as_path(fr.get("instance_mask_path") or fr.get("mask_path") or fr["instance_mask"])
+
                 try:
                     img = self._load_rgb(rgb_path)
-                    depth = self._load_depth(depth_path)
                     inst = self._load_instance(inst_path)
+
+                    img_h, img_w = img.shape[-2], img.shape[-1]
+                    if inst.shape[-2] != img_h or inst.shape[-1] != img_w:
+                        inst = torch.nn.functional.interpolate(
+                            inst.unsqueeze(0).unsqueeze(0).float(),
+                            size=(img_h, img_w),
+                            mode="nearest",
+                        ).squeeze(0).squeeze(0).long()
+
+                    if scene_has_depth:
+                        depth_raw = fr.get("depth_path") or fr.get("depth")
+                        depth = self._load_depth(self._as_path(depth_raw))
+                        if depth.shape[-2] != img_h or depth.shape[-1] != img_w:
+                            depth = torch.nn.functional.interpolate(
+                                depth.unsqueeze(0).unsqueeze(0),
+                                size=(img_h, img_w),
+                                mode="nearest",
+                            ).squeeze(0).squeeze(0)
+                    else:
+                        depth = torch.ones(img_h, img_w, dtype=torch.float32)
                 except Exception as e:
-                    # Make I/O/data corruption obvious in per-rank logs.
                     logger.exception(
-                        "[DatasetCustom] Failed loading files for scene_id=%s frame_idx=%s rgb=%s depth=%s inst=%s",
+                        "[DatasetCustom] Failed loading files for scene_id=%s frame_idx=%s rgb=%s inst=%s",
                         scene_id,
                         i,
                         str(rgb_path),
-                        str(depth_path),
                         str(inst_path),
                     )
                     raise
@@ -246,14 +268,15 @@ class DatasetCustom(Dataset):
                 imgs.append(img)
                 depths.append(depth)
                 insts.append(inst)
-
-                # normalized K already built above, but keep aligned by index
                 Ks.append(intrinsics[int(i)])
 
             images = torch.stack(imgs, dim=0)
             depth_t = torch.stack(depths, dim=0)
             inst_t = torch.stack(insts, dim=0)
-            valid_mask = (depth_t > 0) & torch.isfinite(depth_t) & (depth_t < float(self.cfg.depth_invalid_value))
+            if scene_has_depth:
+                valid_mask = (depth_t > 0) & torch.isfinite(depth_t) & (depth_t < float(self.cfg.depth_invalid_value))
+            else:
+                valid_mask = torch.ones_like(depth_t, dtype=torch.bool)
             return images, depth_t, inst_t, torch.stack(Ks, dim=0), valid_mask
 
         t_io0 = time.monotonic()

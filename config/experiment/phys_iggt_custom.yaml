@@ -75,4 +75,7 @@ loss:
     dense_aux_weight: 0.0
 
 dataset:
-  custom: {}
+  custom:
+    root: 3dovs/bench
+    manifest_path: manifest.jsonl
+    original_image_shape: [756, 1008]
