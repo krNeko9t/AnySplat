@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
 """
-Trace 2D instance feature maps onto pre-trained 2DGS Gaussians.
+Trace 2D feature maps onto pre-trained 2DGS Gaussians.
 
-Uses diff_surfel_rasterization.trace() to back-project per-pixel instance
-features (from AnySplat's instance head) onto a high-quality pre-trained
-Gaussian scene, accumulating across multiple views.
+Uses diff_surfel_rasterization.trace() to back-project per-pixel features
+onto a high-quality pre-trained Gaussian scene, accumulating across views.
 
-Three feature-map sources:
-  Mode A/AnySplat (online):  Run AnySplat encoder with instance head.
-  Mode A/IGGT    (online):  Run IGGT model for part features.
-  Mode B         (offline): Load pre-computed feature maps from .pt / .npy files.
+Feature sources (--feature_source):
+  anysplat    : Run AnySplat encoder with instance head (online inference).
+  iggt        : Run IGGT model for part features (online inference).
+  precomputed : Load pre-computed feature maps from .pt / .npy files.
+  gt_idmap    : Load multi-view-consistent GT integer ID maps, encode via
+                random embeddings, trace, then decode back to IDs.
+
+Legacy args (--run_dir, --feat_dir, --model_type iggt) are still supported
+and auto-detected when --feature_source is omitted.
 
 Dependencies (anysplat conda env):
   torch, numpy, Pillow, plyfile, tqdm, diff_surfel_rasterization
   + src.misc.colmap_utils (project-local)
 
 Example:
-  # Mode B – pre-saved feature maps
+  # Precomputed feature maps (e.g. physics features)
   python scripts/trace_instance_to_gaussians.py \
-      --source_path zipnerf/alameda \
-      --ply_path zipnerf/alameda/point_cloud.ply \
-      --feat_dir precomputed_feats/ \
-      --feat_dim 8 --max_views 5
+      --source_path scene/ --ply_path scene/point_cloud.ply \
+      --feature_source precomputed --feat_dir phys_feats/ --feat_dim 8
 
-  # Mode A/AnySplat – online inference
+  # GT ID map trace
   python scripts/trace_instance_to_gaussians.py \
-      --source_path zipnerf/alameda \
-      --ply_path zipnerf/alameda/point_cloud.ply \
-      --run_dir output/exp_instseg_custom/2026-02-22_17-15-07 \
-      --max_views 5
+      --source_path scene/ --ply_path scene/point_cloud.ply \
+      --feature_source gt_idmap --idmap_dir scene/id_maps/ \
+      --postprocess gt_color,pca
 
-  # Mode A/IGGT – online inference with IGGT
+  # AnySplat online inference (legacy args still work)
   python scripts/trace_instance_to_gaussians.py \
-      --source_path zipnerf/alameda \
-      --ply_path zipnerf/alameda/point_cloud.ply \
-      --model_type iggt --iggt_model_path /path/to/iggt_ckpt.pth \
-      --max_views 5
+      --source_path scene/ --ply_path scene/point_cloud.ply \
+      --run_dir output/exp/ --max_views 5
+
+  # IGGT online inference
+  python scripts/trace_instance_to_gaussians.py \
+      --source_path scene/ --ply_path scene/point_cloud.ply \
+      --model_type iggt --iggt_model_path /path/to/iggt_ckpt.pth
 """
 
 import os
@@ -582,6 +586,235 @@ def load_precomputed_features(feat_dir, image_names, feat_dim):
 
 
 # ---------------------------------------------------------------------------
+# GT ID Map: codec (random-embedding encode/decode) + loader
+# ---------------------------------------------------------------------------
+
+class IDMapCodec:
+    """Encode discrete integer IDs to random embeddings and decode back.
+
+    Background/ignore is ID 0, mapped to zero vector.
+    All other IDs get L2-normalized random vectors of dimension *embed_dim*.
+    After tracing the embedding maps and averaging, the original ID is
+    recovered via nearest-neighbor lookup against the embedding table.
+    """
+
+    def __init__(self, embed_dim=16, seed=42):
+        self.embed_dim = embed_dim
+        self.seed = seed
+        self.id_to_idx = {}      # original_id -> table row index (1-based)
+        self.idx_to_id = {0: 0}  # table row index -> original_id
+        self.embedding_table = None  # (num_ids+1, embed_dim)
+
+    def fit(self, id_maps):
+        """Scan all ID maps to discover unique IDs and build the table."""
+        all_ids = set()
+        for m in id_maps:
+            all_ids.update(m.unique().tolist())
+        all_ids.discard(0)
+        sorted_ids = sorted(all_ids)
+        self.id_to_idx = {uid: i + 1 for i, uid in enumerate(sorted_ids)}
+        self.idx_to_id = {0: 0}
+        self.idx_to_id.update({i + 1: uid for i, uid in enumerate(sorted_ids)})
+
+        n = len(sorted_ids) + 1  # row 0 = background
+        g = torch.Generator().manual_seed(self.seed)
+        table = torch.randn(n, self.embed_dim, generator=g)
+        table[0] = 0.0
+        table[1:] = F.normalize(table[1:].float(), p=2, dim=-1, eps=1e-8)
+        self.embedding_table = table
+        return self
+
+    def encode(self, id_map):
+        """(H, W) int tensor -> (embed_dim, H, W) float tensor."""
+        H, W = id_map.shape
+        idx_map = torch.zeros(H, W, dtype=torch.long)
+        for uid, tidx in self.id_to_idx.items():
+            idx_map[id_map == uid] = tidx
+        emb = self.embedding_table[idx_map.view(-1)]  # (H*W, D)
+        return emb.view(H, W, self.embed_dim).permute(2, 0, 1).contiguous()
+
+    @torch.no_grad()
+    def decode(self, feat, valid_mask):
+        """(G, D) traced features -> (G,) integer IDs via cosine nearest neighbor."""
+        table = self.embedding_table.to(feat.device).float()
+        feat_n = F.normalize(feat.float(), p=2, dim=-1, eps=1e-8)
+        table_n = F.normalize(table, p=2, dim=-1, eps=1e-8)
+        sim = feat_n @ table_n.T  # (G, num_ids+1)
+        pred_idx = sim.argmax(dim=1)
+
+        ids = torch.zeros(feat.shape[0], dtype=torch.int64, device=feat.device)
+        for tidx, uid in self.idx_to_id.items():
+            ids[pred_idx == tidx] = uid
+        ids[~valid_mask] = 0
+        return ids
+
+    @property
+    def num_ids(self):
+        return len(self.id_to_idx)
+
+
+def load_gt_idmaps(idmap_dir, image_names):
+    """Load per-view integer ID maps from idmap_dir/{name}.npy or image files.
+
+    Returns list of (H, W) int64 tensors.
+    """
+    idmap_dir = Path(idmap_dir)
+    maps = []
+    for name in image_names:
+        npy_path = idmap_dir / f"{name}.npy"
+        png_path = idmap_dir / f"{name}.png"
+        if npy_path.exists():
+            arr = np.load(str(npy_path)).astype(np.int64)
+        elif png_path.exists():
+            arr = np.array(Image.open(png_path))
+            if arr.ndim == 3:
+                arr = arr[..., 0]
+            arr = arr.astype(np.int64)
+        else:
+            candidates = list(idmap_dir.glob(f"{name}.*"))
+            if candidates:
+                arr = np.array(Image.open(candidates[0]))
+                if arr.ndim == 3:
+                    arr = arr[..., 0]
+                arr = arr.astype(np.int64)
+            else:
+                raise FileNotFoundError(
+                    f"ID map not found for '{name}' in {idmap_dir}"
+                )
+        maps.append(torch.from_numpy(arr))
+    return maps
+
+
+# ---------------------------------------------------------------------------
+# Feature source preparation (one function per source type)
+# ---------------------------------------------------------------------------
+
+def prepare_anysplat_features(cam_list, args, device):
+    """Load AnySplat encoder, run inference, return feat_maps + trace cameras."""
+    print("\n[anysplat] Loading AnySplat encoder ...")
+    encoder, feat_dim = load_anysplat_encoder(args.run_dir, args.ckpt, device)
+    print(f"  Feature dim = {feat_dim}")
+
+    batch_size = args.encoder_batch_size
+    image_paths = [c.image_path for c in cam_list]
+    all_feat_maps = []
+    print(f"[anysplat] Running encoder on {len(cam_list)} views "
+          f"(batch_size={batch_size}) ...")
+    for start in range(0, len(cam_list), batch_size):
+        end = min(start + batch_size, len(cam_list))
+        feat_batch = run_encoder_batch(encoder, image_paths[start:end], device)
+        for vi in range(feat_batch.shape[0]):
+            all_feat_maps.append(feat_batch[vi])
+    del encoder
+    torch.cuda.empty_cache()
+
+    if args.trace_crop_aligned:
+        trace_cams = [
+            create_virtual_crop_camera(
+                cam, cam.orig_width, cam.orig_height,
+                cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
+            )
+            for cam in cam_list
+        ]
+        print("  Using 448x448 virtual camera (crop-aligned)")
+    else:
+        trace_cams = list(cam_list)
+
+    return {
+        "feat_maps": all_feat_maps,
+        "trace_cams": trace_cams,
+        "feat_dim": feat_dim,
+        "masks": None,
+    }
+
+
+def prepare_iggt_features(cam_list, args, device):
+    """Load IGGT model, run inference, return feat_maps + trace cameras."""
+    iggt_w, iggt_h = args._iggt_image_size
+    print("\n[iggt] Loading IGGT model ...")
+    iggt_model, feat_dim = load_iggt_model(args.iggt_model_path, device)
+    print(f"  Feature dim = {feat_dim}")
+
+    batch_size = args.encoder_batch_size
+    image_paths = [c.image_path for c in cam_list]
+    all_feat_maps = []
+    print(f"[iggt] Running IGGT on {len(cam_list)} views "
+          f"(batch_size={batch_size}, image_size={iggt_w}x{iggt_h}) ...")
+    for start in range(0, len(cam_list), batch_size):
+        end = min(start + batch_size, len(cam_list))
+        feat_batch = run_iggt_batch(
+            iggt_model, image_paths[start:end], args._iggt_image_size, device,
+        )
+        for vi in range(feat_batch.shape[0]):
+            all_feat_maps.append(feat_batch[vi])
+    del iggt_model
+    torch.cuda.empty_cache()
+
+    if args.trace_crop_aligned:
+        trace_cams = [
+            create_virtual_resize_camera(
+                cam, cam.orig_width, cam.orig_height,
+                cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
+                iggt_w, iggt_h,
+            )
+            for cam in cam_list
+        ]
+        print(f"  Using {iggt_w}x{iggt_h} virtual camera (resize-aligned)")
+    else:
+        trace_cams = list(cam_list)
+
+    return {
+        "feat_maps": all_feat_maps,
+        "trace_cams": trace_cams,
+        "feat_dim": feat_dim,
+        "masks": None,
+    }
+
+
+def prepare_precomputed_features(cam_list, args, device):
+    """Load pre-computed feature maps from disk."""
+    feat_dim = args.feat_dim
+    print(f"\n[precomputed] Loading features from {args.feat_dir}")
+    feat_maps = load_precomputed_features(
+        args.feat_dir, [c.image_name for c in cam_list], feat_dim,
+    )
+    print(f"  Loaded {len(feat_maps)} feature maps, dim={feat_dim}")
+
+    return {
+        "feat_maps": feat_maps,
+        "trace_cams": list(cam_list),
+        "feat_dim": feat_dim,
+        "masks": None,
+    }
+
+
+def prepare_gt_idmap_features(cam_list, args, device):
+    """Load GT ID maps, encode to random embeddings, return feat_maps + masks."""
+    embed_dim = args.id_embed_dim
+    print(f"\n[gt_idmap] Loading ID maps from {args.idmap_dir}")
+    id_maps = load_gt_idmaps(args.idmap_dir, [c.image_name for c in cam_list])
+    print(f"  Loaded {len(id_maps)} ID maps")
+
+    codec = IDMapCodec(embed_dim=embed_dim, seed=args.id_embed_seed)
+    codec.fit(id_maps)
+    print(f"  Unique IDs: {codec.num_ids}, embed_dim={embed_dim}")
+
+    feat_maps = []
+    masks = []
+    for idmap in id_maps:
+        feat_maps.append(codec.encode(idmap))
+        masks.append((idmap != 0).to(torch.int32))
+
+    return {
+        "feat_maps": feat_maps,
+        "trace_cams": list(cam_list),
+        "feat_dim": embed_dim,
+        "masks": masks,
+        "id_codec": codec,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Post-processing: PCA visualization, clustering, PLY export
 # ---------------------------------------------------------------------------
 
@@ -813,8 +1046,9 @@ def save_colored_gaussians_ply(ply_path, rgb_u8, out_path):
     print(f"  Saved 3DGS PLY: {out_path}")
 
 
-def run_postprocess(feat, num_ray, ply_path, output_dir, args):
-    """Dispatch post-processing: PCA and/or clustering."""
+def run_postprocess(feat, num_ray, ply_path, output_dir, args,
+                    gaussian_ids=None):
+    """Dispatch post-processing: PCA, clustering, and/or GT-ID coloring."""
     from src.visualization.instance_viz import make_color_lut
 
     modes = [s.strip() for s in args.postprocess.split(",") if s.strip()]
@@ -836,6 +1070,28 @@ def run_postprocess(feat, num_ray, ply_path, output_dir, args):
 
     feat_gpu = feat.cuda() if not feat.is_cuda else feat
     valid_gpu = valid_mask.cuda() if not valid_mask.is_cuda else valid_mask
+
+    if "gt_color" in modes:
+        if gaussian_ids is None:
+            print("\n[gt_color] Skipped: no decoded IDs (only for gt_idmap source)")
+        else:
+            print("\n--- GT ID coloring ---")
+            ids_np = gaussian_ids.cpu().numpy().astype(np.int32)
+            max_id = int(ids_np.max())
+            n_assigned = int((ids_np > 0).sum())
+            print(f"  Max ID: {max_id}, assigned: {n_assigned:,}/{n_valid:,}")
+
+            lut = make_color_lut(max_id + 1, seed=args.palette_seed)
+            rgb_gt = lut[np.clip(ids_np, 0, max_id)]
+            rgb_gt[ids_np == 0] = 0
+
+            gt_dir = os.path.join(post_dir, "gt_color")
+            save_colored_pointcloud(xyz_np, rgb_gt,
+                                    os.path.join(gt_dir, "colored_pointcloud.ply"))
+            save_colored_gaussians_ply(ply_path, rgb_gt,
+                                       os.path.join(gt_dir, "colored_gaussians.ply"))
+            np.save(os.path.join(gt_dir, "gt_ids.npy"), ids_np)
+            print(f"  Saved IDs: {os.path.join(gt_dir, 'gt_ids.npy')}")
 
     if "pca" in modes:
         print("\n--- PCA visualization ---")
@@ -895,6 +1151,9 @@ def render_colored_views(source_path, ply_path, output_dir, args):
     plys = {"original": ply_path}
     if os.path.isfile(os.path.join(post_dir, "pca_gaussians.ply")):
         plys["pca"] = os.path.join(post_dir, "pca_gaussians.ply")
+    gt_color_path = os.path.join(post_dir, "gt_color", "colored_gaussians.ply")
+    if os.path.isfile(gt_color_path):
+        plys["gt_color"] = gt_color_path
     for algo in ["kmeans", "dbscan", "hdbscan"]:
         path = os.path.join(post_dir, algo, "colored_gaussians.ply")
         if os.path.isfile(path):
@@ -954,12 +1213,63 @@ def render_colored_views(source_path, ply_path, output_dir, args):
 
 
 # ---------------------------------------------------------------------------
+# Feature source resolution (auto-detect from legacy args when needed)
+# ---------------------------------------------------------------------------
+
+def _resolve_feature_source(args, parser):
+    """Determine feature_source from explicit flag or legacy args."""
+    if args.feature_source is not None:
+        return args.feature_source
+    if args.idmap_dir is not None:
+        return "gt_idmap"
+    if args.model_type == "iggt":
+        return "iggt"
+    if args.run_dir is not None:
+        return "anysplat"
+    if args.feat_dir is not None:
+        return "precomputed"
+    parser.error(
+        "Cannot determine feature source. Use --feature_source or provide "
+        "--run_dir (anysplat), --model_type iggt (iggt), --feat_dir "
+        "(precomputed), or --idmap_dir (gt_idmap)."
+    )
+
+
+def _validate_source_args(feature_source, args, parser):
+    """Validate that required args are present for the chosen source."""
+    if feature_source == "anysplat":
+        if args.run_dir is None:
+            parser.error("--run_dir is required for feature_source=anysplat")
+        if args.ckpt is None:
+            args.ckpt = str(Path(args.run_dir) / "checkpoints" / "last.ckpt")
+            if not os.path.exists(args.ckpt):
+                parser.error(
+                    f"--ckpt not specified and default {args.ckpt} not found"
+                )
+    elif feature_source == "iggt":
+        if args.iggt_model_path is None:
+            parser.error(
+                "--iggt_model_path is required for feature_source=iggt"
+            )
+    elif feature_source == "precomputed":
+        if args.feat_dir is None:
+            parser.error(
+                "--feat_dir is required for feature_source=precomputed"
+            )
+    elif feature_source == "gt_idmap":
+        if args.idmap_dir is None:
+            parser.error(
+                "--idmap_dir is required for feature_source=gt_idmap"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Trace 2D instance features onto pre-trained 2DGS Gaussians"
+        description="Trace 2D feature maps onto pre-trained 2DGS Gaussians"
     )
     g_scene = parser.add_argument_group("Scene")
     g_scene.add_argument("--source_path", "-s", default=None)
@@ -968,23 +1278,37 @@ def main():
     g_scene.add_argument("--resolution", "-r", type=int, default=1)
     g_scene.add_argument("--output_dir", "-o", default="trace_output")
 
-    g_feat = parser.add_argument_group("Features (choose Mode A or B)")
+    g_feat = parser.add_argument_group("Feature source")
+    g_feat.add_argument(
+        "--feature_source", default=None,
+        choices=["anysplat", "iggt", "precomputed", "gt_idmap"],
+        help="Feature source type (auto-detected from legacy args if omitted)",
+    )
     g_feat.add_argument("--feat_dir", default=None,
-                        help="Mode B: directory of pre-computed .pt/.npy feature maps")
+                        help="precomputed: directory of .pt/.npy feature maps")
     g_feat.add_argument("--feat_dim", type=int, default=8,
-                        help="Feature dimension (Mode B; Mode A reads from ckpt)")
+                        help="Feature dimension (precomputed; others read from model)")
     g_feat.add_argument("--run_dir", default=None,
-                        help="Mode A: Hydra run directory (AnySplat)")
+                        help="anysplat: Hydra run directory")
     g_feat.add_argument("--ckpt", default=None,
-                        help="Mode A: Lightning checkpoint path (default: run_dir/checkpoints/last.ckpt)")
+                        help="anysplat: Lightning checkpoint path "
+                             "(default: run_dir/checkpoints/last.ckpt)")
     g_feat.add_argument("--encoder_batch_size", type=int, default=4,
-                        help="Mode A: views per encoder forward pass")
-    g_feat.add_argument("--model_type", choices=["anysplat", "iggt"], default="anysplat",
-                        help="Model to use for online inference (default: anysplat)")
+                        help="anysplat/iggt: views per forward pass")
+    g_feat.add_argument("--model_type", choices=["anysplat", "iggt"],
+                        default="anysplat",
+                        help="Legacy model selector (prefer --feature_source)")
     g_feat.add_argument("--iggt_model_path", default=None,
-                        help="Mode A (IGGT): path to IGGT checkpoint")
+                        help="iggt: path to IGGT checkpoint")
     g_feat.add_argument("--iggt_image_size", default="504,336",
-                        help="Mode A (IGGT): resize target as W,H (default: 504,336)")
+                        help="iggt: resize target as W,H (default: 504,336)")
+    g_feat.add_argument("--idmap_dir", default=None,
+                        help="gt_idmap: directory of integer ID map files "
+                             "(.npy or single-channel images)")
+    g_feat.add_argument("--id_embed_dim", type=int, default=16,
+                        help="gt_idmap: random embedding dimension (default: 16)")
+    g_feat.add_argument("--id_embed_seed", type=int, default=42,
+                        help="gt_idmap: random seed for embedding table")
 
     g_run = parser.add_argument_group("Runtime")
     g_run.add_argument("--max_views", type=int, default=None)
@@ -992,15 +1316,19 @@ def main():
     g_run.add_argument("--save_render", action="store_true",
                        help="Save per-view trace RGB renders")
     g_run.add_argument("--trace_crop_aligned", action="store_true", default=True,
-                       help="Mode A: trace at 448x448 with virtual camera aligned to encoder crop (default: True)")
-    g_run.add_argument("--no_trace_crop_aligned", dest="trace_crop_aligned", action="store_false",
-                       help="Disable trace_crop_aligned (use full camera resolution)")
+                       help="anysplat/iggt: trace with virtual camera aligned "
+                            "to encoder preprocessing (default: True)")
+    g_run.add_argument("--no_trace_crop_aligned", dest="trace_crop_aligned",
+                       action="store_false",
+                       help="Disable trace_crop_aligned (use full camera res)")
 
     g_post = parser.add_argument_group("Post-processing")
     g_post.add_argument("--postprocess", default=None,
-                        help="Comma-separated: pca, kmeans, dbscan, hdbscan")
+                        help="Comma-separated: pca, gt_color, kmeans, "
+                             "dbscan, hdbscan")
     g_post.add_argument("--load_traced", default=None,
-                        help="Load saved .pt file, skip trace, run postprocess only")
+                        help="Load saved .pt file, skip trace, "
+                             "run postprocess only")
     g_post.add_argument("--k", type=int, default=20,
                         help="K-means clusters (default: 20)")
     g_post.add_argument("--kmeans_iters", type=int, default=30)
@@ -1013,7 +1341,7 @@ def main():
     g_post.add_argument("--seed", type=int, default=0)
     g_post.add_argument("--palette_seed", type=int, default=0)
     g_post.add_argument("--render_views", type=int, default=0,
-                        help="Render N random views of original/pca/cluster PLYs (0=skip)")
+                        help="Render N random views of PLYs (0=skip)")
     g_post.add_argument("--render_resolution", type=int, default=4,
                         help="Resolution divisor for render (1/2/4/8, default 4)")
 
@@ -1023,16 +1351,6 @@ def main():
     iggt_w, iggt_h = [int(x) for x in args.iggt_image_size.split(",")]
     args._iggt_image_size = (iggt_w, iggt_h)
 
-    # Auto-resolve ckpt when run_dir is set but ckpt is not (AnySplat only)
-    if args.model_type == "anysplat" and args.run_dir is not None and args.ckpt is None:
-        args.ckpt = str(Path(args.run_dir) / "checkpoints" / "last.ckpt")
-        if not os.path.exists(args.ckpt):
-            parser.error(f"--ckpt not specified and default {args.ckpt} not found")
-
-    # Validate IGGT args
-    if args.model_type == "iggt" and args.iggt_model_path is None:
-        parser.error("--iggt_model_path is required when --model_type=iggt")
-
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1041,7 +1359,8 @@ def main():
     # ==================================================================
     if args.load_traced is not None:
         print(f"[load_traced] Loading {args.load_traced} ...")
-        ckpt = torch.load(args.load_traced, map_location="cpu", weights_only=True)
+        ckpt = torch.load(args.load_traced, map_location="cpu",
+                          weights_only=True)
         final_feat = ckpt["feat"]       # [G, D]
         num_ray = ckpt["num_ray"]       # [G]
         ply_path = args.ply_path or ckpt.get("ply_path", None)
@@ -1057,12 +1376,18 @@ def main():
         if args.postprocess is None:
             parser.error("--postprocess is required in --load_traced mode")
 
-        run_postprocess(final_feat, num_ray, ply_path, output_dir, args)
+        gaussian_ids = None
+        if "gaussian_ids" in ckpt:
+            gaussian_ids = ckpt["gaussian_ids"]
+
+        run_postprocess(final_feat, num_ray, ply_path, output_dir, args,
+                        gaussian_ids=gaussian_ids)
 
         if args.render_views > 0:
             source_path = args.source_path or ckpt.get("source_path")
             if source_path is None:
-                print("[render] Skipped: --source_path required for render_views")
+                print("[render] Skipped: --source_path required for "
+                      "render_views")
             else:
                 render_colored_views(
                     os.path.abspath(source_path), ply_path, output_dir, args
@@ -1078,12 +1403,9 @@ def main():
     source_path = os.path.abspath(args.source_path)
     ply_path = os.path.abspath(args.ply_path)
 
-    use_iggt = args.model_type == "iggt"
-    mode_a = args.run_dir is not None or use_iggt
-    mode_b = args.feat_dir is not None
-    if not mode_a and not mode_b:
-        parser.error("Specify --feat_dir (Mode B), --run_dir (Mode A/AnySplat), "
-                     "or --model_type iggt --iggt_model_path ... (Mode A/IGGT)")
+    feature_source = _resolve_feature_source(args, parser)
+    _validate_source_args(feature_source, args, parser)
+    print(f"Feature source: {feature_source}")
 
     device = "cuda"
     bg_val = [1.0, 1.0, 1.0] if args.white_background else [0.0, 0.0, 0.0]
@@ -1095,7 +1417,8 @@ def main():
 
     # ---- 2. Load cameras ----
     print("Loading COLMAP cameras ...")
-    cameras = load_colmap_cameras(source_path, args.images_folder, args.resolution)
+    cameras = load_colmap_cameras(source_path, args.images_folder,
+                                  args.resolution)
     print(f"  {len(cameras)} cameras loaded")
 
     cam_list = cameras
@@ -1104,18 +1427,22 @@ def main():
         print(f"  Using first {len(cam_list)} views")
 
     # ---- 3. Prepare feature source ----
-    encoder = None
-    iggt_model = None
-    feat_dim = args.feat_dim
+    if feature_source == "anysplat":
+        prep = prepare_anysplat_features(cam_list, args, device)
+    elif feature_source == "iggt":
+        prep = prepare_iggt_features(cam_list, args, device)
+    elif feature_source == "precomputed":
+        prep = prepare_precomputed_features(cam_list, args, device)
+    elif feature_source == "gt_idmap":
+        prep = prepare_gt_idmap_features(cam_list, args, device)
+    else:
+        parser.error(f"Unknown feature source: {feature_source}")
 
-    if mode_a:
-        if use_iggt:
-            print("\n[Mode A/IGGT] Loading IGGT model ...")
-            iggt_model, feat_dim = load_iggt_model(args.iggt_model_path, device)
-        else:
-            print("\n[Mode A/AnySplat] Loading AnySplat encoder ...")
-            encoder, feat_dim = load_anysplat_encoder(args.run_dir, args.ckpt, device)
-        print(f"  Feature dim = {feat_dim}")
+    feat_maps = prep["feat_maps"]
+    trace_cams = prep["trace_cams"]
+    feat_dim = prep["feat_dim"]
+    masks = prep.get("masks")
+    id_codec = prep.get("id_codec")
 
     if feat_dim > TRACE_CHANNELS:
         raise ValueError(
@@ -1123,84 +1450,20 @@ def main():
             f"Cannot trace more than {TRACE_CHANNELS} channels."
         )
 
-    if mode_b:
-        print(f"\n[Mode B] Loading pre-computed features from {args.feat_dir}")
-        precomp_feats = load_precomputed_features(
-            args.feat_dir,
-            [c.image_name for c in cam_list],
-            feat_dim,
-        )
-        print(f"  Loaded {len(precomp_feats)} feature maps, dim={feat_dim}")
-
     if args.save_render:
         os.makedirs(os.path.join(output_dir, "renders"), exist_ok=True)
 
-    # ---- 4/5. Trace loop ----
+    # ---- 4. Trace loop (unified across all sources) ----
     sum_gau_sem = torch.zeros(N, feat_dim, device=device, dtype=torch.float32)
     sum_num_ray = torch.zeros(N, device=device, dtype=torch.float32)
 
-    if mode_a:
-        batch_size = args.encoder_batch_size
-        all_feat_maps = []
-        image_paths = [c.image_path for c in cam_list]
-
-        if use_iggt:
-            print(f"\n[Mode A/IGGT] Running IGGT on {len(cam_list)} views "
-                  f"(batch_size={batch_size}, image_size={iggt_w}x{iggt_h}) ...")
-            for start in range(0, len(cam_list), batch_size):
-                end = min(start + batch_size, len(cam_list))
-                batch_paths = image_paths[start:end]
-                feat_batch = run_iggt_batch(
-                    iggt_model, batch_paths, args._iggt_image_size, device,
-                )
-                for vi in range(feat_batch.shape[0]):
-                    all_feat_maps.append(feat_batch[vi])
-            del iggt_model
-        else:
-            print(f"\n[Mode A/AnySplat] Running encoder on {len(cam_list)} views "
-                  f"(batch_size={batch_size}) ...")
-            for start in range(0, len(cam_list), batch_size):
-                end = min(start + batch_size, len(cam_list))
-                batch_paths = image_paths[start:end]
-                feat_batch = run_encoder_batch(encoder, batch_paths, device)
-                for vi in range(feat_batch.shape[0]):
-                    all_feat_maps.append(feat_batch[vi])
-            del encoder
-        torch.cuda.empty_cache()
-
-    if mode_a and args.trace_crop_aligned:
-        if use_iggt:
-            print(f"\n[Mode A/IGGT] Using {iggt_w}x{iggt_h} virtual camera (resize-aligned)")
-        else:
-            print(f"\n[Mode A/AnySplat] Using 448x448 virtual camera (crop-aligned)")
     print(f"\nTracing {len(cam_list)} views (feat_dim={feat_dim}, "
           f"TRACE_CHANNELS={TRACE_CHANNELS}) ...")
 
-    use_crop_aligned = mode_a and args.trace_crop_aligned
-
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
-        if use_crop_aligned:
-            if use_iggt:
-                trace_cam = create_virtual_resize_camera(
-                    cam, cam.orig_width, cam.orig_height,
-                    cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
-                    iggt_w, iggt_h,
-                )
-                H, W = iggt_h, iggt_w
-            else:
-                trace_cam = create_virtual_crop_camera(
-                    cam, cam.orig_width, cam.orig_height,
-                    cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
-                )
-                H, W = ENCODER_CROP_SIZE, ENCODER_CROP_SIZE
-        else:
-            trace_cam = cam
-            H, W = cam.image_height, cam.image_width
-
-        if mode_a:
-            feat_2d = all_feat_maps[idx]
-        else:
-            feat_2d = precomp_feats[idx]
+        trace_cam = trace_cams[idx]
+        feat_2d = feat_maps[idx]
+        H, W = trace_cam.image_height, trace_cam.image_width
 
         if feat_2d.shape[1] != H or feat_2d.shape[2] != W:
             feat_2d = F.interpolate(
@@ -1216,7 +1479,18 @@ def main():
             )
             feat_hwc = torch.cat([feat_hwc, pad], dim=2)
 
-        img_mask = torch.ones(H, W, dtype=torch.int32, device=device)
+        feat_hwc = feat_hwc.to(device)
+
+        if masks is not None:
+            img_mask = masks[idx]
+            if img_mask.shape[0] != H or img_mask.shape[1] != W:
+                img_mask = F.interpolate(
+                    img_mask.float().unsqueeze(0).unsqueeze(0),
+                    size=(H, W), mode="nearest",
+                ).squeeze(0).squeeze(0)
+            img_mask = img_mask.to(device=device, dtype=torch.int32)
+        else:
+            img_mask = torch.ones(H, W, dtype=torch.int32, device=device)
 
         gau_sem, num_ray, radii, out_color = trace_single_view(
             means, quats, scales, opacities, colors,
@@ -1227,28 +1501,41 @@ def main():
         sum_num_ray += num_ray.float()
 
         if args.save_render:
-            render_np = (out_color.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255
-                         ).astype(np.uint8)
+            render_np = (
+                out_color.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255
+            ).astype(np.uint8)
             Image.fromarray(render_np).save(
                 os.path.join(output_dir, "renders", f"{cam.image_name}.png")
             )
 
-    # ---- 6. Normalize and save ----
+    # ---- 5. Normalize ----
     valid_mask = sum_num_ray > 0
     final_feat = torch.zeros_like(sum_gau_sem)
     final_feat[valid_mask] = (
         sum_gau_sem[valid_mask] / sum_num_ray[valid_mask].unsqueeze(-1)
     )
 
+    # ---- 6. Source-specific post-decode ----
+    gaussian_ids = None
+    if feature_source == "gt_idmap" and id_codec is not None:
+        gaussian_ids = id_codec.decode(final_feat, valid_mask)
+        n_assigned = (gaussian_ids > 0).sum().item()
+        print(f"\n[gt_idmap decode] Recovered IDs for {n_assigned:,} Gaussians "
+              f"({codec_ids_str(id_codec)})")
+
+    # ---- 7. Print results and save ----
     n_valid = valid_mask.sum().item()
     print(f"\n========== Results ==========")
+    print(f"  Feature source:    {feature_source}")
     print(f"  Gaussians total:   {N:,}")
     print(f"  Gaussians traced:  {n_valid:,} ({100 * n_valid / N:.1f}%)")
     print(f"  Feature dim:       {feat_dim}")
     print(f"  Views used:        {len(cam_list)}")
 
-    out_path_pt = os.path.join(output_dir, "gaussian_instance_feat.pt")
-    torch.save({
+    source_label = feature_source if args.feature_source else "instance"
+    out_path_pt = os.path.join(output_dir,
+                               f"gaussian_{source_label}_feat.pt")
+    save_dict = {
         "feat": final_feat.cpu(),
         "num_ray": sum_num_ray.cpu(),
         "feat_unnorm": sum_gau_sem.cpu(),
@@ -1256,28 +1543,46 @@ def main():
         "n_views": len(cam_list),
         "ply_path": ply_path,
         "source_path": source_path,
-    }, out_path_pt)
+        "feature_source": feature_source,
+    }
+    if gaussian_ids is not None:
+        save_dict["gaussian_ids"] = gaussian_ids.cpu()
+    torch.save(save_dict, out_path_pt)
     print(f"  Saved to {out_path_pt}")
 
-    out_path_npy = os.path.join(output_dir, "gaussian_instance_feat.npy")
+    out_path_npy = os.path.join(output_dir,
+                                f"gaussian_{source_label}_feat.npy")
     np.save(out_path_npy, final_feat.cpu().numpy())
     print(f"  Saved to {out_path_npy}")
 
-    feat_norms = final_feat[valid_mask].norm(dim=1)
-    print(f"\n  Feature stats (valid Gaussians):")
-    print(f"    norm  min={feat_norms.min():.4f}  mean={feat_norms.mean():.4f}  "
-          f"max={feat_norms.max():.4f}")
-    print(f"    num_ray  min={sum_num_ray[valid_mask].min():.0f}  "
-          f"mean={sum_num_ray[valid_mask].mean():.1f}  "
-          f"max={sum_num_ray[valid_mask].max():.0f}")
+    if gaussian_ids is not None:
+        ids_path = os.path.join(output_dir, "gaussian_gt_ids.npy")
+        np.save(ids_path, gaussian_ids.cpu().numpy())
+        print(f"  Saved decoded IDs to {ids_path}")
 
-    # ---- 7. Post-processing (optional) ----
+    if n_valid > 0:
+        feat_norms = final_feat[valid_mask].norm(dim=1)
+        print(f"\n  Feature stats (valid Gaussians):")
+        print(f"    norm  min={feat_norms.min():.4f}  "
+              f"mean={feat_norms.mean():.4f}  "
+              f"max={feat_norms.max():.4f}")
+        print(f"    num_ray  min={sum_num_ray[valid_mask].min():.0f}  "
+              f"mean={sum_num_ray[valid_mask].mean():.1f}  "
+              f"max={sum_num_ray[valid_mask].max():.0f}")
+
+    # ---- 8. Post-processing (optional) ----
     if args.postprocess:
-        run_postprocess(final_feat, sum_num_ray, ply_path, output_dir, args)
+        run_postprocess(final_feat, sum_num_ray, ply_path, output_dir, args,
+                        gaussian_ids=gaussian_ids)
 
-    # ---- 8. Render colored views (optional) ----
+    # ---- 9. Render colored views (optional) ----
     if args.render_views > 0:
         render_colored_views(source_path, ply_path, output_dir, args)
+
+
+def codec_ids_str(codec):
+    """Short summary string for IDMapCodec."""
+    return f"{codec.num_ids} unique IDs, embed_dim={codec.embed_dim}"
 
 
 if __name__ == "__main__":
