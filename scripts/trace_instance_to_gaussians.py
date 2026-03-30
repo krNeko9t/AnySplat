@@ -557,11 +557,11 @@ def run_iggt_batch(model, image_paths, iggt_image_size, device="cuda"):
 # Mode B: load pre-computed feature maps
 # ---------------------------------------------------------------------------
 
-def load_precomputed_features(feat_dir, image_names, feat_dim):
+def load_precomputed_features(feat_dir, image_names, feat_dim, device="cuda"):
     """
     Load per-view feature maps from feat_dir/{image_name}.pt or .npy.
 
-    Returns list of tensors [D, H_feat, W_feat] on CUDA.
+    Returns list of tensors [D, H_feat, W_feat] on *device*.
     """
     feat_dir = Path(feat_dir)
     feats = []
@@ -569,10 +569,12 @@ def load_precomputed_features(feat_dir, image_names, feat_dim):
         pt_path = feat_dir / f"{name}.pt"
         npy_path = feat_dir / f"{name}.npy"
         if pt_path.exists():
-            t = torch.load(pt_path, map_location="cuda", weights_only=True).float()
+            t = torch.load(
+                pt_path, map_location=device, weights_only=True,
+            ).float()
         elif npy_path.exists():
             arr = np.load(str(npy_path))
-            t = torch.from_numpy(arr).float().cuda()
+            t = torch.from_numpy(arr).float().to(device)
         else:
             raise FileNotFoundError(
                 f"Feature map not found: {pt_path} or {npy_path}"
@@ -627,7 +629,7 @@ class IDMapCodec:
     def encode(self, id_map):
         """(H, W) int tensor -> (embed_dim, H, W) float tensor."""
         H, W = id_map.shape
-        idx_map = torch.zeros(H, W, dtype=torch.long)
+        idx_map = torch.zeros(H, W, dtype=torch.long, device=id_map.device)
         for uid, tidx in self.id_to_idx.items():
             idx_map[id_map == uid] = tidx
         emb = self.embedding_table[idx_map.view(-1)]  # (H*W, D)
@@ -776,7 +778,7 @@ def prepare_precomputed_features(cam_list, args, device):
     feat_dim = args.feat_dim
     print(f"\n[precomputed] Loading features from {args.feat_dir}")
     feat_maps = load_precomputed_features(
-        args.feat_dir, [c.image_name for c in cam_list], feat_dim,
+        args.feat_dir, [c.image_name for c in cam_list], feat_dim, device,
     )
     print(f"  Loaded {len(feat_maps)} feature maps, dim={feat_dim}")
 
@@ -802,8 +804,8 @@ def prepare_gt_idmap_features(cam_list, args, device):
     feat_maps = []
     masks = []
     for idmap in id_maps:
-        feat_maps.append(codec.encode(idmap))
-        masks.append((idmap != 0).to(torch.int32))
+        feat_maps.append(codec.encode(idmap).to(device))
+        masks.append((idmap != 0).to(torch.int32).to(device))
 
     return {
         "feat_maps": feat_maps,
@@ -1462,7 +1464,7 @@ def main():
 
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
         trace_cam = trace_cams[idx]
-        feat_2d = feat_maps[idx]
+        feat_2d = feat_maps[idx].to(device)
         H, W = trace_cam.image_height, trace_cam.image_width
 
         if feat_2d.shape[1] != H or feat_2d.shape[2] != W:
@@ -1478,8 +1480,6 @@ def main():
                 device=device, dtype=torch.float32,
             )
             feat_hwc = torch.cat([feat_hwc, pad], dim=2)
-
-        feat_hwc = feat_hwc.to(device)
 
         if masks is not None:
             img_mask = masks[idx]
