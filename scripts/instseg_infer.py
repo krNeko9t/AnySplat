@@ -81,6 +81,7 @@ class OutputConfig:
     dbscan_min_samples: int = 10
     hdbscan_min_cluster_size: int = 50
     hdbscan_min_samples: int = 10
+    hdbscan_cluster_selection_epsilon: float = 0.06
     opacity_threshold: float = 1.0 / 255.0
     seed: int = 0
     palette_seed: int = 0
@@ -530,17 +531,25 @@ def _cluster_2d(
     else:
         x_fit = x
 
+    if algo == "hdbscan":
+        from src.instseg.hdbscan_assign import hdbscan_assign
+        all_labels = hdbscan_assign(
+            x,
+            cluster_selection_epsilon=cfg.hdbscan_cluster_selection_epsilon,
+            min_cluster_size=cfg.hdbscan_min_cluster_size,
+            min_samples=cfg.hdbscan_min_samples,
+            max_points=cfg.max_points,
+            rng_seed=cfg.seed,
+        )
+        labels_flat = np.zeros(V * H * W, dtype=np.int32)
+        labels_flat[valid_idx.cpu().numpy()] = all_labels + 1
+        return labels_flat.reshape(V, H, W)
+
     if algo == "dbscan":
         from sklearn.cluster import DBSCAN
         cl = DBSCAN(
             eps=cfg.dbscan_eps, min_samples=cfg.dbscan_min_samples,
             metric="cosine", n_jobs=-1,
-        ).fit_predict(x_fit)
-    elif algo == "hdbscan":
-        import hdbscan
-        cl = hdbscan.HDBSCAN(
-            min_cluster_size=cfg.hdbscan_min_cluster_size,
-            min_samples=cfg.hdbscan_min_samples, metric="euclidean",
         ).fit_predict(x_fit)
     else:
         raise ValueError(f"Unknown cluster algo: {algo}")
@@ -773,8 +782,11 @@ def _cluster_3d_dbscan(
 def _cluster_3d_hdbscan(
     feat: Tensor, opacities: Tensor,
     min_cluster_size: int, min_samples: int, threshold: float,
+    cluster_selection_epsilon: float = 0.06, max_points: int = 200_000,
+    seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    import hdbscan
+    from src.instseg.hdbscan_assign import hdbscan_assign
+
     G, N = feat.shape
     valid = opacities.reshape(-1) > threshold
     valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(1)
@@ -782,20 +794,23 @@ def _cluster_3d_hdbscan(
         return np.zeros(G, dtype=np.int32), np.zeros((0, N), dtype=np.float32)
 
     x_np = F.normalize(feat[valid_idx].float(), p=2, dim=-1, eps=1e-8).cpu().numpy()
-    hdb_labels = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size, min_samples=min_samples, metric="euclidean",
-    ).fit_predict(x_np)
+    valid_labels = hdbscan_assign(
+        x_np,
+        cluster_selection_epsilon=cluster_selection_epsilon,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        max_points=max_points,
+        rng_seed=seed,
+    )
 
     labels = np.zeros(G, dtype=np.int32)
     valid_np = valid_idx.cpu().numpy()
-    is_cluster = hdb_labels >= 0
-    if np.any(is_cluster):
-        labels[valid_np[is_cluster]] = (hdb_labels[is_cluster] + 1).astype(np.int32)
+    labels[valid_np] = valid_labels + 1
 
-    n_clusters = int(hdb_labels[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    n_clusters = int(valid_labels.max()) + 1
     centers = np.zeros((n_clusters, N), dtype=np.float32)
     for cid in range(n_clusters):
-        mem = valid_np[hdb_labels == cid]
+        mem = valid_np[valid_labels == cid]
         c = feat[torch.from_numpy(mem).to(feat.device)].float().mean(0)
         centers[cid] = F.normalize(c, p=2, dim=-1, eps=1e-8).cpu().numpy()
     return labels, centers
@@ -818,6 +833,8 @@ def _run_cluster_3d(
         return _cluster_3d_hdbscan(
             feat, op, min_cluster_size=cfg.hdbscan_min_cluster_size,
             min_samples=cfg.hdbscan_min_samples, threshold=cfg.opacity_threshold,
+            cluster_selection_epsilon=cfg.hdbscan_cluster_selection_epsilon,
+            max_points=cfg.max_points, seed=cfg.seed,
         )
     raise ValueError(f"Unknown cluster_algo: {algo}")
 
@@ -1087,6 +1104,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_cluster.add_argument("--dbscan_min_samples", type=int, default=10)
     g_cluster.add_argument("--hdbscan_min_cluster_size", type=int, default=50)
     g_cluster.add_argument("--hdbscan_min_samples", type=int, default=10)
+    g_cluster.add_argument("--hdbscan_cluster_selection_epsilon", type=float, default=0.06,
+                           help="HDBSCAN cluster_selection_epsilon "
+                                "(aligned with iggt_idmap.py --eps, default: 0.06)")
     g_cluster.add_argument("--opacity_threshold", type=float, default=1.0 / 255.0)
     g_cluster.add_argument("--seed", type=int, default=0)
     g_cluster.add_argument("--palette_seed", type=int, default=0)
@@ -1131,6 +1151,20 @@ def main() -> None:
           f"instance_feat_map={'yes' if enc_out.instance_feat_map is not None else 'no'}, "
           f"gaussian_instance_feat={'yes' if enc_out.gaussian_instance_feat is not None else 'no'}")
 
+    # --- Optional 3D KNN smoothing (aligns with iggt_idmap / base_wrapper) ---
+    if enc_out.instance_feat_map is not None:
+        depth_dict = enc_out.depth_dict or {}
+        if depth_dict.get("world_points") is not None:
+            from src.visualization.instance_viz import knn_smooth_instance_features
+            feat0 = enc_out.instance_feat_map[0].float()
+            feat0_smooth = knn_smooth_instance_features(feat0, depth_dict, k=20)
+            enc_out.instance_feat_map = feat0_smooth.unsqueeze(0).to(
+                dtype=enc_out.instance_feat_map.dtype
+            )
+            print("[knn] Applied 3D KNN smoothing (k=20) to instance_feat_map")
+        else:
+            print("[knn] Skipped: world_points not available in depth_dict")
+
     # --- Run outputs ---
     cluster_algos = [s.strip() for s in args.cluster_algos.split(",") if s.strip()]
     for a in cluster_algos:
@@ -1145,6 +1179,7 @@ def main() -> None:
         dbscan_min_samples=args.dbscan_min_samples,
         hdbscan_min_cluster_size=args.hdbscan_min_cluster_size,
         hdbscan_min_samples=args.hdbscan_min_samples,
+        hdbscan_cluster_selection_epsilon=args.hdbscan_cluster_selection_epsilon,
         opacity_threshold=args.opacity_threshold, seed=args.seed,
         palette_seed=args.palette_seed,
         seg2d_outs=seg2d_outs, pca2d_outs=pca2d_outs,

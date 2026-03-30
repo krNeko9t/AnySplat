@@ -186,54 +186,20 @@ def cluster_features_hdbscan(
     Returns:
         id_maps: [V, H, W] int32, contiguous IDs starting from 0.
     """
-    import hdbscan as hdb_lib
-    from sklearn.neighbors import NearestCentroid
+    from src.instseg.hdbscan_assign import hdbscan_assign
 
     V, D, H, W = feat_vdhw.shape
-    N = V * H * W
     all_pixels = feat_vdhw.permute(0, 2, 3, 1).contiguous().reshape(-1, D).float().numpy()
 
-    # --- subsample for HDBSCAN ---
-    S = min(max_cluster_points, N)
-    rng = np.random.default_rng(0)
-    if S < N:
-        idx_sub = rng.choice(N, S, replace=False)
-        logger.info("Subsampled %d / %d pixels for HDBSCAN", S, N)
-        sub_pixels = all_pixels[idx_sub]
-    else:
-        idx_sub = None
-        sub_pixels = all_pixels
-
-    logger.info("Running HDBSCAN on %d pixels (D=%d) ...", sub_pixels.shape[0], D)
-    sub_labels = hdb_lib.HDBSCAN(
+    labels = hdbscan_assign(
+        all_pixels,
         cluster_selection_epsilon=eps,
-        min_samples=min_samples,
         min_cluster_size=min_cluster_size,
-    ).fit_predict(sub_pixels)
-
-    mask_clustered = sub_labels >= 0
-    n_clusters = int(sub_labels.max() + 1) if mask_clustered.any() else 0
-    n_noise_sub = int((~mask_clustered).sum())
-    logger.info("HDBSCAN done: %d clusters, %d/%d noise in subsample",
-                n_clusters, n_noise_sub, len(sub_labels))
-
-    # --- assign all pixels via NearestCentroid ---
-    if n_clusters >= 2:
-        nc = NearestCentroid()
-        nc.fit(sub_pixels[mask_clustered], sub_labels[mask_clustered])
-        labels = nc.predict(all_pixels)
-    elif n_clusters == 1:
-        labels = np.zeros(N, dtype=np.int32)
-    else:
-        labels = np.zeros(N, dtype=np.int32)
-
-    # Re-label to contiguous 0-based IDs
-    unique = np.unique(labels)
-    remap = {old: new for new, old in enumerate(unique)}
-    id_maps = np.vectorize(remap.get)(labels).astype(np.int32).reshape(V, H, W)
-
-    logger.info("Assigned %d unique IDs to %d pixels", len(unique), N)
-    return id_maps
+        min_samples=min_samples,
+        max_points=max_cluster_points,
+        rng_seed=0,
+    )
+    return labels.reshape(V, H, W)
 
 
 # ---------------------------------------------------------------------------

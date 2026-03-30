@@ -241,7 +241,9 @@ def pca_visualize_embeddings(
                 )
                 return torch.zeros((V, 3, H, W), device=feat_vnhw.device, dtype=feat_vnhw.dtype)
 
-    # Percentile normalization: use valid pixels only for range so content is visible
+    # Percentile normalization: use valid pixels only for range so content is visible.
+    # Stride-subsample before torch.quantile to avoid slowness / OOM on very large tensors,
+    # aligned with iggt_idmap.pca_visualize.
     if valid_vhw is not None:
         valid_flat = valid_vhw.reshape(-1)
         if valid_flat.any():
@@ -250,10 +252,16 @@ def pca_visualize_embeddings(
             ch_sample = proj
     else:
         ch_sample = proj
+    max_quantile_elems = 1_000_000
     for i in range(3):
         ch = proj[:, i]
-        v_low = torch.quantile(ch_sample[:, i], low_p)
-        v_high = torch.quantile(ch_sample[:, i], high_p)
+        ch_s = ch_sample[:, i].flatten()
+        n = ch_s.numel()
+        if n > max_quantile_elems:
+            step = max(1, n // max_quantile_elems)
+            ch_s = ch_s[::step]
+        v_low = torch.quantile(ch_s, low_p)
+        v_high = torch.quantile(ch_s, high_p)
         if v_high > v_low:
             proj[:, i] = (ch - v_low) / (v_high - v_low)
         else:

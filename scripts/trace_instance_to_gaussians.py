@@ -829,14 +829,38 @@ def load_xyz_from_ply(ply_path):
 
 
 @torch.no_grad()
+def knn_smooth_gaussians(xyz_np, feat, k=20):
+    """Smooth [G, D] Gaussian features via 3D KNN averaging (cKDTree).
+
+    Aligns with iggt_idmap.knn_smooth_features / instance_viz._knn_smooth_features_impl.
+    """
+    from scipy.spatial import cKDTree
+
+    G, D = feat.shape
+    feat_np = feat.cpu().float().numpy()
+
+    print(f"[knn] Building cKDTree for {G:,} points (k={k}) ...")
+    tree = cKDTree(xyz_np)
+    _, indices = tree.query(xyz_np, k=k + 1)
+    indices = indices[:, 1:]
+
+    print("[knn] Averaging neighbour features ...")
+    smoothed = feat_np[indices].mean(axis=1)
+    return torch.from_numpy(smoothed).to(device=feat.device, dtype=feat.dtype)
+
+
+@torch.no_grad()
 def pca_colorize_gaussians(feat, valid_mask, low_p=0.02, high_p=0.98):
     """PCA-reduce [G, D] instance features to [G, 3] uint8 RGB.
+
+    Aligns with iggt_idmap.pca_visualize: L2 normalize, center only (no std),
+    stride-subsampled quantile for large tensors.
 
     Only valid Gaussians (valid_mask == True) are used to fit PCA;
     invalid ones get black (0, 0, 0).
     """
     G, D = feat.shape
-    feat_f = feat.float()
+    feat_f = F.normalize(feat.float(), p=2, dim=-1, eps=1e-8)
 
     valid_feat = feat_f[valid_mask]
     if valid_feat.shape[0] < 10:
@@ -850,22 +874,28 @@ def pca_colorize_gaussians(feat, valid_mask, low_p=0.02, high_p=0.98):
         valid_feat = torch.cat([valid_feat, pad_v], dim=1)
 
     mean = valid_feat.mean(dim=0, keepdim=True)
-    std = valid_feat.std(dim=0, keepdim=True) + 1e-5
-    valid_std = (valid_feat - mean) / std
-    all_std = (feat_f - mean) / std
+    feat_centered = feat_f - mean
+    valid_centered = valid_feat - mean
 
     try:
-        _, _, v = torch.pca_lowrank(valid_std, q=min(valid_std.shape[1], 256))
-        proj = all_std @ v[:, :3]  # [G, 3]
+        _, _, v = torch.pca_lowrank(valid_centered, q=min(valid_centered.shape[1], 256))
+        proj = feat_centered @ v[:, :3]  # [G, 3]
     except Exception as e:
         print(f"[pca] PCA failed ({e}), returning black")
         return np.zeros((G, 3), dtype=np.uint8)
 
-    # Percentile normalization using valid Gaussians for range
     proj_valid = proj[valid_mask]
+    max_quantile_elems = 1_000_000
     for i in range(3):
-        v_lo = torch.quantile(proj_valid[:, i], low_p)
-        v_hi = torch.quantile(proj_valid[:, i], high_p)
+        ch = proj_valid[:, i].flatten()
+        n = ch.numel()
+        if n > max_quantile_elems:
+            step = max(1, n // max_quantile_elems)
+            ch_sub = ch[::step]
+        else:
+            ch_sub = ch
+        v_lo = torch.quantile(ch_sub, low_p)
+        v_hi = torch.quantile(ch_sub, high_p)
         if v_hi > v_lo:
             proj[:, i] = (proj[:, i] - v_lo) / (v_hi - v_lo)
         else:
@@ -966,44 +996,28 @@ def _cluster_dbscan(feat_n, valid_idx, G, D, eps=0.3, min_samples=10, max_points
 
 
 def _cluster_hdbscan(feat_n, valid_idx, G, D,
-                     min_cluster_size=50, min_samples=10, max_points=200000):
-    import hdbscan as hdb_lib
+                     min_cluster_size=50, min_samples=10, max_points=200000,
+                     cluster_selection_epsilon=0.06):
+    from src.instseg.hdbscan_assign import hdbscan_assign
 
     x_np = feat_n[valid_idx].cpu().numpy()
-    if x_np.shape[0] > max_points:
-        rng = np.random.default_rng(0)
-        idx_sub = rng.choice(x_np.shape[0], max_points, replace=False)
-        hdb_labels_sub = hdb_lib.HDBSCAN(
-            min_cluster_size=min_cluster_size, min_samples=min_samples,
-            metric="euclidean",
-        ).fit_predict(x_np[idx_sub])
-        mask_clustered = hdb_labels_sub >= 0
-        n_sub_clusters = int(hdb_labels_sub.max() + 1) if mask_clustered.any() else 0
-        if n_sub_clusters >= 2:
-            from sklearn.neighbors import NearestCentroid
-            nc = NearestCentroid()
-            nc.fit(x_np[idx_sub][mask_clustered], hdb_labels_sub[mask_clustered])
-            hdb_labels = nc.predict(x_np)
-        elif n_sub_clusters == 1:
-            hdb_labels = np.zeros(x_np.shape[0], dtype=np.int32)
-        else:
-            hdb_labels = np.full(x_np.shape[0], -1, dtype=np.int32)
-    else:
-        hdb_labels = hdb_lib.HDBSCAN(
-            min_cluster_size=min_cluster_size, min_samples=min_samples,
-            metric="euclidean",
-        ).fit_predict(x_np)
+    valid_labels = hdbscan_assign(
+        x_np,
+        cluster_selection_epsilon=cluster_selection_epsilon,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        max_points=max_points,
+        rng_seed=0,
+    )
 
     labels = np.zeros(G, dtype=np.int32)
     valid_np = valid_idx.cpu().numpy()
-    is_cluster = hdb_labels >= 0
-    if np.any(is_cluster):
-        labels[valid_np[is_cluster]] = (hdb_labels[is_cluster] + 1).astype(np.int32)
+    labels[valid_np] = valid_labels + 1
 
-    n_clusters = int(hdb_labels[is_cluster].max() + 1) if np.any(is_cluster) else 0
+    n_clusters = int(valid_labels.max()) + 1
     centers = np.zeros((n_clusters, feat_n.shape[1]), dtype=np.float32)
     for cid in range(n_clusters):
-        mem = valid_np[hdb_labels == cid]
+        mem = valid_np[valid_labels == cid]
         c = feat_n[torch.from_numpy(mem).to(feat_n.device)].float().mean(0)
         centers[cid] = F.normalize(c, p=2, dim=-1, eps=1e-8).cpu().numpy()
     return labels, centers
@@ -1073,6 +1087,11 @@ def run_postprocess(feat, num_ray, ply_path, output_dir, args,
     feat_gpu = feat.cuda() if not feat.is_cuda else feat
     valid_gpu = valid_mask.cuda() if not valid_mask.is_cuda else valid_mask
 
+    knn_k = getattr(args, "postprocess_knn_k", 0)
+    if knn_k > 0:
+        print(f"\n--- 3D KNN smoothing (k={knn_k}) ---")
+        feat_gpu = knn_smooth_gaussians(xyz_np, feat_gpu, k=knn_k)
+
     if "gt_color" in modes:
         if gaussian_ids is None:
             print("\n[gt_color] Skipped: no decoded IDs (only for gt_idmap source)")
@@ -1116,7 +1135,8 @@ def run_postprocess(feat, num_ray, ply_path, output_dir, args,
         else:
             kw = dict(min_cluster_size=args.hdbscan_min_cluster_size,
                       min_samples=args.hdbscan_min_samples,
-                      max_points=args.max_cluster_pts)
+                      max_points=args.max_cluster_pts,
+                      cluster_selection_epsilon=args.hdbscan_cluster_selection_epsilon)
 
         labels, centers = cluster_gaussians(feat_gpu, valid_gpu, algo, **kw)
         max_label = int(labels.max()) if labels.size > 0 else 0
@@ -1340,6 +1360,13 @@ def main():
     g_post.add_argument("--dbscan_min_samples", type=int, default=10)
     g_post.add_argument("--hdbscan_min_cluster_size", type=int, default=50)
     g_post.add_argument("--hdbscan_min_samples", type=int, default=10)
+    g_post.add_argument("--hdbscan_cluster_selection_epsilon", type=float,
+                        default=0.06,
+                        help="HDBSCAN cluster_selection_epsilon "
+                             "(aligned with iggt_idmap.py --eps, default: 0.06)")
+    g_post.add_argument("--postprocess_knn_k", type=int, default=0,
+                        help="3D KNN smoothing before PCA/clustering "
+                             "(0=disabled; iggt_idmap uses 20)")
     g_post.add_argument("--seed", type=int, default=0)
     g_post.add_argument("--palette_seed", type=int, default=0)
     g_post.add_argument("--render_views", type=int, default=0,
