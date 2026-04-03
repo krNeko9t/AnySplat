@@ -1062,20 +1062,87 @@ def save_colored_gaussians_ply(ply_path, rgb_u8, out_path):
     print(f"  Saved 3DGS PLY: {out_path}")
 
 
+def write_ply_vertex_rows(vdata, row_mask: np.ndarray, out_path: str) -> bool:
+    """Write a subset of 3DGS / PLY vertices (structured array) to a new PLY.
+
+    Preserves all vertex properties from the source file. Returns False if
+    the subset is empty (no file written).
+    """
+    from plyfile import PlyData as PD, PlyElement as PE
+
+    sub = vdata[row_mask]
+    if sub.shape[0] == 0:
+        return False
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    PD([PE.describe(sub, "vertex")]).write(str(out_path))
+    return True
+
+
+def _postprocess_algo_tag(args, algo: str) -> str:
+    """Match scripts/instseg_infer._algo_tag for seg3d_split directory names."""
+    if algo == "kmeans":
+        return f"kmeans_k{args.k}"
+    if algo == "dbscan":
+        return f"dbscan_eps{args.dbscan_eps}_ms{args.dbscan_min_samples}"
+    if algo == "hdbscan":
+        return (
+            f"hdbscan_mcs{args.hdbscan_min_cluster_size}"
+            f"_ms{args.hdbscan_min_samples}"
+        )
+    return algo
+
+
+def _run_gt_instance_split(ply_path: str, gaussian_ids, post_dir: str) -> None:
+    """Export one PLY per GT instance id (including id==0 as instance_00000.ply)."""
+    from plyfile import PlyData
+
+    plydata = PlyData.read(ply_path)
+    vdata = plydata.elements[0].data
+    G = gaussian_ids.shape[0]
+    if len(vdata) != G:
+        raise AssertionError(
+            f"PLY has {len(vdata)} vertices but gaussian_ids length is {G}"
+        )
+
+    ids_np = gaussian_ids.cpu().numpy().astype(np.int32)
+    split_dir = os.path.join(post_dir, "gt_split")
+    os.makedirs(split_dir, exist_ok=True)
+    np.save(os.path.join(split_dir, "gt_ids.npy"), ids_np)
+
+    n_saved = 0
+    for iid in np.unique(ids_np):
+        mask = ids_np == iid
+        path = os.path.join(split_dir, f"instance_{int(iid):05d}.ply")
+        if write_ply_vertex_rows(vdata, mask, path):
+            n_saved += 1
+
+    print(
+        f"[gt_split] Saved {n_saved} instance PLYs "
+        f"(ids 0..{int(ids_np.max())}) -> {split_dir}"
+    )
+
+
 def run_postprocess(feat, num_ray, ply_path, output_dir, args,
                     gaussian_ids=None):
     """Dispatch post-processing: PCA, clustering, and/or GT-ID coloring."""
     from src.visualization.instance_viz import make_color_lut
 
-    modes = [s.strip() for s in args.postprocess.split(",") if s.strip()]
-    if not modes:
+    post_str = getattr(args, "postprocess", None) or ""
+    modes = [s.strip() for s in post_str.split(",") if s.strip()]
+    want_seg3d_split = getattr(args, "postprocess_seg3d_split", False)
+    want_gt_split = getattr(args, "postprocess_gt_split", False)
+
+    if not modes and not want_gt_split and not want_seg3d_split:
         return
 
     valid_mask = num_ray > 0
     n_valid = valid_mask.sum().item()
     G = feat.shape[0]
     print(f"\n[postprocess] {G:,} Gaussians, {n_valid:,} valid ({100*n_valid/G:.1f}%)")
-    print(f"[postprocess] Modes: {modes}")
+    if modes:
+        print(f"[postprocess] Modes: {modes}")
+    else:
+        print("[postprocess] Modes: (none; gt_split only)")
 
     xyz_np = load_xyz_from_ply(ply_path)
     assert xyz_np.shape[0] == G, (
@@ -1083,6 +1150,24 @@ def run_postprocess(feat, num_ray, ply_path, output_dir, args,
     )
 
     post_dir = os.path.join(output_dir, "postprocess")
+
+    if not modes:
+        if want_gt_split:
+            if gaussian_ids is None:
+                print(
+                    "\n[gt_split] Skipped: no gaussian_ids. "
+                    "(Use --feature_source gt_idmap, or --load_traced with a .pt "
+                    "that contains gaussian_ids.)"
+                )
+            else:
+                print("\n--- GT instance PLY split ---")
+                _run_gt_instance_split(ply_path, gaussian_ids, post_dir)
+        if want_seg3d_split:
+            print(
+                "\n[seg3d_split] Skipped: add kmeans, dbscan, or hdbscan to --postprocess"
+            )
+        print(f"\n[postprocess] Done -> {post_dir}")
+        return
 
     feat_gpu = feat.cuda() if not feat.is_cuda else feat
     valid_gpu = valid_mask.cuda() if not valid_mask.is_cuda else valid_mask
@@ -1154,6 +1239,52 @@ def run_postprocess(feat, num_ray, ply_path, output_dir, args,
                                    os.path.join(algo_dir, "colored_gaussians.ply"))
         np.save(os.path.join(algo_dir, "cluster_labels.npy"), labels)
         print(f"  Saved labels: {os.path.join(algo_dir, 'cluster_labels.npy')}")
+
+        if want_seg3d_split:
+            from plyfile import PlyData
+
+            tag = _postprocess_algo_tag(args, algo)
+            split_dir = os.path.join(post_dir, "seg3d_split", tag)
+            os.makedirs(split_dir, exist_ok=True)
+            np.save(os.path.join(split_dir, "cluster_labels.npy"), labels)
+            plydata = PlyData.read(ply_path)
+            vdata = plydata.elements[0].data
+            n_saved = 0
+            for cid in range(1, max_label + 1):
+                mask = labels == cid
+                if not mask.any():
+                    continue
+                out_p = os.path.join(split_dir, f"cluster_{cid - 1:03d}.ply")
+                if write_ply_vertex_rows(vdata, mask, out_p):
+                    n_saved += 1
+            m0 = labels == 0
+            if m0.any():
+                write_ply_vertex_rows(
+                    vdata, m0, os.path.join(split_dir, "unclustered.ply")
+                )
+            print(
+                f"  [seg3d_split] algo={tag} saved {n_saved} cluster PLYs "
+                f"(max_label={max_label})"
+                f"{', unclustered.ply' if m0.any() else ''} -> {split_dir}"
+            )
+
+    if want_seg3d_split and not any(
+        a in modes for a in ("kmeans", "dbscan", "hdbscan")
+    ):
+        print(
+            "\n[seg3d_split] Skipped: add kmeans, dbscan, or hdbscan to --postprocess"
+        )
+
+    if want_gt_split:
+        if gaussian_ids is None:
+            print(
+                "\n[gt_split] Skipped: no gaussian_ids. "
+                "(Use --feature_source gt_idmap, or --load_traced with a .pt "
+                "that contains gaussian_ids.)"
+            )
+        else:
+            print("\n--- GT instance PLY split ---")
+            _run_gt_instance_split(ply_path, gaussian_ids, post_dir)
 
     print(f"\n[postprocess] Done -> {post_dir}")
 
@@ -1373,6 +1504,19 @@ def main():
                         help="Render N random views of PLYs (0=skip)")
     g_post.add_argument("--render_resolution", type=int, default=4,
                         help="Resolution divisor for render (1/2/4/8, default 4)")
+    g_post.add_argument(
+        "--postprocess_seg3d_split", action="store_true", default=False,
+        help="After clustering (kmeans/dbscan/hdbscan in --postprocess), "
+             "also export per-cluster 3DGS PLYs under postprocess/seg3d_split/"
+             "<tag>/; writes unclustered.ply when label==0 exists "
+             "(same idea as instseg_infer seg3d_split)",
+    )
+    g_post.add_argument(
+        "--postprocess_gt_split", action="store_true", default=False,
+        help="When gaussian_ids exist (gt_idmap or .pt with gaussian_ids), "
+             "export instance_XXXXX.ply per id under postprocess/gt_split/ "
+             "(id==0 -> instance_00000.ply)",
+    )
 
     args = parser.parse_args()
 
@@ -1402,8 +1546,15 @@ def main():
         print(f"  Loaded feat [{G}, {final_feat.shape[1]}], "
               f"valid: {n_valid:,}/{G:,} ({100*n_valid/G:.1f}%)")
 
-        if args.postprocess is None:
-            parser.error("--postprocess is required in --load_traced mode")
+        if (
+            args.postprocess is None
+            and not args.postprocess_gt_split
+            and not args.postprocess_seg3d_split
+        ):
+            parser.error(
+                "--postprocess is required in --load_traced mode "
+                "(unless --postprocess_gt_split or --postprocess_seg3d_split only)"
+            )
 
         gaussian_ids = None
         if "gaussian_ids" in ckpt:
@@ -1598,7 +1749,11 @@ def main():
               f"max={sum_num_ray[valid_mask].max():.0f}")
 
     # ---- 8. Post-processing (optional) ----
-    if args.postprocess:
+    if (
+        args.postprocess
+        or args.postprocess_gt_split
+        or args.postprocess_seg3d_split
+    ):
         run_postprocess(final_feat, sum_num_ray, ply_path, output_dir, args,
                         gaussian_ids=gaussian_ids)
 
