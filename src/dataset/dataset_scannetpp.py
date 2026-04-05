@@ -149,16 +149,6 @@ class DatasetScannetpp(Dataset):
         intrinsics[0, 2] = intrinsics[0, 2] / w
         intrinsics[1, 2] = intrinsics[1, 2] / h
         return intrinsics
-        
-    @staticmethod
-    def blender2opencv_c2w(pose):
-        """Convert a Blender c2w matrix to OpenCV c2w."""
-        from src.coord import CameraPose, CameraConvention, ExtrinsicType
-        mat = torch.tensor(np.array(pose), dtype=torch.float32).unsqueeze(0)
-        converted = CameraPose.from_matrix(
-            mat, CameraConvention.BLENDER, ExtrinsicType.C2W
-        ).to(CameraConvention.OPENCV).matrix.squeeze(0)
-        return converted.numpy().tolist()
 
     def load_frames(self, frames):
         with ThreadPoolExecutor(max_workers=1) as executor:
