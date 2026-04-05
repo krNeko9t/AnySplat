@@ -93,12 +93,6 @@ torchrun \
 
 Here, we provide three example datasets ([CO3Dv2](https://github.com/facebookresearch/co3d), [DL3DV](https://dl3dv-10k.github.io/DL3DV-10K/) and [ScanNet++](https://kaldir.vc.in.tum.de/scannetpp/)), each representing a different training view sampling strategy. You can use them as templates and add any other datasets you prefer.
 
-## Post Optimization
-
-```
-python src/post_opt/simple_trainer.py default --data_dir ...
-```
-
 ## Evaluation
 
 ```

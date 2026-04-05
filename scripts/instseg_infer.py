@@ -842,7 +842,7 @@ def _run_cluster_3d(
 def output_seg3d_ply(enc_out, inp: InferenceInput, cfg: OutputConfig, out_dir: Path) -> None:
     """Cluster gaussian_instance_feat, encode as SH colors, export PLY."""
     from src.model.ply_export import export_ply
-    from src.post_opt.utils import rgb_to_sh
+    from src.utils.spherical_harmonics import rgb_to_sh
     from src.visualization.instance_viz import make_color_lut
 
     gaussians = enc_out.gaussians
