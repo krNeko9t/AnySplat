@@ -157,42 +157,36 @@ def depth_to_cam_coords_points(depth_map: torch.Tensor, intrinsic: torch.Tensor)
 
 
 def closed_form_inverse_se3(se3, R=None, T=None):
-    """
-    Compute the inverse of each 4x4 (or 3x4) SE3 matrix in a batch.
+    """Compute the inverse of batched SE3 matrices using the R^T structure.
 
-    If `R` and `T` are provided, they must correspond to the rotation and translation
-    components of `se3`. Otherwise, they will be extracted from `se3`.
+    Delegates to ``src.coord.se3_inv`` for the core computation.
+    The *R* / *T* overrides are retained for backward compatibility but
+    are rarely needed—prefer calling with just *se3*.
 
     Args:
-        se3: Nx4x4 or Nx3x4 array or tensor of SE3 matrices.
-        R (optional): Nx3x3 array or tensor of rotation matrices.
-        T (optional): Nx3x1 array or tensor of translation vectors.
+        se3: (*, 4, 4) or (*, 3, 4) SE3 matrices.
+        R (optional): (*, 3, 3) rotation override.
+        T (optional): (*, 3, 1) translation override.
 
     Returns:
-        Inverted SE3 matrices with the same type and device as `se3`.
-
-    Shapes:
-        se3: (N, 4, 4)
-        R: (N, 3, 3)
-        T: (N, 3, 1)
+        (*, 4, 4) inverted SE3 matrices.
     """
-    # Validate shapes
-    if se3.shape[-2:] != (4, 4) and se3.shape[-2:] != (3, 4):
-        raise ValueError(f"se3 must be of shape (N,4,4), got {se3.shape}.")
+    from src.coord import se3_inv
 
-    # Extract R and T if not provided
+    if R is None and T is None:
+        return se3_inv(se3)
+
+    # Legacy path: caller supplied explicit R / T
     if R is None:
-        R = se3[:, :3, :3]  # (N,3,3)
+        R = se3[..., :3, :3]
     if T is None:
-        T = se3[:, :3, 3:]  # (N,3,1)
+        T = se3[..., :3, 3:]
 
-    # Transpose R
-    R_transposed = R.transpose(1, 2)  # (N,3,3)
-    top_right = -torch.bmm(R_transposed, T)  # (N,3,1)
-    inverted_matrix = torch.eye(4, 4, device=R.device)[None].repeat(len(R), 1, 1)
-    inverted_matrix = inverted_matrix.to(R.dtype)
-
-    inverted_matrix[:, :3, :3] = R_transposed
-    inverted_matrix[:, :3, 3:] = top_right
-
-    return inverted_matrix
+    R_inv = R.transpose(-1, -2)
+    t_inv = -(R_inv @ T)
+    out = torch.eye(4, device=R.device, dtype=R.dtype).expand(
+        R.shape[:-2] + (4, 4)
+    ).contiguous()
+    out[..., :3, :3] = R_inv
+    out[..., :3, 3:] = t_inv
+    return out

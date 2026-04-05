@@ -101,6 +101,7 @@ def transform_poses_pca(poses: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
     # Flip coordinate system if z component of y-axis is negative
     if poses_recentered.mean(axis=0)[2, 1] < 0:
+        # Flip Y/Z to ensure the "up" direction is consistent after PCA.
         poses_recentered = np.diag(np.array([1, -1, -1])) @ poses_recentered
         transform = np.diag(np.array([1, -1, -1, 1])) @ transform
 
@@ -173,6 +174,8 @@ def generate_ellipse_path(poses: np.ndarray,
 def generate_path(viewpoint_cameras, n_frames=480):
     # c2ws = np.array([np.linalg.inv(np.asarray((cam.world_view_transform.T).cpu().numpy())) for cam in viewpoint_cameras])
     c2ws = viewpoint_cameras.cpu().numpy()
+    # OpenCV c2w → OpenGL c2w for PCA-based path generation (flip Y,Z axes).
+    # See src.coord.AXIS_FLIP for the canonical definition.
     pose = c2ws[:,:3,:] @ np.diag([1, -1, -1, 1])
     pose_recenter, colmap_to_world_transform = transform_poses_pca(pose)
 

@@ -53,6 +53,15 @@ class DatasetScannetppCfgWrapper:
 
 
 class DatasetScannetpp(Dataset):
+    """ScanNet++ dataset.
+
+    Coordinate conventions:
+        - Raw data: ``scene_metadata.npz`` ``trajectories`` are **OpenCV c2w** (4x4).
+        - No axis conversion needed — data is already OpenCV.
+        - Output ``extrinsics``: **OpenCV c2w** (4x4).
+        - Output ``intrinsics``: normalised K (fx,fy,cx,cy divided by W,H).
+    """
+
     cfg: DatasetScannetppCfgWrapper
     stage: Stage
     view_sampler: ViewSampler
@@ -141,12 +150,15 @@ class DatasetScannetpp(Dataset):
         intrinsics[1, 2] = intrinsics[1, 2] / h
         return intrinsics
         
-    def blender2opencv_c2w(self, pose):
-        blender2opencv = np.array(
-            [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]
-        )
-        opencv_c2w = np.array(pose) @ blender2opencv
-        return opencv_c2w.tolist()
+    @staticmethod
+    def blender2opencv_c2w(pose):
+        """Convert a Blender c2w matrix to OpenCV c2w."""
+        from src.coord import CameraPose, CameraConvention, ExtrinsicType
+        mat = torch.tensor(np.array(pose), dtype=torch.float32).unsqueeze(0)
+        converted = CameraPose.from_matrix(
+            mat, CameraConvention.BLENDER, ExtrinsicType.C2W
+        ).to(CameraConvention.OPENCV).matrix.squeeze(0)
+        return converted.numpy().tolist()
 
     def load_frames(self, frames):
         with ThreadPoolExecutor(max_workers=1) as executor:

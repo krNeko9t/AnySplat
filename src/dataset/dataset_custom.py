@@ -58,7 +58,22 @@ class DatasetCustomCfgWrapper:
 
 
 class DatasetCustom(Dataset):
-    """A manifest-driven dataset for custom multi-view scenes (e.g., infinigen)."""
+    """A manifest-driven dataset for custom multi-view scenes.
+
+    Coordinate conventions (IMPORTANT):
+        - ``c2w`` / ``extrinsic_c2w`` / ``camtoworld`` in the manifest **must** be
+          a 4x4 **OpenCV camera-to-world** matrix:
+              X → right,  Y → down,  Z → forward (looking direction).
+        - ``K_px`` / ``K`` / ``intrinsic`` must be a 3x3 **pixel-unit** intrinsic
+          matrix whose (cx, cy) follows **OpenCV convention** — the centre of the
+          top-left pixel is at (0, 0).  If your intrinsics come from COLMAP
+          (pixel centre at 0.5), subtract 0.5 from cx and cy before writing
+          the manifest, or use ``src.coord.colmap_to_opencv_intrinsics``.
+        - No coordinate-system conversion is applied at load time — the
+          manifest must already be in OpenCV convention.
+        - Output ``extrinsics``: **OpenCV c2w** (4x4).
+        - Output ``intrinsics``: normalised K (fx,fy,cx,cy divided by W,H).
+    """
 
     cfg: DatasetCustomCfg
     stage: Stage

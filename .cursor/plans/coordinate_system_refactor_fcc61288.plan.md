@@ -3,32 +3,32 @@ name: Coordinate System Refactor
 overview: 创建统一的坐标系基础模块 `src/coord/`，定义坐标系约定枚举、带元数据的 CameraPose 类型、标准转换函数，并在项目的数据加载/PLY导出/渲染等关键边界处集成，消除重复代码并添加运行时可追踪性。范围仅限 `src/` 和 `scripts/`，不涉及根目录 `IGGT/`。
 todos:
   - id: create-coord-module
-    content: "创建 src/coord/ 模块：conventions.py (枚举+轴分组+ASCII图)、camera_pose.py (CameraPose 类，唯一转换入口 .to())、conversions.py (内部实现：轴查表+se3_inv+qvec_to_rotmat)、intrinsics.py (内参转换)、_logging.py (日志工具)、__init__.py (公共API)"
-    status: pending
+    content: 创建 src/coord/ 模块：conventions.py (枚举+轴分组+ASCII图)、camera_pose.py (CameraPose 类，唯一转换入口 .to())、conversions.py (内部实现：轴查表+se3_inv+qvec_to_rotmat)、intrinsics.py (内参转换)、_logging.py (日志工具)、__init__.py (公共API)
+    status: completed
   - id: unify-ply-io
     content: 创建 src/coord/ply_io.py：统一 PLY 读写，合并 ply_export.py / simple_trainer.py / trace 脚本中的 3 套实现，PLY header 中写入坐标系 comment
-    status: pending
+    status: completed
   - id: dedup-blender2opencv
-    content: "用 CameraPose(mat, BLENDER, C2W).to(OPENCV).matrix 替换 dataset_scannetpp.py、dataset_dl3dv.py 中的 2 处 blender2opencv_c2w 重复（IGGT 不管）"
-    status: pending
+    content: 用 CameraPose(mat, BLENDER, C2W).to(OPENCV).matrix 替换 dataset_scannetpp.py、dataset_dl3dv.py 中的 2 处 blender2opencv_c2w 重复（IGGT 不管）
+    status: completed
   - id: dedup-inverse-se3
-    content: "统一 se3_inv 到 src/coord/conversions.py；vggt/utils/geometry.py 的 closed_form_inverse_se3 改为 re-export 别名（IGGT 不管）"
-    status: pending
+    content: 统一 se3_inv 到 src/coord/conversions.py；vggt/utils/geometry.py 的 closed_form_inverse_se3 改为 re-export 别名（IGGT 不管）
+    status: completed
   - id: dedup-intrinsics
     content: 统一 colmap_to_opencv_intrinsics / opencv_to_colmap_intrinsics 到 src/coord/intrinsics.py，替换 src/utils/geometry.py、src/geometry/ptc_geometry.py、src/dataset/shims/geometry_shim.py 3 处重复
-    status: pending
+    status: completed
   - id: dataset-convention-map
     content: 为每个数据集 loader 在加载边界处标注原始约定 -> 输出约定的映射，在 __getitem__ 添加 log_coordinate_op 日志；补充 dataset_custom.py docstring 中缺失的像素中心/世界轴说明
-    status: pending
+    status: completed
   - id: add-boundary-logging
     content: 在 PLY export、rendering 入口 (simple_trainer.py rasterize_splats、cuda_splatting.py)、scripts/trace 等关键边界处添加坐标系日志
-    status: pending
+    status: completed
   - id: create-cursor-rule
     content: 创建 .cursor/rules/coordinate-conventions.mdc，写入项目坐标系约定规则 + 各数据集约定速查表，供 AI 参考
-    status: pending
+    status: completed
   - id: add-tests
     content: 为坐标系转换写 round-trip 单元测试，确保 A -> B -> A == identity
-    status: pending
+    status: completed
 isProject: false
 ---
 

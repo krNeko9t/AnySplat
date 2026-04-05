@@ -309,6 +309,8 @@ def cat(a, b):
     return np.concatenate((a.reshape(-1, 3), b.reshape(-1, 3)))
 
 
+# Axis flip between OpenCV (Y-down, Z-forward) ↔ OpenGL (Y-up, Z-backward).
+# Equivalent to src.coord.AXIS_FLIP but as a numpy array for trimesh usage.
 OPENGL = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
 
 

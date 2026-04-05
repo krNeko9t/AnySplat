@@ -1,0 +1,88 @@
+---
+description: Coordinate system conventions for AnySplat — all 3D/camera code must follow these rules.
+globs:
+  - "src/**/*.py"
+  - "scripts/**/*.py"
+alwaysApply: false
+---
+
+# Coordinate System Conventions
+
+## Internal Standard
+
+This project uses **OpenCV camera convention** with **c2w (camera-to-world)** extrinsics as its internal standard:
+
+- Camera axes: **X-right, Y-down, Z-forward** (camera looks along +Z).
+- Extrinsics: **4×4 camera-to-world (c2w)** matrices.
+- Intrinsics: normalised K (fx, fy, cx, cy divided by image W, H); pixel centre at **(0, 0)** (OpenCV convention).
+
+## Using `src.coord`
+
+All coordinate-related operations must go through the `src.coord` module:
+
+```python
+from src.coord import CameraPose, CameraConvention, ExtrinsicType, se3_inv
+
+# Convert conventions via CameraPose.to() — the ONLY conversion entry point
+pose = CameraPose.from_matrix(mat, CameraConvention.BLENDER, ExtrinsicType.C2W)
+opencv_c2w = pose.to(CameraConvention.OPENCV).matrix
+
+# Efficient SE3 inverse (replaces closed_form_inverse_se3)
+inv_mat = se3_inv(mat)
+
+# Intrinsic pixel-centre conversion
+from src.coord import colmap_to_opencv_intrinsics
+K_opencv = colmap_to_opencv_intrinsics(K_colmap)
+```
+
+## Convention Quick Reference
+
+| Convention  | Camera Axes          | Axis Group | Intrinsic pixel centre |
+|-------------|----------------------|------------|------------------------|
+| OpenCV      | X→right Y→down Z→fwd | opencv     | (0, 0)                 |
+| COLMAP      | same as OpenCV       | opencv     | (0.5, 0.5)             |
+| OpenGL      | X→right Y→up Z→back  | opengl     | N/A                    |
+| Blender     | same as OpenGL       | opengl     | N/A                    |
+| NerfStudio  | same as OpenGL       | opengl     | (0, 0)                 |
+
+Conversion between the two axis groups: right-multiply c2w (or left-multiply w2c) by `diag(1, -1, -1, 1)`.
+
+## Dataset Convention Map
+
+| Dataset   | Raw Format                  | Raw Convention       | Output Convention |
+|-----------|-----------------------------|----------------------|-------------------|
+| CO3D      | npz `camera_pose`           | OpenCV c2w           | OpenCV c2w        |
+| DL3DV     | `transforms.json`           | Blender c2w          | OpenCV c2w        |
+| ScanNet++ | npz `trajectories`          | OpenCV c2w           | OpenCV c2w        |
+| Custom    | manifest `c2w`              | **user must provide OpenCV c2w** | OpenCV c2w |
+| COLMAP    | pycolmap `R()`, `tvec`      | COLMAP w2c           | OpenCV c2w        |
+
+## Rules for AI / Contributors
+
+1. **Never** write raw `diag(1, -1, -1, 1)` or `[[1,0,0,0],[0,-1,0,0],...]` inline.
+   Use `src.coord.AXIS_FLIP` or `CameraPose.to()`.
+
+2. **Never** write a new `blender_to_opencv()` / `opencv_to_opengl()` / etc. function.
+   Use `CameraPose(mat, convention, extrinsic_type).to(target).matrix`.
+
+3. **Never** duplicate `closed_form_inverse_se3`. Use `src.coord.se3_inv`.
+
+4. **Never** duplicate `colmap_to_opencv_intrinsics` / `opencv_to_colmap_intrinsics`.
+   Import from `src.coord`.
+
+5. When writing PLY files, use `src.coord.export_gaussian_ply` which embeds
+   a `coordinate_convention=` comment in the header.
+
+6. When loading PLY files, use `src.coord.load_gaussian_ply` which reads
+   and reports the convention.
+
+7. Any new function that accepts or returns camera extrinsics **must**
+   document in its docstring whether it expects/returns c2w or w2c,
+   and which camera convention it uses.
+
+## 3DGS PLY On-Disk Format
+
+- Positions `x, y, z`: world coordinates
+- Scales `scale_0..2`: **log** space
+- Opacity `opacity`: **logit** (inverse-sigmoid) space
+- Quaternions `rot_0..3`: **(w, x, y, z)** order

@@ -61,6 +61,15 @@ class DatasetCo3dCfgWrapper:
 
 
 class DatasetCo3d(Dataset):
+    """CO3Dv2 dataset.
+
+    Coordinate conventions:
+        - Raw data: npz ``camera_pose`` is already OpenCV c2w.
+        - Output ``extrinsics``: **OpenCV c2w** (4x4).
+        - Output ``intrinsics``: normalised K (fx,fy,cx,cy divided by W,H).
+        - Pixel center: depends on upstream CO3D preprocessing (no ±0.5 adjustment here).
+    """
+
     cfg: DatasetCo3dCfg
     stage: Stage
     view_sampler: ViewSampler
