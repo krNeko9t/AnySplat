@@ -56,6 +56,7 @@ from tqdm import tqdm
 from plyfile import PlyData
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.coord import colmap_to_opencv_intrinsics, load_gaussian_ply
 from src.misc.colmap_utils import (
     read_extrinsics_binary, read_intrinsics_binary,
     read_extrinsics_text, read_intrinsics_text,
@@ -204,64 +205,22 @@ def create_virtual_resize_camera(full_cam, orig_w, orig_h, fx, fy, cx, cy,
 # Load Gaussians from PLY (trace-ready: linear scales, sigmoid opacity)
 # ---------------------------------------------------------------------------
 
-def load_gaussians_from_ply(ply_path, sh_degree=3):
-    """Load Gaussian parameters for trace (linear-space scales, activated opacity).
+def load_gaussians_from_ply(ply_path):
+    """Load Gaussian parameters for trace via ``src.coord.load_gaussian_ply``.
 
     Returns scales with their original dimensionality (2 for 2DGS, 3 for 3DGS)
-    in linear space, and normalized quaternions.
+    in linear space, normalized quaternions, and RGB from SH DC for trace.
     """
     print(f"Loading PLY: {ply_path}")
-    plydata = PlyData.read(ply_path)
-    v = plydata.elements[0]
-
-    xyz = np.stack([np.asarray(v["x"]), np.asarray(v["y"]), np.asarray(v["z"])], axis=1)
-    opacities_raw = np.asarray(v["opacity"])
-
-    # SH DC for RGB rendering during trace
-    f_dc_0 = np.asarray(v["f_dc_0"])
-    f_dc_1 = np.asarray(v["f_dc_1"])
-    f_dc_2 = np.asarray(v["f_dc_2"])
-    C0 = 0.28209479177387814  # 1 / (2 * sqrt(pi))
-    colors_rgb = np.stack([
-        0.5 + C0 * f_dc_0,
-        0.5 + C0 * f_dc_1,
-        0.5 + C0 * f_dc_2,
-    ], axis=1).clip(0, 1).astype(np.float32)
-
-    # Scales (log-space in PLY -> convert to linear)
-    scale_names = sorted(
-        [p.name for p in v.properties if p.name.startswith("scale_")],
-        key=lambda x: int(x.split("_")[-1]),
-    )
-    n_scales = len(scale_names)
-    scales_log = np.zeros((xyz.shape[0], n_scales), dtype=np.float32)
-    for idx, name in enumerate(scale_names):
-        scales_log[:, idx] = np.asarray(v[name])
-
-    # Rotation quaternion
-    rot_names = sorted(
-        [p.name for p in v.properties if p.name.startswith("rot")],
-        key=lambda x: int(x.split("_")[-1]),
-    )
-    rots = np.zeros((xyz.shape[0], len(rot_names)), dtype=np.float32)
-    for idx, name in enumerate(rot_names):
-        rots[:, idx] = np.asarray(v[name])
-
-    # To GPU
-    means = torch.tensor(xyz, dtype=torch.float32, device="cuda")
-    quats = torch.tensor(rots, dtype=torch.float32, device="cuda")
-    colors = torch.tensor(colors_rgb, dtype=torch.float32, device="cuda")
-
-    # Activate: exp for scales, sigmoid for opacities, normalize quaternions
-    scales_log_t = torch.tensor(scales_log, dtype=torch.float32, device="cuda")
-    scales_linear = torch.exp(scales_log_t)  # keep original dim (2 or 3)
-
-    quats = quats / (quats.norm(dim=1, keepdim=True) + 1e-8)
-
-    opacities = torch.sigmoid(
-        torch.tensor(opacities_raw, dtype=torch.float32, device="cuda")
-    ).unsqueeze(-1)
-
+    data = load_gaussian_ply(ply_path, device="cuda")
+    means = data.means
+    quats = data.rotations
+    scales_linear = data.scales
+    opacities = data.opacities.unsqueeze(-1)
+    colors = data.colors_rgb
+    if data.convention is not None:
+        print(f"  coordinate_convention (header): {data.convention.value}")
+    n_scales = scales_linear.shape[1]
     print(f"  Gaussians: {means.shape[0]:,}, scales: {n_scales}D (linear space)")
     return means, quats, scales_linear, opacities, colors
 
@@ -271,6 +230,12 @@ def load_gaussians_from_ply(ply_path, sh_degree=3):
 # ---------------------------------------------------------------------------
 
 def load_colmap_cameras(source_path, images_folder, resolution):
+    """Load cameras from COLMAP ``sparse/`` (binary or text).
+
+    Extrinsics follow COLMAP (world-to-camera): ``R`` is ``qvec2rotmat(qvec).T``,
+    ``T`` is ``tvec``, matching ``getWorld2View2`` / ``TraceCamera`` below.
+    Intrinsics are converted COLMAP → OpenCV pixel centre via ``colmap_to_opencv_intrinsics``.
+    """
     scene_dir = os.path.join(source_path, "sparse", "0")
     if not os.path.isdir(scene_dir):
         scene_dir = os.path.join(source_path, "sparse")
@@ -300,6 +265,12 @@ def load_colmap_cameras(source_path, images_folder, resolution):
             cx, cy = intr.params[2], intr.params[3]
         else:
             raise ValueError(f"Unsupported camera model: {intr.model}")
+
+        # COLMAP stores (cx, cy) with pixel centre (0.5, 0.5); project standard is OpenCV (0, 0).
+        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+        K = colmap_to_opencv_intrinsics(K)
+        fx, fy = float(K[0, 0]), float(K[1, 1])
+        cx, cy = float(K[0, 2]), float(K[1, 2])
 
         orig_w, orig_h = intr.width, intr.height
         if resolution in (1, 2, 4, 8):
