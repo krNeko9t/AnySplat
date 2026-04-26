@@ -31,11 +31,15 @@ Examples:
       --image_dir examples/vrnerf/riverview \
       --outputs pca2d \
       --pca2d_outs pca,overlay,compare
+
+  # Dataset mode: DEBUG logs for coordinate boundaries (logger ``coord``):
+  python scripts/instseg_infer.py --run_dir output/my_run --verbose
 """
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import sys
 import os
@@ -53,6 +57,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.coord import CameraConvention, ExtrinsicType, log_coordinate_op
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +331,14 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
         "view_indices": view_indices,
     }
     print(f"[input] Dataset scene_id={scene_id} context={meta['context_views']} target={meta['target_views']}")
+    if extrinsics is not None:
+        log_coordinate_op(
+            "dataset_extrinsics",
+            CameraConvention.OPENCV,
+            ExtrinsicType.C2W,
+            tuple(extrinsics.shape),
+            context=f"scene_id={scene_id} (DatasetCustom → model)",
+        )
     return InferenceInput(
         images=images,
         meta=meta,
@@ -1115,11 +1129,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also save unclustered (label=0) Gaussians as unclustered.ply in seg3d_split",
     )
 
+    ap.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable DEBUG logging for the coord logger (coordinate-system boundaries)",
+    )
+
     return ap
 
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    if args.verbose:
+        _coord_log = logging.getLogger("coord")
+        _coord_log.setLevel(logging.DEBUG)
+        if not _coord_log.handlers:
+            _h = logging.StreamHandler(sys.stderr)
+            _h.setLevel(logging.DEBUG)
+            _h.setFormatter(logging.Formatter("%(message)s"))
+            _coord_log.addHandler(_h)
+        _coord_log.propagate = False
 
     # Auto-resolve ckpt when run_dir is set but ckpt is not (only if default path exists)
     if getattr(args, "run_dir", None) and getattr(args, "ckpt", None) is None:

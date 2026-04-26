@@ -40,12 +40,16 @@ Example:
   python scripts/trace_instance_to_gaussians.py \
       --source_path scene/ --ply_path scene/point_cloud.ply \
       --model_type iggt --iggt_model_path /path/to/iggt_ckpt.pth
+
+  # Enable DEBUG logs for the ``coord`` logger (coordinate-system boundaries):
+  python scripts/trace_instance_to_gaussians.py ... --verbose
 """
 
 import os
 import sys
 import math
 import argparse
+import logging
 from pathlib import Path
 
 import torch
@@ -56,16 +60,32 @@ from tqdm import tqdm
 from plyfile import PlyData
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.coord import colmap_to_opencv_intrinsics, load_gaussian_ply
+from src.coord import (
+    CameraConvention,
+    CameraPose,
+    ExtrinsicType,
+    colmap_to_opencv_intrinsics,
+    load_gaussian_ply,
+    log_coordinate_op,
+)
 from src.misc.colmap_utils import (
-    read_extrinsics_binary, read_intrinsics_binary,
-    read_extrinsics_text, read_intrinsics_text,
-    qvec2rotmat,
+    read_extrinsics_binary,
+    read_intrinsics_binary,
+    read_extrinsics_text,
+    read_intrinsics_text,
 )
 
 TRACE_CHANNELS = 20  # compiled into diff_surfel_rasterization CUDA kernel
 ENCODER_CROP_SIZE = 448  # prepare_encoder_image center-crop size
 IGGT_IMAGE_SIZE = (504, 336)  # (W, H) default resize target for IGGT
+
+
+def _ply_comments_with_convention(plydata: PlyData) -> list[str]:
+    """Return PLY header comments, ensuring ``coordinate_convention=`` exists."""
+    comments = list(plydata.comments)
+    if not any(c.startswith("coordinate_convention=") for c in comments):
+        comments.append("coordinate_convention=opencv")
+    return comments
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +96,13 @@ def focal2fov(focal, pixels):
     return 2 * math.atan(pixels / (2 * focal))
 
 
-def getWorld2View2(R, t):
+def _w2c_from_colmap_rt(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """4x4 world-to-camera from COLMAP-style ``(R, t)`` used by :class:`TraceCamera`.
+
+    ``R`` is ``(qvec2rotmat(qvec)).T`` and ``t`` is ``tvec``, consistent with
+    :meth:`CameraPose.from_qvec_tvec` after decomposing ``pose.w2c`` into these
+    components.
+    """
     Rt = np.zeros((4, 4), dtype=np.float32)
     Rt[:3, :3] = R.transpose()
     Rt[:3, 3] = t
@@ -122,7 +148,7 @@ class TraceCamera:
         self.znear = znear
         self.zfar = zfar
 
-        W2C = getWorld2View2(R, T)
+        W2C = _w2c_from_colmap_rt(R, T)
         self.viewmatrix = torch.tensor(W2C, device="cuda").T.contiguous()
         P = getProjectionMatrix(znear, zfar, FoVx, FoVy)
         self.projmatrix = (
@@ -218,8 +244,16 @@ def load_gaussians_from_ply(ply_path):
     scales_linear = data.scales
     opacities = data.opacities.unsqueeze(-1)
     colors = data.colors_rgb
+    conv = data.convention if data.convention is not None else CameraConvention.OPENCV
     if data.convention is not None:
         print(f"  coordinate_convention (header): {data.convention.value}")
+    log_coordinate_op(
+        "load_gaussian_ply",
+        conv,
+        ExtrinsicType.C2W,
+        tuple(means.shape),
+        context="Gaussian means (world); PLY header convention",
+    )
     n_scales = scales_linear.shape[1]
     print(f"  Gaussians: {means.shape[0]:,}, scales: {n_scales}D (linear space)")
     return means, quats, scales_linear, opacities, colors
@@ -232,9 +266,10 @@ def load_gaussians_from_ply(ply_path):
 def load_colmap_cameras(source_path, images_folder, resolution):
     """Load cameras from COLMAP ``sparse/`` (binary or text).
 
-    Extrinsics follow COLMAP (world-to-camera): ``R`` is ``qvec2rotmat(qvec).T``,
-    ``T`` is ``tvec``, matching ``getWorld2View2`` / ``TraceCamera`` below.
-    Intrinsics are converted COLMAP → OpenCV pixel centre via ``colmap_to_opencv_intrinsics``.
+    Extrinsics are built with :meth:`CameraPose.from_qvec_tvec` (COLMAP ``qvec``,
+    ``tvec`` → world-to-camera). ``R``, ``T`` stored on :class:`TraceCamera` are
+    the decomposition used by :func:`_w2c_from_colmap_rt`. Intrinsics are
+    converted COLMAP → OpenCV pixel centre via ``colmap_to_opencv_intrinsics``.
     """
     scene_dir = os.path.join(source_path, "sparse", "0")
     if not os.path.isdir(scene_dir):
@@ -254,8 +289,14 @@ def load_colmap_cameras(source_path, images_folder, resolution):
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
 
-        R = np.transpose(qvec2rotmat(extr.qvec))
-        T = np.array(extr.tvec)
+        qvec = torch.tensor(extr.qvec, dtype=torch.float64)
+        tvec = torch.tensor(extr.tvec, dtype=torch.float64)
+        pose = CameraPose.from_qvec_tvec(
+            qvec, tvec, CameraConvention.COLMAP, ExtrinsicType.W2C
+        )
+        w2c_np = pose.w2c.detach().cpu().numpy().astype(np.float32)
+        R = w2c_np[:3, :3].T
+        T = w2c_np[:3, 3]
 
         if intr.model in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL"):
             fx = fy = intr.params[0]
@@ -304,6 +345,13 @@ def load_colmap_cameras(source_path, images_folder, resolution):
         cameras.append(cam)
 
     cameras.sort(key=lambda c: c.image_name)
+    log_coordinate_op(
+        "load_colmap_cameras",
+        CameraConvention.COLMAP,
+        ExtrinsicType.W2C,
+        (len(cameras), 4, 4),
+        context=f"sparse={scene_dir} images_folder={images_folder}",
+    )
     return cameras
 
 
@@ -1005,7 +1053,10 @@ def save_colored_pointcloud(xyz_np, rgb_u8, path):
     verts["red"], verts["green"], verts["blue"] = rgb_u8[:, 0], rgb_u8[:, 1], rgb_u8[:, 2]
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    PD([PE.describe(verts, "vertex")]).write(str(path))
+    PD(
+        [PE.describe(verts, "vertex")],
+        comments=["coordinate_convention=opencv"],
+    ).write(str(path))
     print(f"  Saved PLY: {path}")
 
 
@@ -1014,9 +1065,12 @@ def save_colored_gaussians_ply(ply_path, rgb_u8, out_path):
 
     All other attributes (scales, rotations, opacities, f_rest, etc.) are
     preserved verbatim, so the output can be rendered in any 3DGS viewer.
+    Header comments (including ``coordinate_convention=``) are preserved from
+    the source file when present.
     """
     plydata = PlyData.read(ply_path)
     v = plydata.elements[0]
+    comments = _ply_comments_with_convention(plydata)
 
     C0 = 0.28209479177387814
     rgb_f = rgb_u8.astype(np.float32) / 255.0
@@ -1029,11 +1083,17 @@ def save_colored_gaussians_ply(ply_path, rgb_u8, out_path):
 
     from plyfile import PlyData as PD, PlyElement as PE
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    PD([PE.describe(data, "vertex")]).write(str(out_path))
+    PD([PE.describe(data, "vertex")], comments=comments).write(str(out_path))
     print(f"  Saved 3DGS PLY: {out_path}")
 
 
-def write_ply_vertex_rows(vdata, row_mask: np.ndarray, out_path: str) -> bool:
+def write_ply_vertex_rows(
+    vdata,
+    row_mask: np.ndarray,
+    out_path: str,
+    *,
+    comments: list[str] | None = None,
+) -> bool:
     """Write a subset of 3DGS / PLY vertices (structured array) to a new PLY.
 
     Preserves all vertex properties from the source file. Returns False if
@@ -1045,7 +1105,10 @@ def write_ply_vertex_rows(vdata, row_mask: np.ndarray, out_path: str) -> bool:
     if sub.shape[0] == 0:
         return False
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    PD([PE.describe(sub, "vertex")]).write(str(out_path))
+    if comments is not None:
+        PD([PE.describe(sub, "vertex")], comments=comments).write(str(out_path))
+    else:
+        PD([PE.describe(sub, "vertex")]).write(str(out_path))
     return True
 
 
@@ -1069,6 +1132,7 @@ def _run_gt_instance_split(ply_path: str, gaussian_ids, post_dir: str) -> None:
 
     plydata = PlyData.read(ply_path)
     vdata = plydata.elements[0].data
+    comments = _ply_comments_with_convention(plydata)
     G = gaussian_ids.shape[0]
     if len(vdata) != G:
         raise AssertionError(
@@ -1084,7 +1148,7 @@ def _run_gt_instance_split(ply_path: str, gaussian_ids, post_dir: str) -> None:
     for iid in np.unique(ids_np):
         mask = ids_np == iid
         path = os.path.join(split_dir, f"instance_{int(iid):05d}.ply")
-        if write_ply_vertex_rows(vdata, mask, path):
+        if write_ply_vertex_rows(vdata, mask, path, comments=comments):
             n_saved += 1
 
     print(
@@ -1220,18 +1284,22 @@ def run_postprocess(feat, num_ray, ply_path, output_dir, args,
             np.save(os.path.join(split_dir, "cluster_labels.npy"), labels)
             plydata = PlyData.read(ply_path)
             vdata = plydata.elements[0].data
+            comments = _ply_comments_with_convention(plydata)
             n_saved = 0
             for cid in range(1, max_label + 1):
                 mask = labels == cid
                 if not mask.any():
                     continue
                 out_p = os.path.join(split_dir, f"cluster_{cid - 1:03d}.ply")
-                if write_ply_vertex_rows(vdata, mask, out_p):
+                if write_ply_vertex_rows(vdata, mask, out_p, comments=comments):
                     n_saved += 1
             m0 = labels == 0
             if m0.any():
                 write_ply_vertex_rows(
-                    vdata, m0, os.path.join(split_dir, "unclustered.ply")
+                    vdata,
+                    m0,
+                    os.path.join(split_dir, "unclustered.ply"),
+                    comments=comments,
                 )
             print(
                 f"  [seg3d_split] algo={tag} saved {n_saved} cluster PLYs "
@@ -1436,6 +1504,10 @@ def main():
 
     g_run = parser.add_argument_group("Runtime")
     g_run.add_argument("--max_views", type=int, default=None)
+    g_run.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable DEBUG logging for the coord logger (coordinate-system boundaries)",
+    )
     g_run.add_argument("--white_background", action="store_true")
     g_run.add_argument("--save_render", action="store_true",
                        help="Save per-view trace RGB renders")
@@ -1490,6 +1562,16 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.verbose:
+        _coord_log = logging.getLogger("coord")
+        _coord_log.setLevel(logging.DEBUG)
+        if not _coord_log.handlers:
+            _h = logging.StreamHandler(sys.stderr)
+            _h.setLevel(logging.DEBUG)
+            _h.setFormatter(logging.Formatter("%(message)s"))
+            _coord_log.addHandler(_h)
+        _coord_log.propagate = False
 
     # Parse IGGT image size
     iggt_w, iggt_h = [int(x) for x in args.iggt_image_size.split(",")]
