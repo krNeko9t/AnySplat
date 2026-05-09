@@ -1,0 +1,19 @@
+{
+  "source_path": "3dovs/bench",
+  "ply_path": "3dovs/bench/point_cloud.ply",
+  "camera_backend": "colmap",
+  "feature_source": "precomputed",
+  "feat_dir": "output_idmap/bench_depth",
+  "feat_dim": 8,
+  "postprocess": "hdbscan,pca",
+  "postprocess_seg3d_split": true,
+  "trace_crop_aligned": false,
+  "resolution": 1,
+  "hdbscan_min_cluster_size": 700,
+  "hdbscan_min_samples": 50,
+  "postprocess_knn_k": 20,
+  "encoder_batch_size": 48,
+  "render_views": 4,
+  "k": 8,
+  "output_dir": "trace_output/bench_precomputed_depth"
+}

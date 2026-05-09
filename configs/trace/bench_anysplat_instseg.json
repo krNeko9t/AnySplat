@@ -1,0 +1,19 @@
+{
+  "source_path": "3dovs/bench",
+  "ply_path": "3dovs/bench/point_cloud.ply",
+  "camera_backend": "colmap",
+  "feature_source": "anysplat",
+  "run_dir": "output/exp_instseg_inscene_scannetpp_v2/2026-03-05_00-41-11",
+  "ckpt": "output/exp_instseg_inscene_scannetpp_v2/2026-03-05_00-41-11/checkpoints/last.ckpt",
+  "postprocess": "hdbscan,pca",
+  "postprocess_seg3d_split": true,
+  "trace_crop_aligned": false,
+  "resolution": 1,
+  "hdbscan_min_cluster_size": 700,
+  "hdbscan_min_samples": 50,
+  "postprocess_knn_k": 20,
+  "encoder_batch_size": 48,
+  "render_views": 4,
+  "k": 8,
+  "output_dir": "trace_output/bench_anysplat_instseg"
+}

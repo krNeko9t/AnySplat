@@ -1,0 +1,18 @@
+{
+  "source_path": "3dovs/bench",
+  "ply_path": "3dovs/bench/point_cloud.ply",
+  "camera_backend": "colmap",
+  "feature_source": "iggt",
+  "iggt_model_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/iggt_checkpoint.pth",
+  "postprocess": "hdbscan,pca",
+  "postprocess_seg3d_split": true,
+  "trace_crop_aligned": false,
+  "resolution": 1,
+  "hdbscan_min_cluster_size": 700,
+  "hdbscan_min_samples": 50,
+  "postprocess_knn_k": 20,
+  "encoder_batch_size": 48,
+  "render_views": 4,
+  "k": 8,
+  "output_dir": "trace_output/bench_iggt_no_crop"
+}

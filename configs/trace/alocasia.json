@@ -1,0 +1,19 @@
+{
+  "source_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia",
+  "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia/point_cloud.ply",
+  "camera_backend": "nerf_transforms",
+  "transforms_json": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia/transforms_train.json",
+  "feature_source": "iggt",
+  "iggt_model_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/iggt_checkpoint.pth",
+  "postprocess": "hdbscan,pca",
+  "postprocess_seg3d_split": true,
+  "trace_crop_aligned": false,
+  "resolution": 1,
+  "hdbscan_min_cluster_size": 700,
+  "hdbscan_min_samples": 50,
+  "postprocess_knn_k": 20,
+  "encoder_batch_size": 48,
+  "render_views": 4,
+  "k": 8,
+  "output_dir": "trace_output/alocasia_iggt_no_crop"
+}

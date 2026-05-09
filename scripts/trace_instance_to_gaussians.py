@@ -17,7 +17,7 @@ and auto-detected when --feature_source is omitted.
 
 Dependencies (anysplat conda env):
   torch, numpy, Pillow, plyfile, tqdm, diff_surfel_rasterization
-  + src.misc.colmap_utils (project-local)
+  + src.trace_cameras, src.misc.colmap_utils (project-local)
 
 Example:
   # Precomputed feature maps (e.g. physics features)
@@ -41,15 +41,20 @@ Example:
       --source_path scene/ --ply_path scene/point_cloud.ply \
       --model_type iggt --iggt_model_path /path/to/iggt_ckpt.pth
 
+  # PhysicsDreamer-style transforms_train.json + IGGT (paths from configs/trace/alocasia.json):
+  python scripts/trace_instance_to_gaussians.py \\
+      --trace_config configs/trace/alocasia.json
+
   # Enable DEBUG logs for the ``coord`` logger (coordinate-system boundaries):
   python scripts/trace_instance_to_gaussians.py ... --verbose
 """
 
+import argparse
+import json
+import logging
+import math
 import os
 import sys
-import math
-import argparse
-import logging
 from pathlib import Path
 
 import torch
@@ -62,18 +67,11 @@ from plyfile import PlyData
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.coord import (
     CameraConvention,
-    CameraPose,
     ExtrinsicType,
-    colmap_to_opencv_intrinsics,
     load_gaussian_ply,
     log_coordinate_op,
 )
-from src.misc.colmap_utils import (
-    read_extrinsics_binary,
-    read_intrinsics_binary,
-    read_extrinsics_text,
-    read_intrinsics_text,
-)
+from src.trace_cameras import TraceCamera, focal2fov, load_trace_cameras
 
 TRACE_CHANNELS = 20  # compiled into diff_surfel_rasterization CUDA kernel
 ENCODER_CROP_SIZE = 448  # prepare_encoder_image center-crop size
@@ -86,77 +84,6 @@ def _ply_comments_with_convention(plydata: PlyData) -> list[str]:
     if not any(c.startswith("coordinate_convention=") for c in comments):
         comments.append("coordinate_convention=opencv")
     return comments
-
-
-# ---------------------------------------------------------------------------
-# Graphics utilities
-# ---------------------------------------------------------------------------
-
-def focal2fov(focal, pixels):
-    return 2 * math.atan(pixels / (2 * focal))
-
-
-def _w2c_from_colmap_rt(R: np.ndarray, t: np.ndarray) -> np.ndarray:
-    """4x4 world-to-camera from COLMAP-style ``(R, t)`` used by :class:`TraceCamera`.
-
-    ``R`` is ``(qvec2rotmat(qvec)).T`` and ``t`` is ``tvec``, consistent with
-    :meth:`CameraPose.from_qvec_tvec` after decomposing ``pose.w2c`` into these
-    components.
-    """
-    Rt = np.zeros((4, 4), dtype=np.float32)
-    Rt[:3, :3] = R.transpose()
-    Rt[:3, 3] = t
-    Rt[3, 3] = 1.0
-    return Rt
-
-
-def getProjectionMatrix(znear, zfar, fovX, fovY):
-    """OpenGL-ish projection with z_sign=1 (matches diff_surfel_rasterization)."""
-    tanHalfFovY = math.tan(fovY / 2)
-    tanHalfFovX = math.tan(fovX / 2)
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
-    P = torch.zeros(4, 4)
-    P[0, 0] = 2.0 * znear / (right - left)
-    P[1, 1] = 2.0 * znear / (top - bottom)
-    P[0, 2] = (right + left) / (right - left)
-    P[1, 2] = (top + bottom) / (top - bottom)
-    P[3, 2] = 1.0
-    P[2, 2] = zfar / (zfar - znear)
-    P[2, 3] = -(zfar * znear) / (zfar - znear)
-    return P
-
-
-# ---------------------------------------------------------------------------
-# Camera container
-# ---------------------------------------------------------------------------
-
-class TraceCamera:
-    """Stores both COLMAP intrinsics/extrinsics and diff_surfel_rasterization matrices."""
-    def __init__(self, R, T, FoVx, FoVy, image_name, width, height,
-                 image_path, znear=0.01, zfar=1000.0):
-        self.R = R
-        self.T = T
-        self.FoVx = FoVx
-        self.FoVy = FoVy
-        self.image_name = image_name
-        self.image_width = width
-        self.image_height = height
-        self.image_path = image_path
-        self.znear = znear
-        self.zfar = zfar
-
-        W2C = _w2c_from_colmap_rt(R, T)
-        self.viewmatrix = torch.tensor(W2C, device="cuda").T.contiguous()
-        P = getProjectionMatrix(znear, zfar, FoVx, FoVy)
-        self.projmatrix = (
-            self.viewmatrix @ P.T.to("cuda").contiguous()
-        ).contiguous()
-        self.tanfovx = math.tan(FoVx / 2)
-        self.tanfovy = math.tan(FoVy / 2)
-        self.campos = torch.linalg.inv(self.viewmatrix.T)[:3, 3].cuda()
 
 
 def compute_encoder_crop_params(orig_w, orig_h):
@@ -257,102 +184,6 @@ def load_gaussians_from_ply(ply_path):
     n_scales = scales_linear.shape[1]
     print(f"  Gaussians: {means.shape[0]:,}, scales: {n_scales}D (linear space)")
     return means, quats, scales_linear, opacities, colors
-
-
-# ---------------------------------------------------------------------------
-# Load COLMAP cameras
-# ---------------------------------------------------------------------------
-
-def load_colmap_cameras(source_path, images_folder, resolution):
-    """Load cameras from COLMAP ``sparse/`` (binary or text).
-
-    Extrinsics are built with :meth:`CameraPose.from_qvec_tvec` (COLMAP ``qvec``,
-    ``tvec`` → world-to-camera). ``R``, ``T`` stored on :class:`TraceCamera` are
-    the decomposition used by :func:`_w2c_from_colmap_rt`. Intrinsics are
-    converted COLMAP → OpenCV pixel centre via ``colmap_to_opencv_intrinsics``.
-    """
-    scene_dir = os.path.join(source_path, "sparse", "0")
-    if not os.path.isdir(scene_dir):
-        scene_dir = os.path.join(source_path, "sparse")
-    assert os.path.isdir(scene_dir), f"sparse dir not found: {scene_dir}"
-
-    try:
-        cam_extrinsics = read_extrinsics_binary(os.path.join(scene_dir, "images.bin"))
-        cam_intrinsics = read_intrinsics_binary(os.path.join(scene_dir, "cameras.bin"))
-    except Exception:
-        cam_extrinsics = read_extrinsics_text(os.path.join(scene_dir, "images.txt"))
-        cam_intrinsics = read_intrinsics_text(os.path.join(scene_dir, "cameras.txt"))
-
-    images_dir = os.path.join(source_path, images_folder)
-    cameras = []
-    for key in cam_extrinsics:
-        extr = cam_extrinsics[key]
-        intr = cam_intrinsics[extr.camera_id]
-
-        qvec = torch.tensor(extr.qvec, dtype=torch.float64)
-        tvec = torch.tensor(extr.tvec, dtype=torch.float64)
-        pose = CameraPose.from_qvec_tvec(
-            qvec, tvec, CameraConvention.COLMAP, ExtrinsicType.W2C
-        )
-        w2c_np = pose.w2c.detach().cpu().numpy().astype(np.float32)
-        R = w2c_np[:3, :3].T
-        T = w2c_np[:3, 3]
-
-        if intr.model in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL"):
-            fx = fy = intr.params[0]
-            cx, cy = intr.params[1], intr.params[2]
-        elif intr.model in ("PINHOLE", "OPENCV"):
-            fx, fy = intr.params[0], intr.params[1]
-            cx, cy = intr.params[2], intr.params[3]
-        else:
-            raise ValueError(f"Unsupported camera model: {intr.model}")
-
-        # COLMAP stores (cx, cy) with pixel centre (0.5, 0.5); project standard is OpenCV (0, 0).
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
-        K = colmap_to_opencv_intrinsics(K)
-        fx, fy = float(K[0, 0]), float(K[1, 1])
-        cx, cy = float(K[0, 2]), float(K[1, 2])
-
-        orig_w, orig_h = intr.width, intr.height
-        if resolution in (1, 2, 4, 8):
-            new_w, new_h = round(orig_w / resolution), round(orig_h / resolution)
-        elif resolution == -1:
-            if orig_w > 1600:
-                s = orig_w / 1600
-                new_w, new_h = int(orig_w / s), int(orig_h / s)
-            else:
-                new_w, new_h = orig_w, orig_h
-        else:
-            new_w, new_h = orig_w, orig_h
-
-        scale_x = new_w / orig_w
-        scale_y = new_h / orig_h
-        fx_s, fy_s = fx * scale_x, fy * scale_y
-
-        FoVx = focal2fov(fx_s, new_w)
-        FoVy = focal2fov(fy_s, new_h)
-
-        image_path = os.path.join(images_dir, os.path.basename(extr.name))
-
-        cam = TraceCamera(
-            R=R, T=T, FoVx=FoVx, FoVy=FoVy,
-            image_name=os.path.splitext(os.path.basename(image_path))[0],
-            width=new_w, height=new_h, image_path=image_path,
-        )
-        cam.fx_raw, cam.fy_raw = fx, fy
-        cam.cx_raw, cam.cy_raw = cx, cy
-        cam.orig_width, cam.orig_height = orig_w, orig_h
-        cameras.append(cam)
-
-    cameras.sort(key=lambda c: c.image_name)
-    log_coordinate_op(
-        "load_colmap_cameras",
-        CameraConvention.COLMAP,
-        ExtrinsicType.W2C,
-        (len(cameras), 4, 4),
-        context=f"sparse={scene_dir} images_folder={images_folder}",
-    )
-    return cameras
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +664,14 @@ def prepare_gt_idmap_features(cam_list, args, device):
         "masks": masks,
         "id_codec": codec,
     }
+
+
+FEATURE_PREP = {
+    "anysplat": prepare_anysplat_features,
+    "iggt": prepare_iggt_features,
+    "precomputed": prepare_precomputed_features,
+    "gt_idmap": prepare_gt_idmap_features,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1356,8 +1195,13 @@ def render_colored_views(source_path, ply_path, output_dir, args):
         return
 
     print(f"\n[render] Loading cameras from {source_path} ...")
-    cameras = load_colmap_cameras(
-        source_path, args.images_folder, args.render_resolution
+    cameras = load_trace_cameras(
+        args.camera_backend,
+        source_path=os.path.abspath(source_path),
+        images_folder=args.images_folder,
+        resolution=args.render_resolution,
+        transforms_json=args.transforms_json,
+        transforms_axis=args.transforms_axis,
     )
     n_avail = min(n_views, len(cameras))
     random.seed(args.seed)
@@ -1455,11 +1299,33 @@ def _validate_source_args(feature_source, args, parser):
             )
 
 
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
+def _strip_trace_config_from_argv(argv):
+    """Remove ``--trace_config PATH`` pairs and return JSON defaults dict."""
+    cfg = {}
+    out = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--trace_config" and i + 1 < len(argv):
+            with open(argv[i + 1], encoding="utf-8") as f:
+                cfg = json.load(f)
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    return out, cfg
 
-def main():
+
+def _filter_trace_config_defaults(parser: argparse.ArgumentParser, cfg: dict) -> dict:
+    """Only pass keys that match argparse destinations."""
+    dests = {
+        a.dest
+        for a in parser._actions
+        if getattr(a, "dest", None) not in (None, argparse.SUPPRESS)
+    }
+    return {k: v for k, v in cfg.items() if k in dests}
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Trace 2D feature maps onto pre-trained 2DGS Gaussians"
     )
@@ -1469,6 +1335,25 @@ def main():
     g_scene.add_argument("--images_folder", default="images")
     g_scene.add_argument("--resolution", "-r", type=int, default=1)
     g_scene.add_argument("--output_dir", "-o", default="trace_output")
+    g_scene.add_argument(
+        "--camera_backend",
+        default="colmap",
+        choices=["colmap", "nerf_transforms"],
+        help="Camera source: COLMAP sparse/ or NeRF-style transforms JSON",
+    )
+    g_scene.add_argument(
+        "--transforms_json",
+        default=None,
+        help="Path to transforms_train.json (nerf_transforms; "
+             "default: transforms_train.json then transforms.json under source_path)",
+    )
+    g_scene.add_argument(
+        "--transforms_axis",
+        default="nerfstudio",
+        choices=["nerfstudio", "opencv"],
+        help="Meaning of transform_matrix rows/cols for nerf_transforms "
+             "(see src.trace_cameras.load_transforms_json)",
+    )
 
     g_feat = parser.add_argument_group("Feature source")
     g_feat.add_argument(
@@ -1561,7 +1446,14 @@ def main():
              "(id==0 -> instance_00000.ply)",
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    argv_rest, cfg_file = _strip_trace_config_from_argv(sys.argv[1:])
+    parser = build_arg_parser()
+    parser.set_defaults(**_filter_trace_config_defaults(parser, cfg_file))
+    args = parser.parse_args(argv_rest)
 
     if args.verbose:
         _coord_log = logging.getLogger("coord")
@@ -1622,6 +1514,10 @@ def main():
                 print("[render] Skipped: --source_path required for "
                       "render_views")
             else:
+                for attr in ("camera_backend", "transforms_json",
+                             "transforms_axis"):
+                    if attr in ckpt and ckpt[attr] is not None:
+                        setattr(args, attr, ckpt[attr])
                 render_colored_views(
                     os.path.abspath(source_path), ply_path, output_dir, args
                 )
@@ -1649,9 +1545,15 @@ def main():
     N = means.shape[0]
 
     # ---- 2. Load cameras ----
-    print("Loading COLMAP cameras ...")
-    cameras = load_colmap_cameras(source_path, args.images_folder,
-                                  args.resolution)
+    print(f"Loading cameras ({args.camera_backend}) ...")
+    cameras = load_trace_cameras(
+        args.camera_backend,
+        source_path=source_path,
+        images_folder=args.images_folder,
+        resolution=args.resolution,
+        transforms_json=args.transforms_json,
+        transforms_axis=args.transforms_axis,
+    )
     print(f"  {len(cameras)} cameras loaded")
 
     cam_list = cameras
@@ -1660,16 +1562,10 @@ def main():
         print(f"  Using first {len(cam_list)} views")
 
     # ---- 3. Prepare feature source ----
-    if feature_source == "anysplat":
-        prep = prepare_anysplat_features(cam_list, args, device)
-    elif feature_source == "iggt":
-        prep = prepare_iggt_features(cam_list, args, device)
-    elif feature_source == "precomputed":
-        prep = prepare_precomputed_features(cam_list, args, device)
-    elif feature_source == "gt_idmap":
-        prep = prepare_gt_idmap_features(cam_list, args, device)
-    else:
+    prep_fn = FEATURE_PREP.get(feature_source)
+    if prep_fn is None:
         parser.error(f"Unknown feature source: {feature_source}")
+    prep = prep_fn(cam_list, args, device)
 
     feat_maps = prep["feat_maps"]
     trace_cams = prep["trace_cams"]
@@ -1775,6 +1671,9 @@ def main():
         "ply_path": ply_path,
         "source_path": source_path,
         "feature_source": feature_source,
+        "camera_backend": args.camera_backend,
+        "transforms_json": args.transforms_json,
+        "transforms_axis": args.transforms_axis,
     }
     if gaussian_ids is not None:
         save_dict["gaussian_ids"] = gaussian_ids.cpu()
