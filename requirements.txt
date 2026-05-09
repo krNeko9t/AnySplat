@@ -36,3 +36,7 @@ einops
 safetensors
 # git+https://github.com/facebookresearch/pytorch3d.git
 # https://github.com/nerfstudio-project/gsplat/releases/download/v1.4.0/gsplat-1.4.0%2Bpt22cu121-cp310-cp310-linux_x86_64.whl
+
+# for 3d knn
+torch_geometric
+torch_cluster==1.6.3+pt24cu124 # python -m pip install torch_cluster -f https://data.pyg.org/whl/torch-2.4.1+cu124.html

@@ -2,9 +2,13 @@
 IGGT Multi-View Feature Clustering ID Map
 ==========================================
 
-Uses IGGTModel (lightweight, no detectron2/torch_geometric deps) to
-extract per-pixel part features from multi-view images, then performs
-cross-view HDBSCAN clustering to produce consistent ID maps.
+Uses IGGTModel (integrated in-repo, no Detectron2) to extract per-pixel part
+features from multi-view images, then cross-view HDBSCAN clustering for ID maps.
+
+Dependencies:
+    - Inference: torchvision, ``src.model.arch.iggt``.
+    - Optional 3D KNN smoothing (--knn_k > 0): ``torch_geometric`` + ``torch_scatter``
+      (recommended on CUDA). Falls back to SciPy ``cKDTree`` if those imports fail.
 
 Usage:
     python iggt_idmap.py \
@@ -115,16 +119,66 @@ def run_inference(model, image_paths, image_size, device="cuda", batch_size=4):
         pts3d = enc_out.depth_dict["world_points"][0].float()  # [V_batch, H, W, 3]
         pts3d = pts3d.permute(0, 3, 1, 2)  # [V_batch, 3, H, W]
         for vi in range(part_feat.shape[0]):
-            all_feats.append(part_feat[vi].cpu())
-            all_pts3d.append(pts3d[vi].cpu())
+            all_feats.append(part_feat[vi])
+            all_pts3d.append(pts3d[vi])
         logger.info("  Processed views %d-%d / %d", start, end, len(image_paths))
 
     return torch.stack(all_feats, dim=0), torch.stack(all_pts3d, dim=0)
 
 
 # ---------------------------------------------------------------------------
-# 3D KNN feature smoothing (lightweight scipy replacement for torch_geometric)
+# 3D KNN feature smoothing (PyG + torch_scatter on GPU/CPU; SciPy fallback)
 # ---------------------------------------------------------------------------
+
+def _knn_smooth_features_scipy(
+    pts3d: torch.Tensor,
+    feat: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    from scipy.spatial import cKDTree
+
+    dev, dtype = feat.device, feat.dtype
+    V, D, H, W = feat.shape
+    N = V * H * W
+
+    points_np = pts3d.detach().cpu().permute(0, 2, 3, 1).reshape(N, 3).numpy()
+    feat_np = feat.detach().cpu().permute(0, 2, 3, 1).reshape(N, D).numpy()
+
+    logger.info("Building cKDTree for %d points (k=%d) ...", N, k)
+    tree = cKDTree(points_np)
+    _, indices = tree.query(points_np, k=k + 1)
+    indices = indices[:, 1:]
+
+    logger.info("Averaging neighbour features (CPU scipy) ...")
+    smoothed = feat_np[indices].mean(axis=1)
+
+    out = torch.from_numpy(smoothed).to(dtype=dtype, device=dev).reshape(V, H, W, D).permute(0, 3, 1, 2)
+    return out
+
+
+def _knn_smooth_features_pyg(
+    pts3d: torch.Tensor,
+    feat: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    from torch_geometric.nn import knn_graph
+    from torch_scatter import scatter_mean
+
+    V, D, H, W = feat.shape
+    device = pts3d.device
+    N = V * H * W
+
+    points_flat = pts3d.permute(0, 2, 3, 1).reshape(N, 3).float().contiguous()
+    features_flat = feat.permute(0, 2, 3, 1).reshape(N, D).float().contiguous()
+
+    logger.info("PyG knn_graph for %d points (k=%d) on %s ...", N, k, device)
+    edge_index = knn_graph(points_flat, k=k, batch=None, loop=False)
+    source, center = edge_index
+    neighbor_feat = features_flat[source]
+    smoothed_flat = scatter_mean(neighbor_feat, center, dim=0, dim_size=N)
+
+    return smoothed_flat.view(V, H, W, D).permute(0, 3, 1, 2).to(dtype=feat.dtype)
+
 
 def knn_smooth_features(
     pts3d: torch.Tensor,
@@ -133,8 +187,9 @@ def knn_smooth_features(
 ) -> torch.Tensor:
     """Smooth instance features by averaging k nearest neighbours in 3D space.
 
-    Replaces ``knn_avg_features_pyg`` from the original IGGT pipeline without
-    requiring torch_geometric / torch_scatter.
+    Global kNN over all views and pixels (single point cloud of size V*H*W).
+    Uses ``knn_graph`` + ``scatter_mean`` when PyG/torch_scatter are available;
+    otherwise falls back to SciPy ``cKDTree`` on CPU.
 
     Args:
         pts3d: [V, 3, H, W] world coordinates.
@@ -142,30 +197,20 @@ def knn_smooth_features(
         k:     Number of 3D nearest neighbours.
 
     Returns:
-        Smoothed features [V, D, H, W].
+        Smoothed features [V, D, H, W] on the same device as *feat*.
     """
-    from scipy.spatial import cKDTree
-
-    V, D, H, W = feat.shape
-    N = V * H * W
-
-    points_np = pts3d.permute(0, 2, 3, 1).reshape(N, 3).numpy()   # (N, 3)
-    feat_np = feat.permute(0, 2, 3, 1).reshape(N, D).numpy()       # (N, D)
-
-    logger.info("Building cKDTree for %d points (k=%d) ...", N, k)
-    tree = cKDTree(points_np)
-    _, indices = tree.query(points_np, k=k + 1)  # +1 because self is included
-    indices = indices[:, 1:]                       # exclude self
-
-    logger.info("Averaging neighbour features ...")
-    smoothed = feat_np[indices].mean(axis=1)       # (N, D)
-
-    smoothed_t = torch.from_numpy(smoothed).reshape(V, H, W, D).permute(0, 3, 1, 2)
-    return smoothed_t
+    try:
+        return _knn_smooth_features_pyg(pts3d, feat, k)
+    except ImportError as err:
+        logger.warning("torch_geometric / torch_scatter unavailable (%s); using scipy cKDTree", err)
+        return _knn_smooth_features_scipy(pts3d, feat, k)
+    except Exception as err:
+        logger.warning("PyG KNN failed (%s); falling back to scipy cKDTree", err)
+        return _knn_smooth_features_scipy(pts3d, feat, k)
 
 
 # ---------------------------------------------------------------------------
-# Clustering (HDBSCAN, no torch_geometric / torch_scatter)
+# Clustering (HDBSCAN on CPU)
 # ---------------------------------------------------------------------------
 
 def cluster_features_hdbscan(
@@ -189,7 +234,9 @@ def cluster_features_hdbscan(
     from src.instseg.hdbscan_assign import hdbscan_assign
 
     V, D, H, W = feat_vdhw.shape
-    all_pixels = feat_vdhw.permute(0, 2, 3, 1).contiguous().reshape(-1, D).float().numpy()
+    all_pixels = (
+        feat_vdhw.detach().cpu().permute(0, 2, 3, 1).contiguous().reshape(-1, D).float().numpy()
+    )
 
     labels = hdbscan_assign(
         all_pixels,
@@ -237,7 +284,7 @@ def pca_visualize(feat_vdhw: torch.Tensor, low_p=0.02, high_p=0.98) -> np.ndarra
             proj[:, i] = 0.5
     proj = proj.clamp(0, 1)
 
-    return (proj.view(V, H, W, 3).numpy() * 255).astype(np.uint8)
+    return (proj.view(V, H, W, 3).detach().cpu().numpy() * 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +379,8 @@ def main():
                                 device=args.device, batch_size=args.batch_size)
     # feat: [V, D, H, W], pts3d: [V, 3, H, W]
     del model
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # L2 normalise part features
     V, D, H, W = feat.shape
