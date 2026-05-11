@@ -1,6 +1,7 @@
 {
   "source_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia",
   "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia/point_cloud.ply",
+  "trace_backend": "3dgs",
   "camera_backend": "nerf_transforms",
   "transforms_json": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia/transforms_train.json",
   "feature_source": "iggt",
