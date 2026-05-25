@@ -10,11 +10,10 @@
   "postprocess_seg3d_split": true,
   "trace_crop_aligned": false,
   "resolution": 1,
-  "hdbscan_min_cluster_size": 700,
-  "hdbscan_min_samples": 50,
-  "postprocess_knn_k": 20,
+  "hdbscan_min_cluster_size": 1000,
+  "hdbscan_min_samples": 100,
+  "postprocess_knn_k": 4,
   "encoder_batch_size": 48,
   "render_views": 4,
-  "k": 8,
-  "output_dir": "trace_output/alocasia_iggt_no_crop"
+  "output_dir": "trace_output/alocasia_iggt_1k_100_4"
 }

@@ -203,5 +203,5 @@ deprecated_launch.json
 zipnerf/
 3dovs
 standalone_trace.py
-trace_output_*
-trace_output/
+trace_output*/
+trace_render_*/

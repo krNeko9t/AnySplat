@@ -6,9 +6,8 @@ Uses ``diff_surfel_rasterization.trace()`` for **2DGS** (2 scale dims) or
 ``diff_gaussian_rasterization.trace()`` for **3DGS** (3 scale dims); choose
 via ``--trace_backend`` or leave ``auto`` to infer from the PLY.
 
-Both CUDA builds must define the same ``TRACE_CHANNELS`` (see each extension's
-``cuda_rasterizer/config.h``) as the ``TRACE_CHANNELS`` constant in this script.
-
+Both CUDA builds must define the same ``TRACE_CHANNELS`` as
+``src.trace_render.trace_rasterize.TRACE_CHANNELS`` (see cuda_rasterizer/config.h).
 Feature sources (--feature_source):
   anysplat    : Run AnySplat encoder with instance head (online inference).
   iggt        : Run IGGT model for part features (online inference).
@@ -70,56 +69,17 @@ from tqdm import tqdm
 from plyfile import PlyData
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.coord import (
-    CameraConvention,
-    ExtrinsicType,
-    load_gaussian_ply,
-    log_coordinate_op,
-)
 from src.trace_cameras import TraceCamera, focal2fov, load_trace_cameras
+from src.trace_render.trace_rasterize import (
+    TRACE_CHANNELS,
+    effective_trace_backend,
+    load_gaussians_from_ply,
+    resolve_trace_backend,
+    trace_single_view,
+)
 
-# Must match TRACE_CHANNELS in both diff_surfel_rasterization and
-# diff_gaussian_rasterization cuda_rasterizer/config.h (rebuild after changing).
-TRACE_CHANNELS = 20
 ENCODER_CROP_SIZE = 448  # prepare_encoder_image center-crop size
 IGGT_IMAGE_SIZE = (504, 336)  # (W, H) default resize target for IGGT
-
-
-def resolve_trace_backend(requested: str, n_scales: int) -> str:
-    """Return ``surfel`` or ``3dgs`` from CLI *requested* and PLY scale count."""
-    if requested == "auto":
-        if n_scales == 2:
-            return "surfel"
-        if n_scales == 3:
-            return "3dgs"
-        raise ValueError(
-            "trace_backend=auto requires PLY with 2 (2DGS) or 3 (3DGS) scale "
-            f"attributes; this file has {n_scales}. Set --trace_backend explicitly."
-        )
-    if requested == "surfel" and n_scales != 2:
-        raise ValueError(
-            "trace_backend=surfel expects 2DGS PLY (2 scale_*) entries; "
-            f"got {n_scales}."
-        )
-    if requested == "3dgs" and n_scales != 3:
-        raise ValueError(
-            "trace_backend=3dgs expects 3DGS PLY (3 scale_*) entries; "
-            f"got {n_scales}."
-        )
-    return requested
-
-
-def effective_trace_backend(
-    requested: str,
-    n_scales: int,
-    ckpt_backend: str | None,
-) -> str:
-    """Resolve backend for --load_traced rendering: explicit CLI overrides ckpt."""
-    if requested != "auto":
-        return resolve_trace_backend(requested, n_scales)
-    if ckpt_backend in ("surfel", "3dgs"):
-        return ckpt_backend
-    return resolve_trace_backend("auto", n_scales)
 
 
 def _ply_comments_with_convention(plydata: PlyData) -> list[str]:
@@ -196,169 +156,6 @@ def create_virtual_resize_camera(full_cam, orig_w, orig_h, fx, fy, cx, cy,
         width=target_w, height=target_h,
         image_path=full_cam.image_path,
     )
-
-
-# ---------------------------------------------------------------------------
-# Load Gaussians from PLY (trace-ready: linear scales, sigmoid opacity)
-# ---------------------------------------------------------------------------
-
-def load_gaussians_from_ply(ply_path):
-    """Load Gaussian parameters for trace via ``src.coord.load_gaussian_ply``.
-
-    Returns scales with their original dimensionality (2 for 2DGS, 3 for 3DGS)
-    in linear space, normalized quaternions, and RGB from SH DC for trace.
-    """
-    print(f"Loading PLY: {ply_path}")
-    data = load_gaussian_ply(ply_path, device="cuda")
-    means = data.means
-    quats = data.rotations
-    scales_linear = data.scales
-    opacities = data.opacities.unsqueeze(-1)
-    colors = data.colors_rgb
-    conv = data.convention if data.convention is not None else CameraConvention.OPENCV
-    if data.convention is not None:
-        print(f"  coordinate_convention (header): {data.convention.value}")
-    log_coordinate_op(
-        "load_gaussian_ply",
-        conv,
-        ExtrinsicType.C2W,
-        tuple(means.shape),
-        context="Gaussian means (world); PLY header convention",
-    )
-    n_scales = scales_linear.shape[1]
-    print(f"  Gaussians: {means.shape[0]:,}, scales: {n_scales}D (linear space)")
-    return means, quats, scales_linear, opacities, colors
-
-
-# ---------------------------------------------------------------------------
-# Trace a single view
-# ---------------------------------------------------------------------------
-
-def _trace_single_view_surfel(
-    means, quats, scales, opacities, colors,
-    img_sem, img_mask, cam, bg_color,
-):
-    """2DGS: ``diff_surfel_rasterization.trace`` → count tensor ``num_ray``."""
-    try:
-        from diff_surfel_rasterization import (
-            GaussianRasterizationSettings, GaussianRasterizer,
-        )
-    except ImportError as e:
-        raise RuntimeError(
-            "trace_backend=surfel requires diff_surfel_rasterization. "
-            "Original error: " + str(e)
-        ) from e
-
-    settings = GaussianRasterizationSettings(
-        image_height=int(cam.image_height),
-        image_width=int(cam.image_width),
-        tanfovx=float(cam.tanfovx),
-        tanfovy=float(cam.tanfovy),
-        bg=bg_color,
-        scale_modifier=1.0,
-        viewmatrix=cam.viewmatrix,
-        projmatrix=cam.projmatrix,
-        sh_degree=0,
-        campos=cam.campos,
-        prefiltered=False,
-        debug=False,
-    )
-    rasterizer = GaussianRasterizer(raster_settings=settings)
-
-    means2D = torch.zeros_like(means, requires_grad=False)
-
-    with torch.no_grad():
-        out_color, _gau_depth, gau_sem, num_ray, radii = rasterizer.trace(
-            means3D=means,
-            means2D=means2D,
-            shs=None,
-            colors_precomp=colors,
-            img_sem=img_sem,
-            img_mask=img_mask,
-            opacities=opacities,
-            scales=scales,
-            rotations=quats,
-            cov3D_precomp=None,
-        )
-
-    return gau_sem, num_ray, radii, out_color
-
-
-def _trace_single_view_3dgs(
-    means, quats, scales, opacities, colors,
-    img_sem, img_mask, cam, bg_color,
-):
-    """3DGS: ``diff_gaussian_rasterization.trace`` → count tensor ``num_gsem``."""
-    try:
-        from diff_gaussian_rasterization import (
-            GaussianRasterizationSettings, GaussianRasterizer,
-        )
-    except ImportError as e:
-        raise RuntimeError(
-            "trace_backend=3dgs requires diff_gaussian_rasterization "
-            "(install the CUDA extension). Original error: " + str(e)
-        ) from e
-
-    settings = GaussianRasterizationSettings(
-        image_height=int(cam.image_height),
-        image_width=int(cam.image_width),
-        tanfovx=float(cam.tanfovx),
-        tanfovy=float(cam.tanfovy),
-        bg=bg_color,
-        scale_modifier=1.0,
-        viewmatrix=cam.viewmatrix,
-        projmatrix=cam.projmatrix,
-        sh_degree=0,
-        campos=cam.campos,
-        prefiltered=False,
-        debug=False,
-    )
-    rasterizer = GaussianRasterizer(raster_settings=settings)
-
-    means2D = torch.zeros_like(means, requires_grad=False)
-
-    with torch.no_grad():
-        out_color, _gau_depth, gau_sem, num_gsem, radii = rasterizer.trace(
-            means3D=means,
-            means2D=means2D,
-            shs=None,
-            colors_precomp=colors,
-            img_sem=img_sem,
-            img_mask=img_mask,
-            opacities=opacities,
-            scales=scales,
-            rotations=quats,
-            cov3D_precomp=None,
-        )
-
-    return gau_sem, num_gsem, radii, out_color
-
-
-def trace_single_view(
-    means, quats, scales, opacities, colors,
-    img_sem, img_mask, cam, bg_color,
-    trace_backend: str,
-):
-    """
-    Run rasterizer ``trace`` for one camera view.
-
-    scales: (N, 2) for 2DGS or (N, 3) for 3DGS, **linear** space.
-    quats: (N, 4) normalized wxyz quaternions.
-    img_sem: (H, W, TRACE_CHANNELS) float32 CUDA; img_mask: (H, W) int32 CUDA.
-    Returns (gau_sem, count_accum, radii, out_color); *count_accum* is ``num_ray``
-    (surfel) or ``num_gsem`` (3dgs), both used as the per-Gaussian normalizer.
-    """
-    if trace_backend == "surfel":
-        return _trace_single_view_surfel(
-            means, quats, scales, opacities, colors,
-            img_sem, img_mask, cam, bg_color,
-        )
-    if trace_backend == "3dgs":
-        return _trace_single_view_3dgs(
-            means, quats, scales, opacities, colors,
-            img_sem, img_mask, cam, bg_color,
-        )
-    raise ValueError(f"Unknown trace_backend: {trace_backend!r}")
 
 
 # ---------------------------------------------------------------------------

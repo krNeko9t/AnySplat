@@ -1,0 +1,15 @@
+{
+  "source_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia",
+  "camera_backend": "nerf_transforms",
+  "transforms_json": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/datas/physics_dreamer/alocasia/transforms_train.json",
+  "transforms_axis": "nerfstudio",
+  "images_folder": "images",
+  "splits_dir": "trace_output/alocasia_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50",
+  "out_root": "trace_render_out/alameda",
+  "render_resolution": 1,
+  "seg3d_bg": "black",
+  "trace_backend": "3dgs",
+  "seed": 42,
+  "max_views": 4,
+  "skip_existing": false
+}

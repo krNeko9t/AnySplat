@@ -1,0 +1,16 @@
+{
+  "_comment": "Fill absolute paths after trace postprocess writes seg3d_split/*/cluster_*.ply",
+  "source_path": "/path/to/colmap_or_nerf_scene_root",
+  "camera_backend": "nerf_transforms",
+  "transforms_json": "/path/to/transforms_train.json",
+  "transforms_axis": "nerfstudio",
+  "images_folder": "images",
+  "splits_dir": "/path/to/trace_output/your_scene/postprocess/seg3d_split/hdbscan_mcs700_ms50",
+  "out_root": "/path/to/vlm_instance_png",
+  "render_resolution": 1,
+  "seg3d_bg": "black",
+  "trace_backend": "auto",
+  "seed": 0,
+  "max_views": 0,
+  "skip_existing": false
+}
