@@ -1,9 +1,5 @@
 """IGGT encoder -- VGGT backbone + SamProjector + PartHead for instance features.
 
-Mirrors the IGGT architecture from IGGT/iggt/models/vggt.py (the ``IGGT``
-class) but uses only local modules so there is no dependency on the IGGT/
-subdirectory.
-
 Outputs ``EncoderOutput`` with:
   - ``gaussians = None``  (no Gaussian head)
   - ``instance_feat_map``  [B, V, D, H, W]
