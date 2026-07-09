@@ -1,7 +1,6 @@
-"""Instance segmentation training utilities (data types + dataset + datamodule).
+"""Instance embedding post-processing utilities.
 
-This package exists because the upstream `src/dataset/` tree is ignored by Cursor in
-this workspace (see `.cursorignore`). We keep all instance-seg related data plumbing
-here so it can be modified and extended.
+Training data plumbing lives in :mod:`src.dataset`.  This package intentionally
+keeps only shared inference/trace helpers such as clustering and embedding export.
 """
 

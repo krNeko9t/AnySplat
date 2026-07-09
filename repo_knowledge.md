@@ -80,7 +80,7 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 
 ## 7. 已知的坑 / AI 常犯错误清单
 
-1. **`src/instseg/` 里有一套旧的 `dataset_custom.py` + `data_module.py`，是死代码**（无任何外部 import）。训练用的是 `src/dataset/dataset_custom.py` + `src/dataset/data_module.py`。改数据集时别改错文件。`src/instseg/` 目前的活跃部分只有 kmeans / hdbscan_assign / export 等被脚本 import 的工具函数。
+1. **训练数据管线统一在 `src/dataset/`**。`src/instseg/` 只保留推理/trace 后处理工具（kmeans / hdbscan_assign / export 等），不要在这里新增 dataset/datamodule 副本。
 2. **两套 heads 目录**：`encoder/heads/` 是 AnySplat 原有 GS head，`encoder/iggt_heads/` 是 IGGT 抠来的 instance head。新分割/属性 head 放 `iggt_heads/` 或新建目录，别混进 `heads/`。
 3. `EncoderIGGT.forward` 里对 `instance_feat_map` 有**硬编码 L2 normalize**（`iggt.py` 有注释 "hard code normalize for iggt"）；而 disc loss 又"没按原文做 L2 归一化"——改归一化策略时两处要一起考虑，别重复归一化。
 4. `EncoderAnySplat` 的 instance head 由 `instance_feat_dim` 控制（0 = 禁用，`config/model/encoder/anysplat.yaml` 默认 0）；IGGT 默认 8。同一个 PartHead 被两个 encoder 共享——这正是"同一 head 换 backbone"的实验入口，**改 PartHead 接口时两个 encoder 都要过一遍**。
