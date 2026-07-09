@@ -880,8 +880,16 @@ def _postprocess_algo_tag(args, algo: str) -> str:
     return algo
 
 
-def _run_gt_instance_split(ply_path: str, gaussian_ids, post_dir: str) -> None:
-    """Export one PLY per GT instance id (including id==0 as instance_00000.ply)."""
+def _run_gt_instance_split(
+    ply_path: str,
+    gaussian_ids,
+    post_dir: str,
+    ignore_id: int = 0,
+) -> None:
+    """Export one PLY per GT instance id.
+
+    By convention, ID 0 is background/ignore and is not exported.
+    """
     from plyfile import PlyData
 
     plydata = PlyData.read(ply_path)
@@ -900,6 +908,8 @@ def _run_gt_instance_split(ply_path: str, gaussian_ids, post_dir: str) -> None:
 
     n_saved = 0
     for iid in np.unique(ids_np):
+        if int(iid) == int(ignore_id):
+            continue
         mask = ids_np == iid
         path = os.path.join(split_dir, f"instance_{int(iid):05d}.ply")
         if write_ply_vertex_rows(vdata, mask, path, comments=comments):
@@ -907,7 +917,7 @@ def _run_gt_instance_split(ply_path: str, gaussian_ids, post_dir: str) -> None:
 
     print(
         f"[gt_split] Saved {n_saved} instance PLYs "
-        f"(ids 0..{int(ids_np.max())}) -> {split_dir}"
+        f"(ignore_id={ignore_id}, ids 0..{int(ids_np.max())}) -> {split_dir}"
     )
 
 
@@ -1370,7 +1380,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--postprocess_gt_split", action="store_true", default=False,
         help="When gaussian_ids exist (gt_idmap or .pt with gaussian_ids), "
              "export instance_XXXXX.ply per id under postprocess/gt_split/ "
-             "(id==0 -> instance_00000.ply)",
+             "(id==0 is background/ignore and is skipped)",
     )
 
     return parser

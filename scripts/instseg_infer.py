@@ -523,6 +523,7 @@ def _cluster_2d(
     from src.visualization.instance_viz import cluster_instance_embeddings
 
     if algo == "kmeans":
+        # Helper returns 0 for invalid/background and 1..K for valid clusters.
         return cluster_instance_embeddings(
             feat, valid, k=cfg.k, max_points=cfg.max_points,
             num_iters=cfg.kmeans_iters, seed=cfg.seed,

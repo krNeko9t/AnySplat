@@ -477,7 +477,8 @@ def cluster_features_hdbscan(
         max_cluster_points: Max pixels fed into HDBSCAN (default 200k).
 
     Returns:
-        id_maps: [V, H, W] int32, contiguous IDs starting from 0.
+        id_maps: [V, H, W] int32. Label 0 is reserved for background/ignore;
+        clustered pixels use contiguous IDs starting from 1.
     """
     from src.instseg.hdbscan_assign import hdbscan_assign
 
@@ -494,7 +495,9 @@ def cluster_features_hdbscan(
         max_points=max_cluster_points,
         rng_seed=0,
     )
-    return labels.reshape(V, H, W)
+    # hdbscan_assign follows HDBSCAN/sklearn cluster IDs (0..K-1 after
+    # denoising/relabeling). Reserve 0 for background/ignore at this boundary.
+    return (labels + 1).reshape(V, H, W)
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +545,8 @@ def pca_visualize(feat_vdhw: torch.Tensor, low_p=0.02, high_p=0.98) -> np.ndarra
 def make_color_lut(num_colors: int, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     lut = rng.integers(32, 255, size=(num_colors, 3), dtype=np.uint8)
+    if num_colors > 0:
+        lut[0] = 0
     return lut
 
 

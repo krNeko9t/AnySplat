@@ -134,7 +134,8 @@ def cluster_instance_embeddings(
         seed: Random seed.
 
     Returns:
-        [V, H, W] int32 cluster labels (0 = invalid/unassigned).
+        [V, H, W] int32 cluster labels.
+        Label 0 is reserved for invalid/background; valid clusters are 1..K.
     """
     from src.instseg.kmeans import kmeans_torch
 
@@ -157,8 +158,9 @@ def cluster_instance_embeddings(
     feat_n = F.normalize(feat, p=2, dim=-1, eps=1e-8)
     dot = feat_n @ centers.T
     pred = (2.0 - 2.0 * dot).argmin(dim=1).to(torch.int64)
-    pred[~valid] = 0
-    return pred.view(V, H, W).cpu().numpy().astype(np.int32)
+    labels = torch.zeros(V * H * W, dtype=torch.int32, device=feat.device)
+    labels[valid] = (pred[valid] + 1).to(torch.int32)
+    return labels.view(V, H, W).cpu().numpy().astype(np.int32)
 
 
 def pca_visualize_embeddings(
