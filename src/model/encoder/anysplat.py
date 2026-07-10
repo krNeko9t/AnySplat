@@ -42,12 +42,10 @@ from .common.gaussian_adapter import (
     UnifiedGaussianAdapter,
 )
 from .encoder import Encoder, EncoderOutput
-from .heads import head_factory
 from .visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
 
 root_path = os.path.abspath(".")
 sys.path.append(root_path)
-from src.model.encoder.heads.head_modules import TransformerBlockSelfAttn
 from src.model.encoder.vggt.models.vggt import VGGT
 from src.model.encoder.iggt_heads import PartHead, SamProjector
 
