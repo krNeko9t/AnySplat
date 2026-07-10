@@ -1,11 +1,13 @@
 # @package _global_
 # IGGT physics property classification on a custom dataset.
-# Usage: python src/main.py experiment=phys_iggt_custom
+# Usage: python src/main.py +experiment=phys_iggt_custom
+#
+# Scheme = physics_parser + phys head cfg + phys loss yaml (this file).
 
 defaults:
   - /dataset@_group_.custom: custom
   - override /model/encoder: iggt
-  - override /loss: [disc, phys]
+  - override /loss: [phys]
 
 wandb:
   name: phys_iggt_custom
@@ -24,6 +26,9 @@ model:
     intermediate_layer_idx: [4, 11, 17, 23]
     phys_head_enabled: true
     phys_feat_dim: 32
+    phys_num_classes: 4
+    phys_classifier_hidden: 64
+    phys_class_names: [static, rigid, soft, unknown]
     phys_use_point_feat: true
     phys_use_window_cross_attn: true
   decoder: null
@@ -36,7 +41,7 @@ optimizer:
   param_groups:
     - keywords: [part_adaptor, part_head]
       lr_multiplier: 0.0
-    - keywords: [physics_head]
+    - keywords: [physics_head, physics_classifier]
       lr_multiplier: 1.0
     - keywords: [point_head, depth_head]
       lr_multiplier: 0.1
@@ -58,20 +63,11 @@ hydra:
     dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
 
 loss:
-  disc:
-    weight: 1.0
-    delta_v: 0.5
-    delta_d: 1.0
-    ignore_id: 0
   phys:
     weight: 1.0
     num_classes: 4
     ignore_id: 0
     focal_gamma: 2.0
-    phys_feat_dim: 32
-    classifier_hidden: 64
-    use_inst_feat: false
-    cross_view_pool: true
     dense_aux_weight: 0.0
 
 dataset:
@@ -79,3 +75,4 @@ dataset:
     root: 3dovs/bench
     manifest_path: manifest.jsonl
     original_image_shape: [756, 1008]
+    physics_parser: 3dovs_json

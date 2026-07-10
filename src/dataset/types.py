@@ -31,6 +31,8 @@ class BatchedExample(TypedDict, total=False):
     target: BatchedViews
     context: BatchedViews
     scene: list[str]
+    # Scene-level physics supervision (list length = batch). See src/dataset/physics/.
+    physics_target: list  # list[PhysicsTarget]; kept untyped here to avoid circular imports
 
 
 class UnbatchedViews(TypedDict, total=False):

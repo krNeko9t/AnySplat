@@ -30,3 +30,7 @@ depth_invalid_value: 1.0e9
 near: 0.01
 far: 100.0
 
+# Physics GT parser (null = no physics supervision).
+# Registry: src/dataset/physics/parsers.py  (e.g. 3dovs_json)
+physics_parser: null
+

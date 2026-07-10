@@ -92,12 +92,16 @@ class IGGTModel(nn.Module):
         context_image: torch.Tensor,
         global_step: int = 0,
         visualization_dump: Optional[dict] = None,
+        instance_mask: torch.Tensor | None = None,
+        valid_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[EncoderOutput, None]:
         encoder_output = self.encoder(
             context_image,
             global_step,
             visualization_dump=visualization_dump,
+            instance_mask=instance_mask,
+            valid_mask=valid_mask,
         )
         return encoder_output, None
 

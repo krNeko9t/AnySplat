@@ -1,10 +1,8 @@
 """PhysicsHead -- dense per-pixel physics feature head.
 
-Mirrors the PartHead architecture (DPT-style multi-scale fusion with optional
-cross-attention on point-head intermediate features) but outputs a dense
-physics feature map instead of instance embeddings.  The per-instance pooling
-and classification happen in the loss module so that GT masks are not needed
-at the encoder level.
+Mirrors PartHead (DPT multi-scale fusion + optional point-head cross-attn).
+Outputs a dense feature map only. Instance pooling + classification live in
+PhysicsClassifier (same package); loss formulas live in src/loss/loss_phys.py.
 
 Output shape: [B, S, phys_feat_dim, H, W]
 """

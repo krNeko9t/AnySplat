@@ -2,6 +2,7 @@
 
 > 本文档描述仓库的**真实现状**（探索版，非定稿），供 AI 开发时对齐认知。
 > 与 `memory.md` 配合阅读：memory.md 记录项目事实，本文档记录架构约定与"坑"。
+> **新增能力的分层写法**以 [`layered_scheme.md`](layered_scheme.md) 为准（本文件偏现状与坑）。
 
 ## 1. 这个仓库是什么
 
@@ -9,6 +10,7 @@
 - 后来发现 AnySplat backbone 效果不佳，而 **IGGT**（输入输出相似的工作）更合适，于是把 IGGT 的模型代码**抠进本仓库复用**，共享已写好的数据集载入、训练框架、推理脚本。
 - 所以本仓库是**多个仓库的缝合体**：AnySplat 框架（Hydra + Lightning + 数据管线）+ VGGT backbone + IGGT 的 instance head（SamProjector + PartHead）+ 自研的 PhysicsHead、trace 管线、坐标工具。
 - **这是探索版本，不是定稿**。owner 要频繁尝试：不同 backbone × 不同 head × 不同 loss 的组合。**层与层的隔离是第一设计原则**——改一个小模块不应牵动其他层。
+- **分层方案契约（新增能力默认遵守）**：见 [`layered_scheme.md`](layered_scheme.md)。Physics 已按该规范落地；instance 等旧路径尚未完全迁移。
 
 关键事实（来自 memory.md）：
 - 训练基于 AnySplat 预训练权重（重建部分已优化好），只有 instance head 等新增结构随机初始化。
@@ -23,9 +25,9 @@
            ├─ encoder/vggt/          VGGT backbone（aggregator + camera/point/depth head）
            ├─ encoder/backbone/      AnySplat 原有 backbone（croco/dino/resnet）
            ├─ encoder/heads/         AnySplat 的 GS head（DPT 等）
-           ├─ encoder/iggt_heads/    IGGT 抠来的 head：SamProjector、PartHead、PhysicsHead
+           ├─ encoder/iggt_heads/    SamProjector、PartHead、PhysicsHead、PhysicsClassifier
            ├─ encoder/anysplat.py    EncoderAnySplat：backbone + GS head（可选挂 instance head）
-           ├─ encoder/iggt.py        EncoderIGGT：VGGT backbone + SamProjector + PartHead（可选 PhysicsHead），无 GS head
+           ├─ encoder/iggt.py        EncoderIGGT：VGGT + PartHead（可选 PhysicsHead+Classifier），无 GS head
            └─ decoder/               splatting CUDA 渲染 decoder（目前只有 AnySplat 用）
 
 arch 层    src/model/arch/     负责"最终组装模型"
@@ -41,7 +43,7 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 入口       src/main.py          Hydra 入口；scripts/ 下各推理/导出脚本
 ```
 
-**统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/encoder/encoder.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_feat_map`。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
+**统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/encoder/encoder.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_prediction`（`PhysicsPrediction | None`）。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
 
 **分发点（改组合时要看的三个注册表）**：
 1. `src/model/arch/__init__.py` 的 `MODELS` / `get_model`：按 `encoder_cfg` 的 dataclass 类型分发到 arch。
@@ -59,13 +61,16 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 ## 4. loss 体系
 
 - 基类 `src/loss/loss.py`：`forward(prediction: DecoderOutput, batch, gaussians, depth_dict, global_step)`。
-- **约定（有点脏但是现状）**：IGGT 路线没有 decoder 输出，`IGGTWrapper.training_step` 把 `instance_feat_map`、`physics_feat_map`、`instance_mask`、`instance_valid_mask`、`phys_label_map` 全部塞进 `depth_dict` 传给 loss（`prediction`/`gaussians` 传 None）。新 loss 如果需要新监督信号，沿用这个模式：wrapper 里塞进 depth_dict，loss 里取。
-- 分割相关 loss：`loss_disc.py`（实例判别，主力）、`loss_mvc.py`(像素对比，难优化)、`loss_phys.py`（物理属性分类，classifier 在 loss 内部——validation 时 `IGGTWrapper._get_phys_classifier` 会从 losses 里找它做预测，**别把 classifier 挪出 loss 而不改这里**）。
+- **约定（有点脏但是现状）**：IGGT 路线没有 decoder 输出，`IGGTWrapper.training_step` 把监督信号塞进 `depth_dict` 传给 loss（`prediction`/`gaussians` 传 None）。instance 路线仍用裸 key（`instance_feat_map` / `instance_mask`）；**physics 路线用结构化对象**：`physics_prediction`（`PhysicsPrediction`）+ `physics_target`（`list[PhysicsTarget]`）。
+- 分割相关 loss：`loss_disc.py`（实例判别，主力）、`loss_mvc.py`(像素对比，难优化)、`loss_phys.py`（物理属性分类——**纯公式，无可学习参数**；classifier 在 encoder 的 `PhysicsClassifier`）。
 - loss 的开关和权重完全由 Hydra 的 `loss: [disc]` 列表 + `config/loss/*.yaml` 控制，代码里没有 if 开关。
+
+Physics / 通用分层契约、改需求指哪里、反模式：见 [`layered_scheme.md`](layered_scheme.md)（权威）；Cursor rule：`.cursor/rules/layered-scheme.mdc`。
 
 ## 5. 数据管线
 
 - 主力数据集是 `src/dataset/dataset_custom.py`（`name: custom`）：**manifest.jsonl 驱动**的通用多视角数据集（rgb / depth / instance_mask / K_px / c2w），InsScene-15K 各子集（infinigen / scannetpp / re10k）都走它。manifest 由 `scripts/make_manifest_*.py`、`scripts/extract_and_make_manifest_insscene.py` 生成。
+- Physics 监督：`dataset.custom.physics_parser` 指向 `src/dataset/physics/parsers.py` 注册表；产出顶层 `batch["physics_target"]`（`list[PhysicsTarget]`，collate 在 `src/dataset/collate.py`）。
 - **坐标约定（写死的，manifest 必须遵守）**：c2w 为 **OpenCV 相机到世界** 4x4；K 为像素单位 OpenCV 约定（COLMAP 内参需先减 0.5，用 `src.coord.colmap_to_opencv_intrinsics`）。加载时**不做任何坐标转换**。所有坐标转换统一走 `src/coord/`（CameraPose / CameraConvention / ExtrinsicType），**不要在脚本里手写 blender2opencv 矩阵**（历史上就是这么出的错，git log 里有清理记录）。
 - 图像张量约定：dataset 输出 `[-1, 1]`（normalize shim），但 encoder 吃 `[0, 1]`——wrapper 里有 `(image + 1) / 2`。改 wrapper/推理脚本时别弄丢这一步。
 - IGGT 训练时 context + target 视角**拼在一起全部送入 encoder**（`torch.cat([context, target], dim=1)`），instance_mask 也对应拼接。

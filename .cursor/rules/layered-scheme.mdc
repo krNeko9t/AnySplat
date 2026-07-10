@@ -1,0 +1,38 @@
+---
+description: 分层方案契约 — 新能力按 Dataset Target / Encoder Prediction / Loss 公式 / Hydra 组合四层隔离；可学习参数不进 loss。
+alwaysApply: true
+---
+
+# 分层方案契约（必遵）
+
+探索版仓库：换方案要改得动。**层隔离优先于局部省事。** 全文见 [`docs/layered_scheme.md`](docs/layered_scheme.md)。Physics 是范例；**新增与重构默认按该规范，不要再写死绑路径。**
+
+## 四层
+
+```
+Parser → *Target  |  Head(+Classifier) → *Prediction  |  Loss = resolver + 公式（无权重）  |  Experiment = parser + head cfg + loss yaml
+```
+
+## 改需求指哪里
+
+| 改什么 | 改哪里 |
+|--------|--------|
+| 标注格式 | `src/dataset/<domain>/parsers.py` + 注册表 |
+| 监督语义 | `*Target` + `docs/conventions.md` |
+| 特征 head | `src/model/encoder/.../*_head.py` |
+| 分类器 | encoder 侧 `*_classifier.py`（**禁止放 loss**） |
+| 预测槽 | `*Prediction` → `EncoderOutput` 可选字段 |
+| 公式 / 对齐 | `src/loss/loss_*.py` 的 `resolve_*` |
+| 方案切换 | `config/experiment/*.yaml` 组合，不用代码 if |
+
+## 硬性禁止
+
+- 可学习参数进 loss；validation 从 `self.losses` 反查 classifier
+- 类别映射在 dataset / wrapper / loss 多处复制
+- 架构维数（feat_dim / num_classes）在 encoder 与 loss 双写
+- 改已有 `EncoderOutput` 字段语义；新字段必须可选且默认 `None`
+- 为旧接线留兼容别名（探索版直接重写调用方）
+
+## Physics 范例路径
+
+`src/dataset/physics/` → `PhysicsHead` + `PhysicsClassifier` → `PhysicsPrediction` → `loss_phys.py`（纯公式）→ `config/experiment/phys_iggt_custom.yaml`

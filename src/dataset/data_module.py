@@ -17,7 +17,8 @@ from ..misc.step_tracker import StepTracker
 from ..misc.utils import get_world_size, get_rank
 from . import DatasetCfgWrapper, ValDatasetWrapper, get_dataset
 from .types import DataShim, Stage
-from .data_sampler import BatchedRandomSampler, MixedBatchSampler, custom_collate_fn
+from .collate import collate_examples
+from .data_sampler import MixedBatchSampler
 from .validation_wrapper import ValidationWrapper
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ class DataModule(LightningDataModule):
             num_workers=self.data_loader_cfg.train.num_workers,
             generator=self.generator,
             worker_init_fn=worker_init_fn,
-            # collate_fn=custom_collate_fn,
+            collate_fn=collate_examples,
             persistent_workers=self.get_persistent(self.data_loader_cfg.train),
         )
         # breakpoint()
@@ -194,6 +195,7 @@ class DataModule(LightningDataModule):
             sampler=sampler,
             generator=self.get_generator(self.data_loader_cfg.val),
             worker_init_fn=worker_init_fn,
+            collate_fn=collate_examples,
             persistent_workers=self.get_persistent(self.data_loader_cfg.val),
         )
         return self.val_loader
@@ -206,6 +208,7 @@ class DataModule(LightningDataModule):
             num_workers=self.data_loader_cfg.test.num_workers,
             generator=self.get_generator(self.data_loader_cfg.test),
             worker_init_fn=worker_init_fn,
+            collate_fn=collate_examples,
             persistent_workers=self.get_persistent(self.data_loader_cfg.test),
         )
             

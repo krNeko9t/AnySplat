@@ -6,8 +6,13 @@ pretrained_weights: ""
 intermediate_layer_idx: [4, 11, 17, 23]
 pred_pose: true
 
-# Physics head (disabled by default)
+# Physics head + classifier (disabled by default)
 phys_head_enabled: false
 phys_feat_dim: 32
+phys_num_classes: 4
+phys_classifier_hidden: 64
+phys_ignore_id: 0
+phys_dense_logits: false
 phys_use_point_feat: true
 phys_use_window_cross_attn: true
+# phys_class_names: [static, rigid, soft, unknown]  # optional; else taken from PhysicsTarget

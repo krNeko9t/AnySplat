@@ -16,6 +16,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from .dataset import DatasetCfgCommon
+from .physics import get_physics_parser
 from .shims.augmentation_shim import apply_augmentation_shim
 from .shims.crop_shim import apply_crop_shim
 from .types import Stage
@@ -50,6 +51,9 @@ class DatasetCustomCfg(DatasetCfgCommon):
     depth_invalid_value: float = 1e9
     near: float = 0.01
     far: float = 100.0
+    # Physics GT parser registry key (see src/dataset/physics/parsers.py).
+    # None = do not load physics supervision.
+    physics_parser: str | None = None
 
 
 @dataclass
@@ -86,6 +90,7 @@ class DatasetCustom(Dataset):
         self.stage = stage
         self.view_sampler = view_sampler
         self.to_tensor = tf.ToTensor()
+        self.physics_parser = get_physics_parser(cfg.physics_parser)
 
         self.root = cfg.root
         manifest = cfg.manifest_path
@@ -155,35 +160,6 @@ class DatasetCustom(Dataset):
         if arr.ndim == 3:
             arr = arr[..., 0]
         return torch.from_numpy(arr.astype(np.int64))
-
-    # Label string → integer mapping for physics labels.
-    PHYS_LABEL_MAP = {"static": 1, "rigid": 2, "soft": 3, "unknown": 4}
-
-    def _load_physics_labels(self, scene: dict) -> Tensor | None:
-        """Load per-scene physics label JSON and return a 1-D lookup tensor.
-
-        Returns a tensor of shape ``[max_instance_id + 1]`` where
-        ``out[instance_id] = phys_class_int``.  Instance IDs without a label
-        are mapped to 0 (ignore).  Returns ``None`` when the scene has no
-        physics annotation.
-        """
-        plp = scene.get("physics_labels_path")
-        if plp is None:
-            return None
-        path = self._as_path(plp)
-        if not path.exists():
-            logger.warning("[DatasetCustom] physics_labels_path %s not found, skipping", path)
-            return None
-        with path.open("r") as f:
-            raw: dict[str, str] = json.load(f)
-        if not raw:
-            return None
-        id_to_cls = {int(k): self.PHYS_LABEL_MAP.get(v, 0) for k, v in raw.items()}
-        max_id = max(id_to_cls.keys())
-        lut = torch.zeros(max_id + 1, dtype=torch.int64)
-        for inst_id, cls_int in id_to_cls.items():
-            lut[inst_id] = cls_int
-        return lut
 
     def _normalize_K(self, K_px: Tensor, h: int, w: int) -> Tensor:
         K = K_px.clone().to(torch.float32)
@@ -299,8 +275,6 @@ class DatasetCustom(Dataset):
         target_images, target_depths, target_inst, target_K, target_valid = load_stack(target_indices)
         t_io = time.monotonic() - t_io0
 
-        phys_label_map = self._load_physics_labels(scene)
-
         example = {
             "context": {
                 "extrinsics": extrinsics[context_indices],
@@ -329,9 +303,10 @@ class DatasetCustom(Dataset):
             "scene": f"Custom {scene_id}",
         }
 
-        if phys_label_map is not None:
-            example["context"]["phys_label_map"] = phys_label_map
-            example["target"]["phys_label_map"] = phys_label_map
+        if self.physics_parser is not None:
+            phys_target = self.physics_parser.parse(scene, self.root)
+            if phys_target is not None:
+                example["physics_target"] = phys_target
 
         # Crop to patchsize (same convention as other datasets).
         if self.stage == "train" and getattr(self.cfg, "intr_augment", False):

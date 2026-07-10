@@ -45,8 +45,9 @@ Depth 相关约定是：
 Physics label 不是 instance ID，不能混用两套编号：
 
 - instance ID：`0 = ignore/background`，非零为实例。
-- physics class：`0 = ignore / unlabeled`，有效类别从 `1` 开始，例如 `static=1`、`rigid=2`、`soft=3`、`unknown=4`。
-- 进入 cross entropy 前，physics class 会从 `1..C` 转成 `0..C-1`。
+- physics class：`0 = ignore / unlabeled`，有效类别从 `1` 开始（LUT 存 1-indexed）。
+- 进入 cross entropy 前，`resolve_instance_ce` 把 `1..C` 转成 `0..C-1`。
+- 类别名与字符串→id 映射只活在 `src/dataset/physics/parsers.py`（如 `3dovs_json`），经 `PhysicsTarget.class_names` / `label_lut` 传出；不要在 dataset / wrapper / loss 里再写一份映射。
 
 ## 可视化和导出约定
 

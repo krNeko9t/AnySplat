@@ -1,10 +1,17 @@
-"""IGGT encoder -- VGGT backbone + SamProjector + PartHead for instance features.
+"""IGGT encoder -- VGGT backbone + SamProjector + PartHead (+ optional physics).
 
 Outputs ``EncoderOutput`` with:
   - ``gaussians = None``  (no Gaussian head)
   - ``instance_feat_map``  [B, V, D, H, W]
+  - ``physics_prediction`` PhysicsPrediction | None
   - ``pred_context_pose``  dict with extrinsic / intrinsic
   - ``depth_dict``         dict with depth / world_points / conf
+
+Physics wiring (where to edit):
+  - dense features  → PhysicsHead (iggt_heads/physics_head.py)
+  - instance logits → PhysicsClassifier (iggt_heads/physics_classifier.py)
+  - GT labels       → dataset physics parsers (not here)
+  - loss formula    → src/loss/loss_phys.py (not here)
 """
 
 from __future__ import annotations
@@ -15,18 +22,15 @@ from typing import List, Literal, Optional
 
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float
 from torch import Tensor, nn
 
 from src.dataset.shims.normalize_shim import apply_normalize_shim
 from src.dataset.types import BatchedExample, DataShim
-from src.model.encoder.vggt.utils.geometry import (
-    batchify_unproject_depth_map_to_point_map,
-)
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 from .encoder import Encoder, EncoderOutput
-from .iggt_heads import PartHead, PhysicsHead, SamProjector
+from .iggt_heads import PartHead, PhysicsClassifier, PhysicsHead, SamProjector
+from .physics_prediction import PhysicsPrediction
 from .vggt.models.vggt import VGGT
 
 logger = logging.getLogger(__name__)
@@ -42,11 +46,17 @@ class EncoderIGGTCfg:
     input_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
     input_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
     pred_pose: bool = True
-    # Physics head
+    # Physics head + classifier (disabled by default)
     phys_head_enabled: bool = False
     phys_feat_dim: int = 32
+    phys_num_classes: int = 4
+    phys_classifier_hidden: int = 64
+    phys_ignore_id: int = 0
+    phys_dense_logits: bool = False
     phys_use_point_feat: bool = True
     phys_use_window_cross_attn: bool = True
+    # Optional CE class names for logging (0-indexed). Override in experiment yaml.
+    phys_class_names: Optional[List[str]] = None
 
 
 class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
@@ -88,6 +98,9 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
         )
 
         self.phys_head_enabled = cfg.phys_head_enabled
+        self.physics_head: PhysicsHead | None = None
+        self.physics_classifier: PhysicsClassifier | None = None
+        self.phys_class_names: tuple[str, ...] | None = None
         if self.phys_head_enabled:
             self.physics_head = PhysicsHead(
                 in_channels=[256, 256, 256, 256],
@@ -98,12 +111,23 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
                 use_point_feat=cfg.phys_use_point_feat,
                 use_window_cross_attn=cfg.phys_use_window_cross_attn,
             )
+            self.physics_classifier = PhysicsClassifier(
+                feat_dim=cfg.phys_feat_dim,
+                num_classes=cfg.phys_num_classes,
+                hidden=cfg.phys_classifier_hidden,
+                ignore_id=cfg.phys_ignore_id,
+                dense_logits=cfg.phys_dense_logits,
+            )
+            if cfg.phys_class_names is not None:
+                self.phys_class_names = tuple(cfg.phys_class_names)
 
     def forward(
         self,
         image: torch.Tensor,
         global_step: int = 0,
         visualization_dump: Optional[dict] = None,
+        instance_mask: Tensor | None = None,
+        valid_mask: Tensor | None = None,
     ) -> EncoderOutput:
         device = image.device
         b, v, _, h, w = image.shape
@@ -148,15 +172,31 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             point_feature=point_feat_list,
         )
         # hard code normalize for iggt
-        instance_feat_map = F.normalize(instance_feat_map.float(), p=2, dim=2, eps=1e-8).to(instance_feat_map.dtype)
+        instance_feat_map = F.normalize(
+            instance_feat_map.float(), p=2, dim=2, eps=1e-8
+        ).to(instance_feat_map.dtype)
 
-        physics_feat_map = None
-        if self.phys_head_enabled:
-            physics_feat_map = self.physics_head(
+        physics_prediction = None
+        if self.physics_head is not None:
+            feat_map = self.physics_head(
                 list(adaptor_out.values()),
                 images=image,
                 patch_start_idx=patch_start_idx,
                 point_feature=point_feat_list,
+            )
+            inst_logits = None
+            inst_ids = None
+            dense_logits = None
+            if self.physics_classifier is not None and instance_mask is not None:
+                inst_logits, inst_ids, dense_logits = self.physics_classifier(
+                    feat_map, instance_mask, valid_mask=valid_mask
+                )
+            physics_prediction = PhysicsPrediction(
+                feat_map=feat_map,
+                instance_logits=inst_logits,
+                instance_ids=inst_ids,
+                dense_logits=dense_logits,
+                class_names=self.phys_class_names,
             )
 
         del aggregated_tokens_list, patch_start_idx
@@ -195,7 +235,7 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             distill_infos=None,
             instance_feat_map=instance_feat_map,
             gaussian_instance_feat=None,
-            physics_feat_map=physics_feat_map,
+            physics_prediction=physics_prediction,
         )
 
     def get_data_shim(self) -> DataShim:

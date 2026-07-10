@@ -1,20 +1,21 @@
-"""IGGTWrapper -- training / validation / test for IGGT (encoder only, instance features)."""
+"""IGGTWrapper -- training / validation / test for IGGT (encoder only).
+
+Physics path:
+  batch["physics_target"]  → depth_dict["physics_target"]
+  encoder.physics_prediction → depth_dict["physics_prediction"]
+  LossPhys reads those two keys only (no classifier in loss).
+"""
 
 from __future__ import annotations
 
-import logging
-from typing import Optional
-
 import json
+import logging
 
-import numpy as np
 import torch
-from einops import rearrange
-from jaxtyping import Float
-from torch import Tensor, nn
+from torch import nn
 
+from ..dataset.physics.types import PhysicsTarget
 from ..dataset.types import BatchedExample
-from ..evaluation.metrics import abs_relative_difference, delta1_acc
 from ..global_cfg import get_cfg
 from ..loss import Loss
 from ..loss.loss_huber import HuberLoss
@@ -34,8 +35,19 @@ from .base_wrapper import (
 logger = logging.getLogger(__name__)
 
 
+def _cat_ctx_tgt(batch: BatchedExample, key: str):
+    """Concatenate context/target view tensors along the view dim when both exist."""
+    ctx = batch.get("context", {})
+    tgt = batch.get("target", {})
+    if key in ctx and key in tgt:
+        return torch.cat([ctx[key], tgt[key]], dim=1)
+    if key in ctx:
+        return ctx[key]
+    return None
+
+
 class IGGTWrapper(BaseModelWrapper):
-    """Training loop for IGGT (encoder only, instance segmentation)."""
+    """Training loop for IGGT (encoder only, instance / physics)."""
 
     def __init__(
         self,
@@ -54,14 +66,9 @@ class IGGTWrapper(BaseModelWrapper):
                 delta=self.train_cfg.pose_loss_delta,
             )
 
-    # ------------------------------------------------------------------
-    # Training
-    # ------------------------------------------------------------------
-
     def training_step(self, batch, batch_idx):
         batch = self.combine_batches(batch)
         batch: BatchedExample = self.data_shim(batch)
-        b, v_ctx, c, h, w = batch["context"]["image"].shape
 
         context_image = (batch["context"]["image"] + 1) / 2
         if "target" in batch and "image" in batch["target"]:
@@ -70,7 +77,15 @@ class IGGTWrapper(BaseModelWrapper):
         else:
             input_image = context_image
 
-        encoder_output, _ = self.model(input_image, self.global_step)
+        instance_mask = _cat_ctx_tgt(batch, "instance_mask")
+        valid_mask = _cat_ctx_tgt(batch, "valid_mask")
+
+        encoder_output, _ = self.model(
+            input_image,
+            self.global_step,
+            instance_mask=instance_mask,
+            valid_mask=valid_mask,
+        )
         depth_dict = encoder_output.depth_dict or {}
         infos = encoder_output.infos or {}
 
@@ -80,23 +95,15 @@ class IGGTWrapper(BaseModelWrapper):
 
         if encoder_output.instance_feat_map is not None:
             depth_dict_for_loss["instance_feat_map"] = encoder_output.instance_feat_map
-        if encoder_output.physics_feat_map is not None:
-            depth_dict_for_loss["physics_feat_map"] = encoder_output.physics_feat_map
-        if "context" in batch and "instance_mask" in batch["context"] and "target" in batch and "instance_mask" in batch["target"]:
-            depth_dict_for_loss["instance_mask"] = torch.cat(
-                [batch["context"]["instance_mask"], batch["target"]["instance_mask"]], dim=1,
-            )
-        elif "context" in batch and "instance_mask" in batch["context"]:
-            depth_dict_for_loss["instance_mask"] = batch["context"]["instance_mask"]
-        if "context" in batch and "valid_mask" in batch["context"] and "target" in batch and "valid_mask" in batch["target"]:
-            depth_dict_for_loss["instance_valid_mask"] = torch.cat(
-                [batch["context"]["valid_mask"], batch["target"]["valid_mask"]], dim=1,
-            )
-        elif "context" in batch and "valid_mask" in batch["context"]:
-            depth_dict_for_loss["instance_valid_mask"] = batch["context"]["valid_mask"]
-        # Physics label map (scene-level, shared across context/target)
-        if "context" in batch and "phys_label_map" in batch["context"]:
-            depth_dict_for_loss["phys_label_map"] = batch["context"]["phys_label_map"]
+        if instance_mask is not None:
+            depth_dict_for_loss["instance_mask"] = instance_mask
+        if valid_mask is not None:
+            depth_dict_for_loss["instance_valid_mask"] = valid_mask
+
+        if encoder_output.physics_prediction is not None:
+            depth_dict_for_loss["physics_prediction"] = encoder_output.physics_prediction
+        if "physics_target" in batch:
+            depth_dict_for_loss["physics_target"] = batch["physics_target"]
 
         with torch.amp.autocast("cuda", enabled=False):
             total_loss, loss_values = self.compute_and_log_losses(
@@ -105,28 +112,26 @@ class IGGTWrapper(BaseModelWrapper):
 
         return self.finalize_training_step(total_loss, loss_values, batch)
 
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
-
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         batch: BatchedExample = self.data_shim(batch)
         b, v, _, h, w = batch["context"]["image"].shape
         assert b == 1
 
+        inst_mask = batch["context"].get("instance_mask")
+        valid_mask = batch["context"].get("valid_mask")
+
         encoder_output, _ = self.model(
             (batch["context"]["image"] + 1) / 2,
             self.global_step,
+            instance_mask=inst_mask,
+            valid_mask=valid_mask,
         )
         depth_dict = encoder_output.depth_dict or {}
 
         if "depth" in depth_dict:
             depth_pred_raw = depth_dict["depth"]
             if depth_pred_raw is not None and depth_pred_raw.numel() > 0:
-                self.log(
-                    "val/depth_mean",
-                    depth_pred_raw.mean(),
-                )
+                self.log("val/depth_mean", depth_pred_raw.mean())
 
         if self.trainer.global_rank == 0:
             logger.info(
@@ -161,74 +166,50 @@ class IGGTWrapper(BaseModelWrapper):
 
             self._log_physics_predictions(encoder_output, batch)
 
-    # ------------------------------------------------------------------
-    # Physics prediction logging
-    # ------------------------------------------------------------------
-
-    PHYS_CLASS_NAMES = {0: "static", 1: "rigid", 2: "soft", 3: "unknown"}
-
-    def _get_phys_classifier(self):
-        """Find the LossPhys classifier among registered losses."""
-        for loss_fn in self.losses:
-            if hasattr(loss_fn, "classifier") and loss_fn.name == "phys":
-                return loss_fn
-        return None
-
     @torch.no_grad()
-    def _log_physics_predictions(self, encoder_output, batch):
-        """Log per-instance physics predictions during validation."""
-        phys_feat_map = encoder_output.physics_feat_map
-        if phys_feat_map is None:
+    def _log_physics_predictions(self, encoder_output, batch: BatchedExample):
+        """Log per-instance physics predictions from encoder PhysicsPrediction."""
+        pred = encoder_output.physics_prediction
+        if pred is None or pred.instance_logits is None or pred.instance_ids is None:
             return
 
-        inst_mask = batch["context"].get("instance_mask")
-        phys_lut = batch["context"].get("phys_label_map")
-        if inst_mask is None:
-            return
+        targets: list[PhysicsTarget] | None = batch.get("physics_target")
+        class_names = pred.class_names
+        if class_names is None and targets:
+            class_names = targets[0].class_names
 
-        loss_phys = self._get_phys_classifier()
-        if loss_phys is None:
-            return
-
-        B, V, C, H, W = phys_feat_map.shape
         results = []
+        for b_idx, (logits_b, ids_b) in enumerate(
+            zip(pred.instance_logits, pred.instance_ids, strict=True)
+        ):
+            lut = None
+            if targets is not None and b_idx < len(targets):
+                lut = targets[b_idx].label_lut
 
-        for b_idx in range(B):
-            feat_b = phys_feat_map[b_idx]  # [V, C, H, W]
-            mask_b = inst_mask[b_idx]       # [V, H, W]
-
-            unique_ids = torch.unique(mask_b)
-            unique_ids = unique_ids[unique_ids != 0]
-
-            for inst_id in unique_ids:
-                id_int = inst_id.item()
-                per_view_mask = (mask_b == id_int)  # [V, H, W]
-                count = per_view_mask.sum()
-                if count == 0:
-                    continue
-
-                feat_flat = feat_b.reshape(V, C, -1)  # [V, C, H*W]
-                mask_flat = per_view_mask.reshape(V, -1)  # [V, H*W]
-                masked = feat_flat * mask_flat.unsqueeze(1).to(feat_flat.dtype)
-                pooled = masked.sum(dim=(0, 2)) / count.clamp(min=1).to(feat_flat.dtype)
-
-                logits = loss_phys.classifier(pooled.float().unsqueeze(0))
-                probs = torch.softmax(logits, dim=-1)[0]
-                pred_idx = probs.argmax().item()
-                pred_label = self.PHYS_CLASS_NAMES.get(pred_idx, f"class_{pred_idx}")
-                confidence = probs[pred_idx].item()
+            for row in range(logits_b.shape[0]):
+                probs = torch.softmax(logits_b[row].float(), dim=-1)
+                pred_idx = int(probs.argmax().item())
+                conf = float(probs[pred_idx].item())
+                pred_name = (
+                    class_names[pred_idx]
+                    if class_names is not None and pred_idx < len(class_names)
+                    else f"class_{pred_idx}"
+                )
 
                 gt_label = "N/A"
-                if phys_lut is not None:
-                    lut = phys_lut[b_idx]
-                    if id_int < lut.shape[0] and lut[id_int] > 0:
-                        gt_idx = lut[id_int].item() - 1
-                        gt_label = self.PHYS_CLASS_NAMES.get(gt_idx, f"class_{gt_idx}")
+                id_int = int(ids_b[row].item())
+                if lut is not None and id_int < lut.shape[0] and int(lut[id_int].item()) > 0:
+                    gt_idx = int(lut[id_int].item()) - 1
+                    gt_label = (
+                        class_names[gt_idx]
+                        if class_names is not None and gt_idx < len(class_names)
+                        else f"class_{gt_idx}"
+                    )
 
                 results.append({
                     "id": id_int,
-                    "predicted": pred_label,
-                    "confidence": round(confidence, 3),
+                    "predicted": pred_name,
+                    "confidence": round(conf, 3),
                     "gt": gt_label,
                 })
 
@@ -240,10 +221,6 @@ class IGGTWrapper(BaseModelWrapper):
                 self.global_step, scene,
                 json.dumps(results, indent=2, ensure_ascii=False),
             )
-
-    # ------------------------------------------------------------------
-    # Test
-    # ------------------------------------------------------------------
 
     def test_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
