@@ -1,38 +1,13 @@
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
-#
-# --------------------------------------------------------
-# dpt head implementation for DUST3R
-# Downstream heads assume inputs of size B x N x C (where N is the number of tokens) ;
-# or if it takes as input the output at every layer, the attribute return_all_layers should be set to True
-# the forward function also takes as input a dictionnary img_info with key "height" and "width"
-# for PixelwiseTask, the output will be of dimension B x num_channels x H x W
-# --------------------------------------------------------
-from einops import rearrange
 from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# import dust3r.utils.path_to_croco
-from .dpt_block import DPTOutputAdapter, Interpolate, make_fusion_block
+
 from src.model.encoder.vggt.heads.dpt_head import DPTHead
-from .head_modules import UnetExtractor, AppearanceTransformer, _init_weights
-from .postprocess import postprocess
 
-
-    # def __init__(self,
-    #              num_channels: int = 1,
-    #              stride_level: int = 1,
-    #              patch_size: Union[int, Tuple[int, int]] = 16,
-    #              main_tasks: Iterable[str] = ('rgb',),
-    #              hooks: List[int] = [2, 5, 8, 11],
-    #              layer_dims: List[int] = [96, 192, 384, 768],
-    #              feature_dim: int = 256,
-    #              last_dim: int = 32,
-    #              use_bn: bool = False,
-    #              dim_tokens_enc: Optional[int] = None,
-    #              head_type: str = 'regression',
-    #              output_width_ratio=1,
 
 class VGGT_DPT_GS_Head(DPTHead):
     def __init__(self, 
@@ -139,57 +114,3 @@ class VGGT_DPT_GS_Head(DPTHead):
         out = self.scratch.output_conv2(out)
         out = out.view(B, S, *out.shape[1:])
         return out
-
-
-class PixelwiseTaskWithDPT(nn.Module):
-    """ DPT module for dust3r, can return 3D points + confidence for all pixels"""
-
-    def __init__(self, *, n_cls_token=0, hooks_idx=None, dim_tokens=None,
-                 output_width_ratio=1, num_channels=1, postprocess=None, depth_mode=None, conf_mode=None, **kwargs):
-        super(PixelwiseTaskWithDPT, self).__init__()
-        self.return_all_layers = True  # backbone needs to return all layers
-        self.postprocess = postprocess
-        self.depth_mode = depth_mode
-        self.conf_mode = conf_mode
-        
-        assert n_cls_token == 0, "Not implemented"
-        dpt_args = dict(output_width_ratio=output_width_ratio,
-                        num_channels=num_channels,
-                        **kwargs)
-        if hooks_idx is not None:
-            dpt_args.update(hooks=hooks_idx)
-        self.dpt = DPTOutputAdapter_fix(**dpt_args)
-        dpt_init_args = {} if dim_tokens is None else {'dim_tokens_enc': dim_tokens}
-        self.dpt.init(**dpt_init_args)
-
-    def forward(self, x, depths, imgs, img_info, conf=None):
-        out, interm_feats = self.dpt(x, depths, imgs, image_size=(img_info[0], img_info[1]), conf=conf)
-        if self.postprocess:
-            out = self.postprocess(out, self.depth_mode, self.conf_mode)
-        return out, interm_feats
-
-def create_gs_dpt_head(net, has_conf=False, out_nchan=3, postprocess_func=postprocess):
-    """
-    return PixelwiseTaskWithDPT for given net params
-    """
-    assert net.dec_depth > 9
-    l2 = net.dec_depth
-    feature_dim = net.feature_dim
-    last_dim = feature_dim//2
-    ed = net.enc_embed_dim
-    dd = net.dec_embed_dim
-    try:    
-        patch_size = net.patch_size
-    except:
-        patch_size = (16, 16)
-
-    return PixelwiseTaskWithDPT(num_channels=out_nchan + has_conf,
-                                patch_size=patch_size,
-                                feature_dim=feature_dim,
-                                last_dim=last_dim,
-                                hooks_idx=[0, l2*2//4, l2*3//4, l2],
-                                dim_tokens=[ed, dd, dd, dd],
-                                postprocess=postprocess_func,
-                                depth_mode=net.depth_mode,
-                                conf_mode=net.conf_mode,
-                                head_type='gs_params')
