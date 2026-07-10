@@ -86,7 +86,6 @@ class EncoderAnySplatCfg:
     opacity_mapping: OpacityMappingCfg
     gaussians_per_pixel: int
     num_surfaces: int
-    gs_params_head_type: str
     input_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
     input_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
     pretrained_weights: str = ""
@@ -213,7 +212,6 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
 
         self.raw_gs_dim = 1 + self.gaussian_adapter.d_in  # 1 for opacity
         self.voxel_size = cfg.voxel_size
-        self.gs_params_head_type = cfg.gs_params_head_type
         self.instance_feat_dim = int(cfg.instance_feat_dim)
         # fake backbone for head parameters
         head_params = GSHeadParams()

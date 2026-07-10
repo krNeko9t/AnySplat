@@ -12,7 +12,6 @@ wandb:
   
 model:
   encoder:
-    gs_params_head_type: dpt_gs
     pose_free: true
     intrinsics_embed_loc: encoder
     intrinsics_embed_type: token
