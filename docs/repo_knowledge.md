@@ -102,7 +102,6 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 - **IGGT 官方 ckpt**：`IGGTModel.from_checkpoint` 做两步键名重映射（`part_head.scratch.X → part_head.X`；补 `encoder.` 前缀），再按 shape 对齐后 `strict=False`。
 - **VGGT backbone**：encoder 构造时 `VGGT.from_pretrained("facebook/VGGT-1B")`，是构造副作用，不是用户旋钮。
 - **Lightning** `.ckpt`：`load_lightning_state_dict` 剥 `state_dict`；`load_model_from_run` 读 `run_dir/.hydra/config.yaml` → `get_model` → Wrapper → `load_state_dict`，返回 `wrapper.model`（只要 encoder 则取 `.encoder`）。`strict=False` 的 missing/unexpected 计数会 **print 到 stdout**（不只靠 logger），因为推理脚本通常未配 logging。
-- **旧 run_dir**：2026-07 前的 run 其 `.hydra/config.yaml` 里 dataset 键还是 `custom`（已改名 `manifest`），加载会解析报错。**代码里没有也不要加迁移兼容层**——需要推理旧 run 时，手改该 run 的 `.hydra/config.yaml`：`dataset.custom:` → `dataset.manifest:`，其下 `name: custom` → `name: manifest`。
 
 
 
@@ -117,8 +116,8 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 
 ## 5. 数据管线
 
-- 主力数据集是 `src/dataset/dataset_manifest.py`（`name: manifest`；2026-07 由 `dataset_custom` / `name: custom` 改名）：**manifest.jsonl 驱动**的通用多视角数据集，InsScene-15K 各子集（infinigen / scannetpp / re10k）都走它。manifest 由 `scripts/make_manifest_*.py`、`scripts/extract_and_make_manifest_insscene.py`、`scripts/prepare_3dovs.py` 生成。
-- **manifest schema 是冻结的单一方言**：frame 字段固定为 `rgb_path` / `instance_mask_path` / `K_px` / `c2w`（必填）+ `depth_path` / `HW`（可选），scene 字段为 `scene_id` + `frames`。加载端**不再接受别名字段**（`image_path` / `camtoworld` / `K` / `views` 等历史别名已删）；新生成脚本必须产出此格式，不要往加载端加兼容分支。
+- 主力数据集是 `src/dataset/dataset_manifest.py`（`name: manifest`）：**manifest.jsonl 驱动**的通用多视角数据集，InsScene-15K 各子集（infinigen / scannetpp / re10k）都走它。manifest 由 `scripts/make_manifest_*.py`、`scripts/extract_and_make_manifest_insscene.py`、`scripts/prepare_3dovs.py` 生成。
+- **manifest schema 是唯一方言**：frame 字段固定为 `rgb_path` / `instance_mask_path` / `K_px` / `c2w`（必填）+ `depth_path` / `HW`（可选），scene 字段为 `scene_id` + `frames`。加载端**不接受别名字段**；新生成脚本必须产出此格式，不要往加载端加兼容分支。
 - Physics 监督：`dataset.manifest.physics_parser` 指向 `src/dataset/physics/parsers.py` 注册表；产出顶层 `batch["physics_target"]`（`list[PhysicsTarget]`，collate 在 `src/dataset/collate.py`）。dataset 按**监督通道**扩展（可选字段 + parser 插槽），不按算法拆类。
 - **坐标约定（写死的，manifest 必须遵守）**：c2w 为 **OpenCV 相机到世界** 4x4；K 为像素单位 OpenCV 约定（COLMAP 内参需先减 0.5，用 `src.coord.colmap_to_opencv_intrinsics`）。加载时**不做任何坐标转换**。所有坐标转换统一走 `src/coord/`（CameraPose / CameraConvention / ExtrinsicType），**不要在脚本里手写 blender2opencv 矩阵**（历史上就是这么出的错，git log 里有清理记录）。
 - 图像张量约定：dataset 输出 `[-1, 1]`（normalize shim），但 encoder 吃 `[0, 1]`——wrapper 里有 `(image + 1) / 2`。改 wrapper/推理脚本时别弄丢这一步。
