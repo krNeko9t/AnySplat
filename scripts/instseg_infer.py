@@ -241,7 +241,7 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
     """Load input from a dataset using the Hydra config in run_dir."""
     from omegaconf import OmegaConf
 
-    from src.config import load_typed_root_config, migrate_legacy_run_cfg
+    from src.config import load_typed_root_config
     from src.dataset.dataset_manifest import DatasetManifest
     from src.global_cfg import set_cfg
 
@@ -251,7 +251,6 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
         raise FileNotFoundError(cfg_path)
 
     cfg_dict = OmegaConf.load(str(cfg_path))
-    cfg_dict = migrate_legacy_run_cfg(cfg_dict)
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
 

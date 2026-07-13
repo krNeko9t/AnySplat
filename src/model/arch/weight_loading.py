@@ -108,7 +108,7 @@ def load_model_from_run(
     """
     from omegaconf import OmegaConf
 
-    from src.config import load_typed_root_config, migrate_legacy_run_cfg
+    from src.config import load_typed_root_config
     from src.global_cfg import set_cfg
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
@@ -118,7 +118,6 @@ def load_model_from_run(
     run_dir = Path(run_dir)
     ckpt_path = Path(ckpt_path)
     cfg_dict = OmegaConf.load(str(run_dir / ".hydra" / "config.yaml"))
-    cfg_dict = migrate_legacy_run_cfg(cfg_dict)
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
 

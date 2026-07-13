@@ -2,7 +2,7 @@
 
 > 本文档描述仓库的**真实现状**（探索版，非定稿），供 AI 开发时对齐认知。
 > 与 `memory.md` 配合阅读：memory.md 记录项目事实，本文档记录架构约定与"坑"。
-> **新增能力的分层写法**以 [`layered_scheme.md`](layered_scheme.md) 为准（本文件偏现状与坑）。
+> **新增能力的分层写法**以 `[layered_scheme.md](layered_scheme.md)` 为准（本文件偏现状与坑）。
 
 ## 1. 这个仓库是什么
 
@@ -10,11 +10,14 @@
 - 后来发现 AnySplat backbone 效果不佳，而 **IGGT**（输入输出相似的工作）更合适，于是把 IGGT 的模型代码**抠进本仓库复用**，共享已写好的数据集载入、训练框架、推理脚本。
 - 所以本仓库是**多个仓库的缝合体**：AnySplat 框架（Hydra + Lightning + 数据管线）+ VGGT backbone + IGGT 的 instance head（SamProjector + PartHead）+ 自研的 PhysicsHead、trace 管线、坐标工具。
 - **这是探索版本，不是定稿**。owner 要频繁尝试：不同 backbone × 不同 head × 不同 loss 的组合。**层与层的隔离是第一设计原则**——改一个小模块不应牵动其他层。
-- **分层方案契约（新增能力默认遵守）**：见 [`layered_scheme.md`](layered_scheme.md)。Physics 已按该规范落地；instance 等旧路径尚未完全迁移。
+- **分层方案契约（新增能力默认遵守）**：见 `[layered_scheme.md](layered_scheme.md)`。Physics 已按该规范落地；instance 等旧路径尚未完全迁移。
 
 关键事实（来自 memory.md）：
+
 - 训练基于 AnySplat 预训练权重（重建部分已优化好），只有 instance head 等新增结构随机初始化。
 - IGGT 官方**没有开源训练代码**，所以 loss（mvc / disc）是民间复现，可能有误。mvc 是像素级对比 loss，很难优化；disc 是实例级判别 loss，分单视角/多视角，加了 soft hinge，没按原文做 L2 归一化和 L2 正则。
+
+
 
 ## 2. 分层架构（最重要的一节）
 
@@ -46,6 +49,7 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 **统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/encoder/encoder.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_prediction`（`PhysicsPrediction | None`）。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
 
 **分发点（改组合时要看的三个注册表）**：
+
 1. `src/model/arch/__init__.py` 的 `MODELS` / `get_model`：按 `encoder_cfg` 的 dataclass 类型分发到 arch。
 2. `src/main.py` L128：按 `isinstance(cfg.model.encoder, EncoderIGGTCfg)` 选 `IGGTWrapper` 还是 `AnySplatWrapper`。
 3. `src/loss/__init__.py` 的 `LOSSES` 字典 + `src/dataset/__init__.py` 的 `DATASETS` 字典。
@@ -54,45 +58,52 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 
 ### 算法登记表
 
-一个「算法」的身份 = **(parser, heads, losses)** 三元组，权威定义就是对应的 experiment yaml（本表只是索引，改组合以 yaml 为准）。仓库现有 4 套：
+一个「算法」的身份 = **(parser, heads, losses)** 三元组，权威定义就是对应的 experiment yaml（本表只是索引，改组合以 yaml 为准），此设计为暂时弱约束，以后按需求落地为**algorithm 层**。仓库现有 4 套算法配置：
 
-| # | 算法 | experiment yaml | encoder(arch) + heads | dataset | parser | losses |
-|---|------|-----------------|----------------------|---------|--------|--------|
-| 1 | 前馈 3DGS 重建（AnySplat 原版） | `multi-dataset.yaml` | anysplat + splatting decoder；GS head（DPT） | dl3dv + co3d + scannetpp | — | mse, lpips, depth_consis |
-| 2 | 前馈 3DGS + 实例 | `instseg_anysplat.yaml`（变体：`instseg_small` / `instseg_inscene_infinigen*` / `instseg_insscene15k`） | anysplat（`instance_feat_dim=8`）+ decoder；GS head + SamProjector + PartHead | manifest | — | mse, lpips, disc |
-| 3 | 实例（IGGT 路线） | `instseg_iggt.yaml`（变体：`instseg_iggt_infinigen_mv`） | iggt（encoder-only）；SamProjector + PartHead | manifest | — | disc |
-| 4 | 实例 + 物理 | `phys_iggt.yaml` | iggt（`phys_head_enabled: true`）；SamProjector + PartHead（`lr_multiplier: 0` 冻结）+ PhysicsHead + PhysicsClassifier | manifest | `physics_parser: 3dovs_json` | phys |
+
+| #   | 算法                      | experiment yaml                                                                                    | encoder(arch) + heads                                                                                           | dataset                  | parser                       | losses                   |
+| --- | ----------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------ | ---------------------------- | ------------------------ |
+| 1   | 前馈 3DGS 重建（AnySplat 原版） | `multi-dataset.yaml`                                                                               | anysplat + splatting decoder；GS head（DPT）                                                                       | dl3dv + co3d + scannetpp | —                            | mse, lpips, depth_consis |
+| 2   | 前馈 3DGS + 实例            | `instseg_anysplat.yaml`（变体：`instseg_small` / `instseg_inscene_infinigen*` / `instseg_insscene15k`） | anysplat（`instance_feat_dim=8`）+ decoder；GS head + SamProjector + PartHead                                      | manifest                 | —                            | mse, lpips, disc         |
+| 3   | 实例（IGGT 路线）             | `instseg_iggt.yaml`（变体：`instseg_iggt_infinigen_mv`）                                                | iggt（encoder-only）；SamProjector + PartHead                                                                      | manifest                 | —                            | disc                     |
+| 4   | 实例 + 物理                 | `phys_iggt.yaml`                                                                                   | iggt（`phys_head_enabled: true`）；SamProjector + PartHead（`lr_multiplier: 0` 冻结）+ PhysicsHead + PhysicsClassifier | manifest                 | `physics_parser: 3dovs_json` | phys                     |
+
 
 新增第 5 套算法时：新建 experiment yaml 组合三元组，并在本表加一行。
 
 ## 3. 权重加载（按来源分流，权威在 arch）
 
-实现集中在 [`src/model/arch/weight_loading.py`](../src/model/arch/weight_loading.py) + [`get_model`](../src/model/arch/__init__.py) + [`IGGTModel.from_checkpoint`](../src/model/arch/iggt.py)。**scripts 禁止再复制** `_load_lightning_ckpt` / HF `strict=False` 白名单；新脚本只调这些入口。
+实现集中在 `[src/model/arch/weight_loading.py](../src/model/arch/weight_loading.py)` + `[get_model](../src/model/arch/__init__.py)` + `[IGGTModel.from_checkpoint](../src/model/arch/iggt.py)`。**scripts 禁止再复制** `_load_lightning_ckpt` / HF `strict=False` 白名单；新脚本只调这些入口。
 
 四类旋钮（不要混成一个假统一 API）：
 
-| 阶段 | 旋钮 | 权威实现 |
-|------|------|----------|
-| 建模时灌预训练 | `encoder.pretrained_weights` | `get_model` → HF 走 `init_anysplat_from_hf`；IGGT 本地路径走 `IGGTModel.from_checkpoint` |
-| 训练 resume（含 optimizer/step） | `checkpointing.load` | Lightning `Trainer.fit(ckpt_path=...)`（`src/main.py`） |
-| 推理加载训后权重 | `--ckpt` + `run_dir` | `load_model_from_run` |
-| 快速 demo（无 run_dir） | 脚本 `--hf_model` | `init_anysplat_from_hf`（与 `get_model` 共用白名单） |
+
+| 阶段                          | 旋钮                           | 权威实现                                                                              |
+| --------------------------- | ---------------------------- | --------------------------------------------------------------------------------- |
+| 建模时灌预训练                     | `encoder.pretrained_weights` | `get_model` → HF 走 `init_anysplat_from_hf`；IGGT 本地路径走 `IGGTModel.from_checkpoint` |
+| 训练 resume（含 optimizer/step） | `checkpointing.load`         | Lightning `Trainer.fit(ckpt_path=...)`（`src/main.py`）                             |
+| 推理加载训后权重                    | `--ckpt` + `run_dir`         | `load_model_from_run`                                                             |
+| 快速 demo（无 run_dir）          | 脚本 `--hf_model`              | `init_anysplat_from_hf`（与 `get_model` 共用白名单）                                      |
+
 
 「手里有什么 → 用哪个」：
 
-| 手里有什么 | 用哪个旋钮 |
-|------------|------------|
-| HF 发布的 AnySplat / 配置里 `hf:...` | `encoder.pretrained_weights`（训练）或 `--hf_model`（无 run 的脚本） |
-| IGGT 官方/本地 `.pth`（需键名 remap） | `encoder.pretrained_weights`（非 `hf:` 前缀） |
-| 自己训出的 Lightning `.ckpt` | 训练 resume → `checkpointing.load`；推理 → `--ckpt` + `run_dir` |
+
+| 手里有什么                          | 用哪个旋钮                                                      |
+| ------------------------------ | ---------------------------------------------------------- |
+| HF 发布的 AnySplat / 配置里 `hf:...` | `encoder.pretrained_weights`（训练）或 `--hf_model`（无 run 的脚本）  |
+| IGGT 官方/本地 `.pth`（需键名 remap）   | `encoder.pretrained_weights`（非 `hf:` 前缀）                   |
+| 自己训出的 Lightning `.ckpt`        | 训练 resume → `checkpointing.load`；推理 → `--ckpt` + `run_dir` |
+
 
 细节：
 
 - **AnySplat HF**：`init_anysplat_from_hf` 加载后 `strict=False` 灌入；新增 head 的 missing keys 靠 `ALLOWED_ANYSPLAT_MISSING_PREFIXES`（`encoder.instance_head.` / `encoder.part_adaptor.` / `encoder.part_head.` 等）放行。**新增 head 后必须把前缀加进该常量**，不要在脚本里另写一份。计数与 bad_missing 前缀同样会 print（见上）。
 - **IGGT 官方 ckpt**：`IGGTModel.from_checkpoint` 做两步键名重映射（`part_head.scratch.X → part_head.X`；补 `encoder.` 前缀），再按 shape 对齐后 `strict=False`。
 - **VGGT backbone**：encoder 构造时 `VGGT.from_pretrained("facebook/VGGT-1B")`，是构造副作用，不是用户旋钮。
-- **Lightning `.ckpt`**：`load_lightning_state_dict` 剥 `state_dict`；`load_model_from_run` 读 `run_dir/.hydra/config.yaml` → `get_model` → Wrapper → `load_state_dict`，返回 `wrapper.model`（只要 encoder 则取 `.encoder`）。`strict=False` 的 missing/unexpected 计数会 **print 到 stdout**（不只靠 logger），因为推理脚本通常未配 logging。
-- **旧 run_dir 迁移**：2026-07 前的 run 其 `.hydra/config.yaml` 里 dataset 键还是 `custom`，由 `migrate_legacy_run_cfg`（`src/config.py`）在 `load_model_from_run` 和 `scripts/instseg_infer.py` 读取时就地重映射为 `manifest`。**只用于读历史 run 配置**（不可再生的产物）；新训练配置必须直接用 `manifest`，不要把这个迁移挪进 `load_typed_root_config` 变成常驻兼容层。
+- **Lightning** `.ckpt`：`load_lightning_state_dict` 剥 `state_dict`；`load_model_from_run` 读 `run_dir/.hydra/config.yaml` → `get_model` → Wrapper → `load_state_dict`，返回 `wrapper.model`（只要 encoder 则取 `.encoder`）。`strict=False` 的 missing/unexpected 计数会 **print 到 stdout**（不只靠 logger），因为推理脚本通常未配 logging。
+- **旧 run_dir**：2026-07 前的 run 其 `.hydra/config.yaml` 里 dataset 键还是 `custom`（已改名 `manifest`），加载会解析报错。**代码里没有也不要加迁移兼容层**——需要推理旧 run 时，手改该 run 的 `.hydra/config.yaml`：`dataset.custom:` → `dataset.manifest:`，其下 `name: custom` → `name: manifest`。
+
 
 
 ## 4. loss 体系
@@ -102,7 +113,7 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 - 分割相关 loss：`loss_disc.py`（实例判别，主力）、`loss_mvc.py`(像素对比，难优化)、`loss_phys.py`（物理属性分类——**纯公式，无可学习参数**；classifier 在 encoder 的 `PhysicsClassifier`）。
 - loss 的开关和权重完全由 Hydra 的 `loss: [disc]` 列表 + `config/loss/*.yaml` 控制，代码里没有 if 开关。
 
-Physics / 通用分层契约、改需求指哪里、反模式：见 [`layered_scheme.md`](layered_scheme.md)（权威）；Cursor rule：`.cursor/rules/layered-scheme.mdc`。
+Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_scheme.md](layered_scheme.md)`（权威）；Cursor rule：`.cursor/rules/layered-scheme.mdc`。
 
 ## 5. 数据管线
 
@@ -113,6 +124,8 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 [`layered_sc
 - 图像张量约定：dataset 输出 `[-1, 1]`（normalize shim），但 encoder 吃 `[0, 1]`——wrapper 里有 `(image + 1) / 2`。改 wrapper/推理脚本时别弄丢这一步。
 - IGGT 训练时 context + target 视角**拼在一起全部送入 encoder**（`torch.cat([context, target], dim=1)`），instance_mask 也对应拼接。
 
+
+
 ## 6. scripts 与 trace 管线（下游推理/导出）
 
 - `scripts/instseg_infer.py`：统一推理脚本（两种输入模式 × 多种输出：seg2d/pca2d/seg3d_ply/embedding/video…），聚类算法 kmeans/hdbscan 在 `src/instseg/` 里。
@@ -121,9 +134,11 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 [`layered_sc
 - `src/trace_cameras/`：trace 脚本专用的相机加载（COLMAP / transforms.json，注册表 + `--trace_config`），与训练侧数据管线**独立**，别互相混用。
 - 根目录 `iggt_idmap.py`：多视角 IGGT 特征 → HDBSCAN 跨视角聚类 ID map（可选 3D KNN 平滑，pyg/scipy 两种后端）。
 
+
+
 ## 7. 已知的坑 / AI 常犯错误清单
 
-1. **训练数据管线统一在 `src/dataset/`**。`src/instseg/` 只保留推理/trace 后处理工具（kmeans / hdbscan_assign / export 等），不要在这里新增 dataset/datamodule 副本。
+1. **训练数据管线统一在** `src/dataset/`。`src/instseg/` 只保留推理/trace 后处理工具（kmeans / hdbscan_assign / export 等），不要在这里新增 dataset/datamodule 副本。
 2. **两套 heads 目录**：`encoder/heads/` 是 AnySplat 原有 GS head，`encoder/iggt_heads/` 是 IGGT 抠来的 instance head。新分割/属性 head 放 `iggt_heads/` 或新建目录，别混进 `heads/`。
 3. `EncoderIGGT.forward` 里对 `instance_feat_map` 有**硬编码 L2 normalize**（`iggt.py` 有注释 "hard code normalize for iggt"）；而 disc loss 又"没按原文做 L2 归一化"——改归一化策略时两处要一起考虑，别重复归一化。
 4. `EncoderAnySplat` 的 instance head 由 `instance_feat_dim` 控制（0 = 禁用，`config/model/encoder/anysplat.yaml` 默认 0）；IGGT 默认 8。同一个 PartHead 被两个 encoder 共享——这正是"同一 head 换 backbone"的实验入口，**改 PartHead 接口时两个 encoder 都要过一遍**。
@@ -133,8 +148,11 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 [`layered_sc
 8. 历史上已做过的清理，不要走回头路：post_opt 已全删；blender2opencv 手写矩阵已清理（统一走 src/coord）；trace 相机加载已抽到 src/trace_cameras 注册表。
 9. 本仓库有很多 AnySplat 原始遗留（`src/model/encoder/backbone/`、`heads/`、evaluation、visualization 的部分文件），当前 IGGT 分割路线**不经过它们**。不要因为"看起来没用"就删除，也不要误以为它们在当前训练路径上。
 
+
+
 ## 8. 当前活跃工作区
 
 - 主要改动集中在：`src/model/`、`src/trace_*`、`scripts/`。
 - 近期方向（git log）：seg3d 分割结果按实例分别渲染给 VLM；trace 支持自研 3DGS；idmap 的 3D KNN 加速。
 - 实验配置见 §2 的算法登记表：IGGT 路线 `instseg_iggt*.yaml`，AnySplat 路线 `instseg_anysplat.yaml` / `instseg_inscene_*.yaml`，物理属性 `phys_iggt.yaml`。
+
