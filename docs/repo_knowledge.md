@@ -52,11 +52,34 @@ wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning �
 
 新增 backbone/arch/head/loss 时，照抄现有 iggt 的接线方式：新 cfg dataclass → 注册到对应字典/Union 类型 → 加 `config/model/encoder/` 或 `config/loss/` 下的 yaml → 用 `config/experiment/` 组合。
 
-## 3. 权重加载（两条路径，逻辑都在 arch 层，别在别处重复实现）
+## 3. 权重加载（按来源分流，权威在 arch）
 
-- **AnySplat**：`get_model` 里从 HF (`AnySplat.from_pretrained`) 加载后 `strict=False` 灌入，新增结构的 missing keys 通过 `allowed_missing_prefixes`（`encoder.instance_head.` / `encoder.part_adaptor.` / `encoder.part_head.` 等）白名单放行。**新增 head 后必须把它的参数前缀加进这个白名单**，否则日志会报 bad_missing。
-- **IGGT**：`IGGTModel.from_checkpoint` 加载官方 ckpt，做两步键名重映射（`part_head.scratch.X → part_head.X`；补 `encoder.` 前缀），再按 shape 对齐后 `strict=False` 加载。VGGT backbone 权重则是构造时直接 `VGGT.from_pretrained("facebook/VGGT-1B")` 拉取。
-- 配置里 `pretrained_weights` 以 `hf:` 开头走 HF，否则走本地 ckpt 路径。
+实现集中在 [`src/model/arch/weight_loading.py`](../src/model/arch/weight_loading.py) + [`get_model`](../src/model/arch/__init__.py) + [`IGGTModel.from_checkpoint`](../src/model/arch/iggt.py)。**scripts 禁止再复制** `_load_lightning_ckpt` / HF `strict=False` 白名单；新脚本只调这些入口。
+
+四类旋钮（不要混成一个假统一 API）：
+
+| 阶段 | 旋钮 | 权威实现 |
+|------|------|----------|
+| 建模时灌预训练 | `encoder.pretrained_weights` | `get_model` → HF 走 `init_anysplat_from_hf`；IGGT 本地路径走 `IGGTModel.from_checkpoint` |
+| 训练 resume（含 optimizer/step） | `checkpointing.load` | Lightning `Trainer.fit(ckpt_path=...)`（`src/main.py`） |
+| 推理加载训后权重 | `--ckpt` + `run_dir` | `load_model_from_run` |
+| 快速 demo（无 run_dir） | 脚本 `--hf_model` | `init_anysplat_from_hf`（与 `get_model` 共用白名单） |
+
+「手里有什么 → 用哪个」：
+
+| 手里有什么 | 用哪个旋钮 |
+|------------|------------|
+| HF 发布的 AnySplat / 配置里 `hf:...` | `encoder.pretrained_weights`（训练）或 `--hf_model`（无 run 的脚本） |
+| IGGT 官方/本地 `.pth`（需键名 remap） | `encoder.pretrained_weights`（非 `hf:` 前缀） |
+| 自己训出的 Lightning `.ckpt` | 训练 resume → `checkpointing.load`；推理 → `--ckpt` + `run_dir` |
+
+细节：
+
+- **AnySplat HF**：`init_anysplat_from_hf` 加载后 `strict=False` 灌入；新增 head 的 missing keys 靠 `ALLOWED_ANYSPLAT_MISSING_PREFIXES`（`encoder.instance_head.` / `encoder.part_adaptor.` / `encoder.part_head.` 等）放行。**新增 head 后必须把前缀加进该常量**，不要在脚本里另写一份。
+- **IGGT 官方 ckpt**：`IGGTModel.from_checkpoint` 做两步键名重映射（`part_head.scratch.X → part_head.X`；补 `encoder.` 前缀），再按 shape 对齐后 `strict=False`。
+- **VGGT backbone**：encoder 构造时 `VGGT.from_pretrained("facebook/VGGT-1B")`，是构造副作用，不是用户旋钮。
+- **Lightning `.ckpt`**：`load_lightning_state_dict` 剥 `state_dict`；`load_model_from_run` 读 `run_dir/.hydra/config.yaml` → `get_model` → Wrapper → `load_state_dict`，返回 `wrapper.model`（只要 encoder 则取 `.encoder`）。
+
 
 ## 4. loss 体系
 

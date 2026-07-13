@@ -363,73 +363,36 @@ def load_input(args: argparse.Namespace) -> InferenceInput:
 # Model Stage
 # ---------------------------------------------------------------------------
 
-def _load_lightning_ckpt(ckpt_path: Path) -> dict:
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        return ckpt["state_dict"]
-    if isinstance(ckpt, dict):
-        return ckpt
-    raise ValueError("Unsupported checkpoint format")
-
-
 def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
-    """Load model via Lightning wrapper + checkpoint, dispatching AnySplat vs IGGT."""
-    from omegaconf import OmegaConf
+    """Load model via Lightning wrapper + checkpoint (AnySplat or IGGT)."""
+    from src.model.arch.weight_loading import load_model_from_run
 
-    from src.config import load_typed_root_config
-    from src.global_cfg import set_cfg
-    from src.loss import get_losses
-    from src.misc.step_tracker import StepTracker
-    from src.model.arch import get_model
-    from src.model.encoder.iggt import EncoderIGGTCfg
-
-    run_dir = Path(args.run_dir)
-    cfg_path = run_dir / ".hydra" / "config.yaml"
-    cfg_dict = OmegaConf.load(str(cfg_path))
-    cfg = load_typed_root_config(cfg_dict)
-    set_cfg(cfg_dict)
-
-    step_tracker = StepTracker()
-    decoder_cfg = getattr(cfg.model, "decoder", None)
-    model = get_model(cfg.model.encoder, decoder_cfg)
-
-    if isinstance(cfg.model.encoder, EncoderIGGTCfg):
-        from src.model.iggt_wrapper import IGGTWrapper
-        wrapper = IGGTWrapper(cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker)
-    else:
-        from src.model.anysplat_wrapper import AnySplatWrapper
-        wrapper = AnySplatWrapper(cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker)
-
-    state_dict = _load_lightning_ckpt(Path(args.ckpt))
-    missing, unexpected = wrapper.load_state_dict(state_dict, strict=False)
-    print(f"[model] Loaded ckpt={args.ckpt} (missing={len(missing)}, unexpected={len(unexpected)})")
-
-    wrapper = wrapper.to(device).eval()
-    return wrapper.model
+    model = load_model_from_run(args.run_dir, args.ckpt, device=device)
+    print(f"[model] Loaded ckpt={args.ckpt}")
+    return model
 
 
 def load_model_pretrained(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
-    """Load model via AnySplat.from_pretrained, optionally with instance head."""
+    """Load model via HF AnySplat, optionally with instance head."""
     from src.model.arch.anysplat import AnySplat
+    from src.model.arch.weight_loading import init_anysplat_from_hf
 
     hf_id = getattr(args, "hf_model", "lhjiang/anysplat")
     instance_dim = int(getattr(args, "instance_feat_dim", 0))
 
-    base = AnySplat.from_pretrained(hf_id)
-
     if instance_dim > 0:
+        base = AnySplat.from_pretrained(hf_id)
         encoder_cfg = deepcopy(base.encoder_cfg)
         encoder_cfg.instance_feat_dim = instance_dim
         encoder_cfg.pretrained_weights = ""
-        model = AnySplat(encoder_cfg, deepcopy(base.decoder_cfg))
-        missing, unexpected = model.load_state_dict(base.state_dict(), strict=False)
-        allowed = ("encoder.instance_head.", "encoder.instance_head_proj.")
-        bad = [k for k in missing if not k.startswith(allowed)]
-        print(f"[model] HF model with instance_feat_dim={instance_dim} "
-              f"(missing={len(missing)}, unexpected={len(unexpected)}, bad_missing={len(bad)})")
+        decoder_cfg = deepcopy(base.decoder_cfg)
+        model = init_anysplat_from_hf(
+            hf_id, encoder_cfg, decoder_cfg, base=base,
+        )
         del base
+        print(f"[model] HF model with instance_feat_dim={instance_dim}")
     else:
-        model = base
+        model = AnySplat.from_pretrained(hf_id)
         print(f"[model] HF model {hf_id} (no instance head)")
 
     model = model.to(device).eval()

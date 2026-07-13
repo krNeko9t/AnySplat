@@ -162,54 +162,17 @@ def create_virtual_resize_camera(full_cam, orig_w, orig_h, fx, fy, cx, cy,
 # Mode A: online model inference
 # ---------------------------------------------------------------------------
 
-def _load_lightning_ckpt(ckpt_path):
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        return ckpt["state_dict"]
-    if isinstance(ckpt, dict):
-        return ckpt
-    raise ValueError("Unsupported checkpoint format")
-
-
 def load_anysplat_encoder(run_dir, ckpt_path, device="cuda"):
-    """Load the AnySplat encoder (with instance head) from a training run."""
-    from omegaconf import OmegaConf
-    from src.config import load_typed_root_config
-    from src.global_cfg import set_cfg
-    from src.loss import get_losses
-    from src.misc.step_tracker import StepTracker
-    from src.model.arch import get_model
-    from src.model.encoder.iggt import EncoderIGGTCfg
+    """Load the AnySplat/IGGT encoder (with instance head) from a training run."""
+    from src.model.arch.weight_loading import load_model_from_run
 
-    cfg_path = Path(run_dir) / ".hydra" / "config.yaml"
-    cfg_dict = OmegaConf.load(str(cfg_path))
-    cfg = load_typed_root_config(cfg_dict)
-    set_cfg(cfg_dict)
-
-    decoder_cfg = getattr(cfg.model, "decoder", None)
-    model = get_model(cfg.model.encoder, decoder_cfg)
-    if isinstance(cfg.model.encoder, EncoderIGGTCfg):
-        from src.model.iggt_wrapper import IGGTWrapper
-        wrapper = IGGTWrapper(
-            cfg.optimizer, cfg.test, cfg.train,
-            model, get_losses(cfg.loss), StepTracker(),
-        )
-    else:
-        from src.model.anysplat_wrapper import AnySplatWrapper
-        wrapper = AnySplatWrapper(
-            cfg.optimizer, cfg.test, cfg.train,
-            model, get_losses(cfg.loss), StepTracker(),
-        )
-    state_dict = _load_lightning_ckpt(ckpt_path)
-    missing, unexpected = wrapper.load_state_dict(state_dict, strict=False)
-    print(f"[model] Loaded ckpt (missing={len(missing)}, unexpected={len(unexpected)})")
-
-    encoder = wrapper.model.encoder.to(device).eval()
+    model = load_model_from_run(run_dir, ckpt_path, device=device)
+    encoder = model.encoder.to(device).eval()
     for p in encoder.parameters():
         p.requires_grad = False
 
     feat_dim = int(getattr(encoder, "instance_feat_dim", 0))
-    print(f"[model] instance_feat_dim = {feat_dim}")
+    print(f"[model] Loaded ckpt; instance_feat_dim = {feat_dim}")
     return encoder, feat_dim
 
 
