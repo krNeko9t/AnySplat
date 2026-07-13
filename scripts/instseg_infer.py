@@ -367,9 +367,7 @@ def load_model_wrapper(args: argparse.Namespace, device: torch.device) -> torch.
     """Load model via Lightning wrapper + checkpoint (AnySplat or IGGT)."""
     from src.model.arch.weight_loading import load_model_from_run
 
-    model = load_model_from_run(args.run_dir, args.ckpt, device=device)
-    print(f"[model] Loaded ckpt={args.ckpt}")
-    return model
+    return load_model_from_run(args.run_dir, args.ckpt, device=device)
 
 
 def load_model_pretrained(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:

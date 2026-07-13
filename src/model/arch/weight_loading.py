@@ -71,24 +71,28 @@ def init_anysplat_from_hf(
     bad_missing = [
         k for k in missing if not k.startswith(ALLOWED_ANYSPLAT_MISSING_PREFIXES)
     ]
-    logger.info("[init_anysplat_from_hf] Initialized from HF `%s`", hf_id)
-    logger.info(
-        "[init_anysplat_from_hf] missing_keys=%d (allowed=%d, unexpected=%d), "
-        "unexpected_keys=%d",
-        len(missing),
-        len(missing) - len(bad_missing),
-        len(bad_missing),
-        len(unexpected),
+    # Print as well as log: CLI scripts often have no logging config, so
+    # logger.info alone would hide the only strict=False safety signal.
+    msg = (
+        f"[init_anysplat_from_hf] HF `{hf_id}` "
+        f"missing={len(missing)} (allowed={len(missing) - len(bad_missing)}, "
+        f"bad={len(bad_missing)}), unexpected={len(unexpected)}"
     )
+    logger.info(msg)
+    print(msg)
     if bad_missing:
         prefixes: dict[str, int] = {}
         for k in bad_missing:
             p = ".".join(k.split(".", 2)[:2]) + "."
             prefixes[p] = prefixes.get(p, 0) + 1
         top = sorted(prefixes.items(), key=lambda x: x[1], reverse=True)[:15]
-        logger.info("[init_anysplat_from_hf] unexpected missing key prefixes (top):")
+        header = "[init_anysplat_from_hf] unexpected missing key prefixes (top):"
+        logger.info(header)
+        print(header)
         for p, c in top:
-            logger.info("  - %s: %d", p, c)
+            line = f"  - {p}: {c}"
+            logger.info(line)
+            print(line)
     return model
 
 
@@ -136,12 +140,14 @@ def load_model_from_run(
 
     state_dict = load_lightning_state_dict(ckpt_path)
     missing, unexpected = wrapper.load_state_dict(state_dict, strict=False)
-    logger.info(
-        "[load_model_from_run] ckpt=%s missing=%d unexpected=%d",
-        ckpt_path,
-        len(missing),
-        len(unexpected),
+    # Print as well as log: CLI scripts often have no logging config, so
+    # logger.info alone would hide the only strict=False safety signal.
+    msg = (
+        f"[load_model_from_run] ckpt={ckpt_path} "
+        f"missing={len(missing)} unexpected={len(unexpected)}"
     )
+    logger.info(msg)
+    print(msg)
 
     wrapper = wrapper.to(device).eval()
     return wrapper.model
