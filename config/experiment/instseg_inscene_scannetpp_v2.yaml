@@ -1,0 +1,27 @@
+# @package _global_
+# InstSeg 在 InsScene-processed_scannetpp_v2 子集上训练。
+# 先运行 scripts/make_manifest_inscene_scannetpp_v2.py 生成 manifest_scannetpp_v2.jsonl，
+# 再本实验用 dataset.manifest.root / manifest_path 指向数据根目录和 manifest。
+
+defaults:
+  - instseg_anysplat
+
+wandb:
+  name: instseg_inscene_scannetpp_v2
+  tags: [instseg, inscene, scannetpp_v2]
+
+dataset:
+  manifest:
+    # TODO: 如有不同，请将路径改成你实际的 InsScene-15K ScanNet++ 解压目录。
+    # data_root = <extract_root>/processed_scannetpp_v2
+    root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_scannetpp_v2_extracted/processed_scannetpp_v2
+    manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_scannetpp_v2_extracted/processed_scannetpp_v2/manifest_scannetpp_v2.jsonl
+
+data_loader:
+  train:
+    num_workers: 8
+    batch_size: 4
+
+optimizer:
+  lr: 4.0e-4
+  warm_up_steps: 3000
