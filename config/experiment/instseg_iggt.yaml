@@ -1,15 +1,15 @@
 # @package _global_
-# IGGT instance segmentation on a custom dataset.
-# Usage: python src/main.py experiment=instseg_iggt_custom
+# IGGT instance segmentation on a manifest dataset.
+# Usage: python src/main.py experiment=instseg_iggt
 
 defaults:
-  - /dataset@_group_.custom: custom
+  - /dataset@_group_.manifest: manifest
   - override /model/encoder: iggt
   - override /loss: [disc]
 
 wandb:
-  name: instseg_iggt_custom
-  tags: [instseg, iggt, custom]
+  name: instseg_iggt
+  tags: [instseg, iggt]
 
 logger: tensorboard
 
@@ -59,4 +59,4 @@ loss:
     ignore_id: 0
 
 dataset:
-  custom: {}
+  manifest: {}

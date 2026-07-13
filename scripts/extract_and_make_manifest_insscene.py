@@ -19,9 +19,9 @@ Usage:
 
 Then train with root=extract_dir, manifest_path=manifest_out, multi-GPU e.g.:
   CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m \\
-    experiment=instseg_custom \\
-    dataset.custom.root=/path/to/processed_infinigen_extracted \\
-    dataset.custom.manifest_path=/path/to/processed_infinigen_extracted/manifest.jsonl
+    experiment=instseg_anysplat \\
+    dataset.manifest.root=/path/to/processed_infinigen_extracted \\
+    dataset.manifest.manifest_path=/path/to/processed_infinigen_extracted/manifest.jsonl
 """
 from __future__ import annotations
 
@@ -144,8 +144,8 @@ def main():
         print(f"Skipped/failed {len(failed)} subscenes (first 5): {failed[:5]}")
     print(f"Wrote manifest: {manifest_path} ({written} scenes)")
     print("Train with:")
-    print(f"  dataset.custom.root={extract_dir.resolve()}")
-    print(f"  dataset.custom.manifest_path={manifest_path.resolve()}")
+    print(f"  dataset.manifest.root={extract_dir.resolve()}")
+    print(f"  dataset.manifest.manifest_path={manifest_path.resolve()}")
 
 
 if __name__ == "__main__":

@@ -105,6 +105,22 @@ def separate_dataset_cfg_wrappers(joined: dict) -> list[DatasetCfgWrapper]:
     ]
 
 
+def migrate_legacy_run_cfg(cfg: DictConfig) -> DictConfig:
+    """Migrate an old run dir's ``.hydra/config.yaml`` to current schema.
+
+    Only call this when loading historical run configs (they are immutable
+    artifacts); fresh training configs must already use the new keys.
+
+    2026-07: dataset ``custom`` renamed to ``manifest``.
+    """
+    dataset = cfg.get("dataset")
+    if dataset is not None and "custom" in dataset:
+        legacy = dataset.pop("custom")
+        legacy["name"] = "manifest"
+        dataset["manifest"] = legacy
+    return cfg
+
+
 def load_typed_root_config(cfg: DictConfig) -> RootCfg:
     return load_typed_config(
         cfg,

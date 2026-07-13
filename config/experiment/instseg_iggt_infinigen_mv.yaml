@@ -3,7 +3,7 @@
 # Usage: CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py -m experiment=instseg_iggt_infinigen_mv
 
 defaults:
-  - instseg_iggt_custom
+  - instseg_iggt
 
 logger: tensorboard
 
@@ -15,7 +15,7 @@ wandb:
   tags: [instseg, iggt, inscene, infinigen]
 
 dataset:
-  custom:
+  manifest:
     root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted
     manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted/manifest.jsonl
 

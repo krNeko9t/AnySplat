@@ -2,7 +2,7 @@ defaults:
   - base_dataset
   - view_sampler: bounded_fixed
 
-name: custom
+name: manifest
 
 # Root directory for resolving relative paths in manifest_path.
 # 可以指向任意符合 manifest schema 的多视角数据集根目录，例如：

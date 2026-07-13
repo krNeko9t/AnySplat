@@ -1,15 +1,15 @@
 # @package _global_
 
 defaults:
-  - /dataset@_group_.custom: custom
+  - /dataset@_group_.manifest: manifest
   - override /model/encoder: anysplat
   - override /model/encoder/backbone: croco
   - override /model/decoder: splatting_cuda
   - override /loss: [mse, lpips, disc]
 
 wandb:
-  name: instseg_custom
-  tags: [instseg, custom]
+  name: instseg_small
+  tags: [instseg, anysplat, small]
 
 data_loader:
   # Avoid having to spin up new processes to print out visualizations.
@@ -63,4 +63,4 @@ loss:
     ignore_id: 0
 
 dataset:
-  custom: {}
+  manifest: {}

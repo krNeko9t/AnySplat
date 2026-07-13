@@ -84,7 +84,7 @@ def build_scene_manifest(scene_dir: Path, near: float, far: float) -> dict:
         frame = {
             "rgb_path": str(rgb_path.relative_to(scene_dir)),
             "instance_mask_path": str(inst_path.relative_to(scene_dir)),
-            # RE10K 无 depth：不写 depth_path，让 DatasetCustom 走“无深度”分支。
+            # RE10K 无 depth：不写 depth_path，让 DatasetManifest 走“无深度”分支。
             "K_px": K.astype(np.float32).tolist(),
             "c2w": T.tolist(),
             "HW": HW,

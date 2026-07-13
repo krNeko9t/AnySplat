@@ -62,13 +62,13 @@ Instance 等旧路径仍可能用 `depth_dict` 裸 key；**新路径必须用结
 
 | 改什么 | 改哪里 |
 |--------|--------|
-| 新标注格式 | [`src/dataset/physics/parsers.py`](../src/dataset/physics/parsers.py) → `PHYSICS_PARSERS`；`dataset.custom.physics_parser` |
+| 新标注格式 | [`src/dataset/physics/parsers.py`](../src/dataset/physics/parsers.py) → `PHYSICS_PARSERS`；`dataset.manifest.physics_parser` |
 | 监督语义 | [`src/dataset/physics/types.py`](../src/dataset/physics/types.py)（`PhysicsTarget`） |
 | dense 特征 | [`src/model/encoder/iggt_heads/physics_head.py`](../src/model/encoder/iggt_heads/physics_head.py) |
 | 分类器 | [`src/model/encoder/iggt_heads/physics_classifier.py`](../src/model/encoder/iggt_heads/physics_classifier.py) |
 | 预测槽 | [`src/model/encoder/physics_prediction.py`](../src/model/encoder/physics_prediction.py) → `EncoderOutput.physics_prediction` |
 | loss | [`src/loss/loss_phys.py`](../src/loss/loss_phys.py) |
-| 实验 | [`config/experiment/phys_iggt_custom.yaml`](../config/experiment/phys_iggt_custom.yaml) |
+| 实验 | [`config/experiment/phys_iggt.yaml`](../config/experiment/phys_iggt.yaml) |
 
 ## 3. 硬性规则
 
@@ -98,6 +98,6 @@ Instance 等旧路径仍可能用 `depth_dict` 裸 key；**新路径必须用结
 | Classifier 定义在 `LossPhys.__init__` | `PhysicsClassifier` 在 encoder |
 | Wrapper `_get_phys_classifier()` 遍历 losses | 读 `encoder_output.physics_prediction` |
 | `phys_feat_dim` 在 encoder yaml 与 loss yaml 各写一遍 | 只在 encoder cfg |
-| `PHYS_LABEL_MAP` 写在 `DatasetCustom` 里 | Parser 内 + `PhysicsTarget` |
+| `PHYS_LABEL_MAP` 写在 `DatasetManifest` 里 | Parser 内 + `PhysicsTarget` |
 | 监督全塞 `depth_dict["phys_label_map"]` 字符串 | `batch["physics_target"]` / `depth_dict["physics_prediction"]` 结构化对象 |
 | 为旧 key 留半年兼容别名 | 直接删旧接线，一次改完调用方 |

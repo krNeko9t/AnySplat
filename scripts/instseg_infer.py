@@ -241,8 +241,8 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
     """Load input from a dataset using the Hydra config in run_dir."""
     from omegaconf import OmegaConf
 
-    from src.config import load_typed_root_config
-    from src.dataset.dataset_custom import DatasetCustom
+    from src.config import load_typed_root_config, migrate_legacy_run_cfg
+    from src.dataset.dataset_manifest import DatasetManifest
     from src.global_cfg import set_cfg
 
     run_dir = Path(args.run_dir)
@@ -251,16 +251,17 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
         raise FileNotFoundError(cfg_path)
 
     cfg_dict = OmegaConf.load(str(cfg_path))
+    cfg_dict = migrate_legacy_run_cfg(cfg_dict)
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
 
-    custom_cfg = None
+    manifest_cfg = None
     for w in cfg.dataset:
-        if hasattr(w, "custom"):
-            custom_cfg = w.custom
+        if hasattr(w, "manifest"):
+            manifest_cfg = w.manifest
             break
-    if custom_cfg is None:
-        raise ValueError("No custom dataset cfg found in cfg.dataset")
+    if manifest_cfg is None:
+        raise ValueError("No manifest dataset cfg found in cfg.dataset")
 
     cli_ctx = _parse_int_list(getattr(args, "context_views", None))
     cli_tgt = _parse_int_list(getattr(args, "target_views", None))
@@ -274,7 +275,7 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
             int(getattr(args, "seed", 0)),
         )
 
-    ds = DatasetCustom(custom_cfg, "train", sampler)
+    ds = DatasetManifest(manifest_cfg, "train", sampler)
 
     scene_id_arg = getattr(args, "scene_id", None)
     if scene_id_arg:
@@ -285,8 +286,8 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
         scene_index = int(rng.integers(0, len(ds.scenes)))
         scene_id = str(ds.scenes[scene_index].get("scene_id", scene_index))
 
-    ps_h = int(custom_cfg.input_image_shape[0] // 14)
-    ps_w = int(custom_cfg.input_image_shape[1] // 14)
+    ps_h = int(manifest_cfg.input_image_shape[0] // 14)
+    ps_w = int(manifest_cfg.input_image_shape[1] // 14)
     example = ds.getitem(scene_index, sampler.num_context_views, (ps_h, ps_w))
 
     ctx_img = example["context"]["image"].unsqueeze(0)   # [1, Vc, 3, H, W]
@@ -337,7 +338,7 @@ def load_input_dataset(args: argparse.Namespace) -> InferenceInput:
             CameraConvention.OPENCV,
             ExtrinsicType.C2W,
             tuple(extrinsics.shape),
-            context=f"scene_id={scene_id} (DatasetCustom → model)",
+            context=f"scene_id={scene_id} (DatasetManifest → model)",
         )
     return InferenceInput(
         images=images,

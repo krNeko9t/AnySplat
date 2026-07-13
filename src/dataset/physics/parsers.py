@@ -3,7 +3,7 @@
 Add a new external format here:
   1. Implement ``PhysicsParser.parse(scene, root) -> PhysicsTarget | None``
   2. Register it in ``PHYSICS_PARSERS``
-  3. Point ``dataset.custom.physics_parser`` at the registry key
+  3. Point ``dataset.manifest.physics_parser`` at the registry key
 """
 
 from __future__ import annotations

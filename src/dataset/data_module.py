@@ -45,7 +45,7 @@ def get_data_shim(encoder: nn.Module) -> DataShim:
 prob_mapping = {DatasetScannetpp: 0.5, 
                 DatasetDL3DV: 0.5,
                 DatasetCo3d: 0.5,
-                DatasetCustom: 0.5}
+                DatasetManifest: 0.5}
 
 @dataclass
 class DataLoaderStageCfg:

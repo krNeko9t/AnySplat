@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a 3dovs scene into the manifest format expected by DatasetCustom.
+"""Convert a 3dovs scene into the manifest format expected by DatasetManifest.
 
 Usage:
     python scripts/prepare_3dovs.py --scene_dir 3dovs/bench

@@ -12,17 +12,17 @@
 #             --manifest_scannetpp_v2=.../manifest_scannetpp_v2.jsonl \\
 #             --manifest_re10k=.../manifest_re10k.jsonl \\
 #             --out=.../manifest_inscene15k.jsonl
-#   3. 本实验用 dataset.custom.root / manifest_path 指向公共根目录和合并后的 manifest。
+#   3. 本实验用 dataset.manifest.root / manifest_path 指向公共根目录和合并后的 manifest。
 
 defaults:
-  - instseg_custom
+  - instseg_anysplat
 
 wandb:
   name: instseg_insscene15k
   tags: [instseg, insscene15k]
 
 dataset:
-  custom:
+  manifest:
     # TODO: 将 root 与 manifest_path 改成你实际的 InsScene-15K 三子集公共根与合并 manifest 路径。
     root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K
     manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/manifest_inscene15k.jsonl

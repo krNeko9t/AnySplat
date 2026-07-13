@@ -26,26 +26,27 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class DatasetCustomCfg(DatasetCfgCommon):
-    """配置用于通用多视角 manifest 数据集的参数。
+class DatasetManifestCfg(DatasetCfgCommon):
+    """配置用于 manifest 驱动的通用多视角数据集。
 
     该数据集通过 manifest 文件描述一组多视角场景，可用于：
     - InsScene 各子集（processed_infinigen / processed_scannetpp_v2 / processed_re10k 等）
     - 其他任意符合相同 schema 的多视角数据集
 
-    manifest 中的每个 scene 应包含：
+    manifest schema 是**冻结的单一方言**（生成脚本 scripts/make_manifest_*.py、
+    scripts/extract_and_make_manifest_insscene.py、scripts/prepare_3dovs.py 均产出此格式；
+    不接受别名字段）。每个 scene：
     - scene_id: 可选的场景 ID
-    - frames / views / images: 视角列表，每个元素至少包含：
-      - rgb_path / image_path / rgb: 相对 root 的 RGB 图像路径
-      - depth_path / depth: 深度图路径（可选；例如 RE10K 可省略）
-      - instance_mask_path / mask_path / instance_mask: 实例分割 mask 路径
-      - K_px / K / intrinsic: 像素坐标系下的 3x3 内参矩阵
-      - c2w / extrinsic_c2w / camtoworld: 4x4 相机位姿（camera-to-world）
+    - frames: 视角列表，每个元素包含：
+      - rgb_path: 相对 root 的 RGB 图像路径（必填）
+      - instance_mask_path: 实例分割 mask 路径（必填）
+      - K_px: 像素坐标系下的 3x3 内参矩阵（必填）
+      - c2w: 4x4 相机位姿 camera-to-world（必填）
+      - depth_path: 深度图路径（可选；例如 RE10K 省略）
       - HW: [H, W] 原始分辨率（可选，缺失时回退到 original_image_shape）
-      - near / far: 可选的近平面/远平面（缺失时回退到本配置的 near/far）
     """
 
-    name: Literal["custom"]
+    name: Literal["manifest"]
     root: Path
     manifest_path: Path
     depth_invalid_value: float = 1e9
@@ -57,34 +58,34 @@ class DatasetCustomCfg(DatasetCfgCommon):
 
 
 @dataclass
-class DatasetCustomCfgWrapper:
-    custom: DatasetCustomCfg
+class DatasetManifestCfgWrapper:
+    manifest: DatasetManifestCfg
 
 
-class DatasetCustom(Dataset):
-    """A manifest-driven dataset for custom multi-view scenes.
+class DatasetManifest(Dataset):
+    """A manifest-driven dataset for generic multi-view scenes.
 
     Coordinate conventions (IMPORTANT):
-        - ``c2w`` / ``extrinsic_c2w`` / ``camtoworld`` in the manifest **must** be
-          a 4x4 **OpenCV camera-to-world** matrix:
+        - ``c2w`` in the manifest **must** be a 4x4 **OpenCV camera-to-world**
+          matrix:
               X → right,  Y → down,  Z → forward (looking direction).
-        - ``K_px`` / ``K`` / ``intrinsic`` must be a 3x3 **pixel-unit** intrinsic
-          matrix whose (cx, cy) follows **OpenCV convention** — the centre of the
-          top-left pixel is at (0, 0).  If your intrinsics come from COLMAP
-          (pixel centre at 0.5), subtract 0.5 from cx and cy before writing
-          the manifest, or use ``src.coord.colmap_to_opencv_intrinsics``.
+        - ``K_px`` must be a 3x3 **pixel-unit** intrinsic matrix whose (cx, cy)
+          follows **OpenCV convention** — the centre of the top-left pixel is
+          at (0, 0).  If your intrinsics come from COLMAP (pixel centre at
+          0.5), subtract 0.5 from cx and cy before writing the manifest, or
+          use ``src.coord.colmap_to_opencv_intrinsics``.
         - No coordinate-system conversion is applied at load time — the
           manifest must already be in OpenCV convention.
         - Output ``extrinsics``: **OpenCV c2w** (4x4).
         - Output ``intrinsics``: normalised K (fx,fy,cx,cy divided by W,H).
     """
 
-    cfg: DatasetCustomCfg
+    cfg: DatasetManifestCfg
     stage: Stage
     view_sampler: ViewSampler
     to_tensor: tf.ToTensor
 
-    def __init__(self, cfg: DatasetCustomCfg, stage: Stage, view_sampler: ViewSampler) -> None:
+    def __init__(self, cfg: DatasetManifestCfg, stage: Stage, view_sampler: ViewSampler) -> None:
         super().__init__()
         self.cfg = cfg
         self.stage = stage
@@ -116,19 +117,13 @@ class DatasetCustom(Dataset):
 
         # Training requires enough views for the view sampler (>=2 and >= num_context_views
         # so that bounded/bounded_fixed samplers do not raise "Example does not have enough frames!").
-        def _num_frames(s):
-            for key in ("frames", "views", "images"):
-                val = s.get(key)
-                if val is not None and isinstance(val, list):
-                    return len(val)
-            return 0
         min_views = max(2, getattr(self.view_sampler, "num_context_views", 2))
         before = len(self.scenes)
-        self.scenes = [s for s in self.scenes if _num_frames(s) >= min_views]
+        self.scenes = [s for s in self.scenes if len(s.get("frames") or []) >= min_views]
         if before > len(self.scenes):
             import warnings
             warnings.warn(
-                f"DatasetCustom: dropped {before - len(self.scenes)} scene(s) with <{min_views} views (kept {len(self.scenes)})",
+                f"DatasetManifest: dropped {before - len(self.scenes)} scene(s) with <{min_views} views (kept {len(self.scenes)})",
                 UserWarning,
                 stacklevel=2,
             )
@@ -173,13 +168,13 @@ class DatasetCustom(Dataset):
         scene_id = str(scene.get("scene_id", index))
         if self.stage == "val":
             logger.info(
-                "[DatasetCustom] Loading val sample scene_id=%s num_context_views=%s index=%s patch=%s",
+                "[DatasetManifest] Loading val sample scene_id=%s num_context_views=%s index=%s patch=%s",
                 scene_id,
                 num_context_views,
                 index,
                 patchsize,
             )
-        frames = scene.get("frames") or scene.get("views") or scene.get("images")
+        frames = scene.get("frames")
         if frames is None or len(frames) < 2:
             raise ValueError("Scene must contain frames with >=2 views")
 
@@ -187,8 +182,8 @@ class DatasetCustom(Dataset):
         extrinsics = []
         intrinsics = []
         for fr in frames:
-            c2w = torch.tensor(fr.get("c2w") or fr.get("extrinsic_c2w") or fr["camtoworld"], dtype=torch.float32)
-            K_px = torch.tensor(fr.get("K") or fr.get("intrinsic") or fr["K_px"], dtype=torch.float32)
+            c2w = torch.tensor(fr["c2w"], dtype=torch.float32)
+            K_px = torch.tensor(fr["K_px"], dtype=torch.float32)
             hw = fr.get("HW")
             if hw is not None:
                 h, w = int(hw[0]), int(hw[1])
@@ -211,17 +206,15 @@ class DatasetCustom(Dataset):
         t_sample = time.monotonic() - t_sample0
 
         # Check once whether this scene has depth (all frames consistent).
-        scene_has_depth = any(
-            (fr.get("depth_path") or fr.get("depth")) is not None for fr in frames
-        )
+        scene_has_depth = any(fr.get("depth_path") is not None for fr in frames)
 
         # Load selected frames.
         def load_stack(indices: Tensor):
             imgs, depths, insts, Ks = [], [], [], []
             for i in indices.tolist():
                 fr = frames[int(i)]
-                rgb_path = self._as_path(fr.get("rgb_path") or fr.get("image_path") or fr["rgb"])
-                inst_path = self._as_path(fr.get("instance_mask_path") or fr.get("mask_path") or fr["instance_mask"])
+                rgb_path = self._as_path(fr["rgb_path"])
+                inst_path = self._as_path(fr["instance_mask_path"])
 
                 try:
                     img = self._load_rgb(rgb_path)
@@ -236,8 +229,7 @@ class DatasetCustom(Dataset):
                         ).squeeze(0).squeeze(0).long()
 
                     if scene_has_depth:
-                        depth_raw = fr.get("depth_path") or fr.get("depth")
-                        depth = self._load_depth(self._as_path(depth_raw))
+                        depth = self._load_depth(self._as_path(fr["depth_path"]))
                         if depth.shape[-2] != img_h or depth.shape[-1] != img_w:
                             depth = torch.nn.functional.interpolate(
                                 depth.unsqueeze(0).unsqueeze(0),
@@ -248,7 +240,7 @@ class DatasetCustom(Dataset):
                         depth = torch.ones(img_h, img_w, dtype=torch.float32)
                 except Exception as e:
                     logger.exception(
-                        "[DatasetCustom] Failed loading files for scene_id=%s frame_idx=%s rgb=%s inst=%s",
+                        "[DatasetManifest] Failed loading files for scene_id=%s frame_idx=%s rgb=%s inst=%s",
                         scene_id,
                         i,
                         str(rgb_path),
@@ -300,7 +292,7 @@ class DatasetCustom(Dataset):
                 "index": target_indices,
                 "overlap": overlap,
             },
-            "scene": f"Custom {scene_id}",
+            "scene": f"Manifest {scene_id}",
         }
 
         if self.physics_parser is not None:
@@ -324,7 +316,7 @@ class DatasetCustom(Dataset):
             slow_s = float(getattr(self.cfg, "val_log_slow_threshold_s", 5.0)) if hasattr(self.cfg, "val_log_slow_threshold_s") else 5.0
             if dt >= slow_s:
                 logger.warning(
-                    "[DatasetCustom] Slow val sample scene_id=%s index=%s dt=%.3fs (sample=%.3fs io=%.3fs) ctx=%s tgt=%s",
+                    "[DatasetManifest] Slow val sample scene_id=%s index=%s dt=%.3fs (sample=%.3fs io=%.3fs) ctx=%s tgt=%s",
                     scene_id,
                     index,
                     dt,
@@ -340,4 +332,3 @@ class DatasetCustom(Dataset):
         index, num_context_views, patchsize_h = index_tuple
         patchsize_w = (self.cfg.input_image_shape[1] // 14)
         return self.getitem(index, num_context_views, (patchsize_h, patchsize_w))
-

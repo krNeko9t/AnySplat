@@ -1,17 +1,17 @@
 # @package _global_
-# IGGT physics property classification on a custom dataset.
-# Usage: python src/main.py +experiment=phys_iggt_custom
+# IGGT physics property classification on a manifest dataset.
+# Usage: python src/main.py +experiment=phys_iggt
 #
 # Scheme = physics_parser + phys head cfg + phys loss yaml (this file).
 
 defaults:
-  - /dataset@_group_.custom: custom
+  - /dataset@_group_.manifest: manifest
   - override /model/encoder: iggt
   - override /loss: [phys]
 
 wandb:
-  name: phys_iggt_custom
-  tags: [physics, iggt, custom]
+  name: phys_iggt
+  tags: [physics, iggt]
 
 logger: tensorboard
 
@@ -71,7 +71,7 @@ loss:
     dense_aux_weight: 0.0
 
 dataset:
-  custom:
+  manifest:
     root: 3dovs/bench
     manifest_path: manifest.jsonl
     original_image_shape: [756, 1008]
