@@ -74,7 +74,11 @@ class PhysicsPropertyReadout(nn.Module):
                     torch.empty((0,), device=feat_map.device, dtype=torch.long)
                 )
             else:
-                flat = self.mlp(pooled.float())
+                # Force fp32 readout (repo convention: heads/loss outside bf16 autocast).
+                # .float() alone is not enough under Lightning bf16-mixed — Linear stays
+                # autocast-eligible and still runs in bf16, which breaks backward.
+                with torch.amp.autocast("cuda", enabled=False):
+                    flat = self.mlp(pooled.float())
                 values_list.append(flat.view(-1, p, 2))
                 ids_list.append(ids)
 

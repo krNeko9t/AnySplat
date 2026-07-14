@@ -86,12 +86,15 @@ class PhysicsClassifier(nn.Module):
                     torch.empty((0,), device=feat_map.device, dtype=torch.long)
                 )
             else:
-                logits_list.append(self.mlp(pooled.float()))
+                # Force fp32 classifier (same reason as PhysicsPropertyReadout).
+                with torch.amp.autocast("cuda", enabled=False):
+                    logits_list.append(self.mlp(pooled.float()))
                 ids_list.append(ids)
 
         dense = None
         if self.dense_proj is not None:
-            dense = self.dense_proj(feat_map.reshape(B * V, C, H, W))
+            with torch.amp.autocast("cuda", enabled=False):
+                dense = self.dense_proj(feat_map.reshape(B * V, C, H, W).float())
             dense = dense.reshape(B, V, self.num_classes, H, W)
 
         return logits_list, ids_list, dense

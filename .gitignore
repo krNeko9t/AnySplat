@@ -198,10 +198,11 @@ tmp_scripts/
 
 *.whl
 
-infinigen/
+/infinigen/
 deprecated_launch.json
-zipnerf/
-3dovs
-standalone_trace.py
-trace_output*/
-trace_render_*/
+/zipnerf/
+/3dovs/
+/standalone_trace.py
+/trace_output*/
+/trace_render_*/
+/manifests/

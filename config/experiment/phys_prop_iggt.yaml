@@ -35,14 +35,14 @@ optimizer:
   lr: 3.0e-5
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
-  freeze_keywords: [aggregator, camera_head]
+  freeze_keywords: [aggregator, camera_head, point_head, depth_head, part_adaptor, part_head]
   param_groups:
-    - keywords: [part_adaptor, part_head]
-      lr_multiplier: 0.0
+    # - keywords: [part_adaptor, part_head]
+    #   lr_multiplier: 0.1
     - keywords: [physics_scheme]
       lr_multiplier: 1.0
-    - keywords: [point_head, depth_head]
-      lr_multiplier: 0.1
+    # - keywords: [point_head, depth_head]
+      # lr_multiplier: 0.1
 
 trainer:
   max_steps: 60000
@@ -72,3 +72,6 @@ dataset:
     # ScanNet++ iPhone frames are typically ~690x920; crop shim uses input_image_shape.
     original_image_shape: [690, 920]
     physics_parser: instascene_vlm
+    view_sampler:
+      num_context_views: 4
+      max_img_per_gpu: 8
