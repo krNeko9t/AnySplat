@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 class EncoderIGGTCfg:
     name: Literal["iggt"]
     instance_feat_dim: int = 8
-    freeze_backbone: bool = True
     pretrained_weights: str = ""
     intermediate_layer_idx: Optional[List[int]] = None
     input_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
@@ -81,11 +80,6 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
         self.pred_pose = cfg.pred_pose
         self.instance_feat_dim = cfg.instance_feat_dim
         self._intermediate_layer_idx = cfg.intermediate_layer_idx or [4, 11, 17, 23]
-
-        if cfg.freeze_backbone:
-            for m in [self.aggregator, self.camera_head, self.point_head, self.depth_head]:
-                for p in m.parameters():
-                    p.requires_grad = False
 
         self.part_adaptor = SamProjector(
             dim_in=2 * embed_dim,

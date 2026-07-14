@@ -89,7 +89,6 @@ def load_model(model_path: str, device: str = "cuda"):
     cfg = EncoderIGGTCfg(
         name="iggt",
         instance_feat_dim=8,
-        freeze_backbone=True,
         pretrained_weights="",
     )
     model = IGGTModel.from_checkpoint(cfg, model_path, device=device)

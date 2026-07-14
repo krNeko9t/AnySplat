@@ -142,7 +142,7 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 2. **两套 heads 目录**：`encoder/heads/` 是 AnySplat 原有 GS head，`encoder/iggt_heads/` 是 IGGT 抠来的 instance head。新分割/属性 head 放 `iggt_heads/` 或新建目录，别混进 `heads/`。
 3. `EncoderIGGT.forward` 里对 `instance_feat_map` 有**硬编码 L2 normalize**（`iggt.py` 有注释 "hard code normalize for iggt"）；而 disc loss 又"没按原文做 L2 归一化"——改归一化策略时两处要一起考虑，别重复归一化。
 4. `EncoderAnySplat` 的 instance head 由 `instance_feat_dim` 控制（0 = 禁用，`config/model/encoder/anysplat.yaml` 默认 0）；IGGT 默认 8。同一个 PartHead 被两个 encoder 共享——这正是"同一 head 换 backbone"的实验入口，**改 PartHead 接口时两个 encoder 都要过一遍**。
-5. IGGT encoder 里 backbone 冻结（`freeze_backbone: true`），且 optimizer 还有 `freeze_keywords` / `param_groups`（`base_wrapper.configure_optimizers`）双重控制。判断"某参数是否在训练"要同时看这两处 + arch 加载日志。
+5. 参数冻结唯一入口是 `optimizer.freeze_keywords`（`BaseWrapper.setup`，在 DDP wrap 前应用；非空时全盘接管 requires_grad，关键词零匹配直接报错）；`param_groups` 只管分组学习率，`lr_multiplier` 必须 > 0，想冻结就写进 `freeze_keywords`。判断"某参数是否在训练"看 freeze_keywords + arch 加载日志。例外：`EncoderAnySplat` 自带 `freeze_backbone`/`freeze_module`，仅在 freeze_keywords 为空时生效。
 6. 精度约定：VGGT aggregator 跑 bf16 autocast，camera/point/depth head 强制 fp32，loss 计算强制 fp32（`autocast enabled=False`）。别"顺手统一"精度。
 7. Hydra 配置是**类型化的**（`src/config.py` `load_typed_root_config` + dataclass + beartype/jaxtyping import hook）。加配置项必须同步改对应 cfg dataclass，否则启动即报错；jaxtyping 的 shape 标注是运行时校验，改张量布局时记得改标注。
 8. 历史上已做过的清理，不要走回头路：post_opt 已全删；blender2opencv 手写矩阵已清理（统一走 src/coord）；trace 相机加载已抽到 src/trace_cameras 注册表。
