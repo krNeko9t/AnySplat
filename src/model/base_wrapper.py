@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import gc
 import logging
+import math
 import threading
 from typing import Literal, Optional, Protocol, runtime_checkable, Any
 
@@ -68,7 +69,8 @@ class OptimizerCfg:
     new_param_keywords: list[str] = field(
         default_factory=lambda: ["gaussian_param_head", "interm"]
     )
-    # Keyword-based control: freeze params matching any keyword. Overrides encoder freeze.
+    # Single source of truth for freezing when non-empty: params matching any
+    # keyword are frozen, all others unfrozen. Applied in BaseWrapper.setup().
     freeze_keywords: list[str] = field(default_factory=list)
     # Declarative LR groups. First match wins. Unmatched params use backbone_lr_multiplier.
     # When non-empty, overrides new_param_keywords logic.
@@ -489,22 +491,42 @@ class BaseModelWrapper(LightningModule):
 
     # ---- Optimizer ----
 
+    def setup(self, stage: str) -> None:
+        # requires_grad must reach its final state here: setup() runs before the
+        # strategy wraps the module, while configure_optimizers runs after. The
+        # DDP reducer only registers params that require grad at wrap time, so a
+        # flip after wrapping either breaks or silently skips grad sync.
+        freeze_kw = list(self.optimizer_cfg.freeze_keywords or [])
+        if not freeze_kw:
+            return
+        hit_counts = dict.fromkeys(freeze_kw, 0)
+        n_frozen = 0
+        for name, param in self.named_parameters():
+            matched = [kw for kw in freeze_kw if kw in name]
+            for kw in matched:
+                hit_counts[kw] += 1
+            param.requires_grad = not matched
+            n_frozen += bool(matched)
+        missed = [kw for kw, n in hit_counts.items() if n == 0]
+        if missed:
+            raise ValueError(f"freeze_keywords matched no parameters: {missed}")
+        if self.global_rank == 0:
+            for kw, n in hit_counts.items():
+                logger.info("[setup] freeze keyword %r -> %d params", kw, n)
+            logger.info("[setup] frozen %d params total", n_frozen)
+
     def configure_optimizers(self):
         cfg = self.optimizer_cfg
         base_lr = cfg.lr
 
-        # 1. Apply freeze_keywords: override encoder, freeze params matching any keyword
-        freeze_kw = list(getattr(cfg, "freeze_keywords", []) or [])
-        if freeze_kw:
-            for name, param in self.named_parameters():
-                if any(kw in name for kw in freeze_kw):
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True
-
-        # 2. Build param groups
-        param_groups_cfg = list(getattr(cfg, "param_groups", []) or [])
+        param_groups_cfg = list(cfg.param_groups or [])
         if param_groups_cfg:
+            zero_lr = [grp.keywords for grp in param_groups_cfg if grp.lr_multiplier <= 0]
+            if zero_lr:
+                raise ValueError(
+                    f"param_groups with lr_multiplier <= 0: {zero_lr}; "
+                    "use freeze_keywords to freeze params"
+                )
             # Declarative: assign each param to first matching group
             group_params: list[list] = [[] for _ in range(len(param_groups_cfg) + 1)]
             for name, param in self.named_parameters():
@@ -532,9 +554,7 @@ class BaseModelWrapper(LightningModule):
                     "lr": base_lr * cfg.backbone_lr_multiplier,
                 })
 
-            param_dicts = [d for d in param_dicts if d["params"]]
-
-            if getattr(self, "global_rank", 0) == 0:
+            if self.global_rank == 0:
                 for i, grp in enumerate(param_groups_cfg):
                     logger.info("[configure_optimizers] param_groups[%d] keywords=%s lr_mult=%.2f -> %d params", i, grp.keywords, grp.lr_multiplier, len(group_params[i]))
                 logger.info("[configure_optimizers] default (backbone_lr_mult=%.2f) -> %d params", cfg.backbone_lr_multiplier, len(group_params[-1]))
@@ -563,18 +583,21 @@ class BaseModelWrapper(LightningModule):
                 {"params": pretrained_params, "lr": base_lr * cfg.backbone_lr_multiplier},
             ]
         optimizer = torch.optim.AdamW(
-            param_dicts, lr=self.optimizer_cfg.lr, weight_decay=0.05, betas=(0.9, 0.95),
+            param_dicts, lr=base_lr, weight_decay=0.05, betas=(0.9, 0.95),
         )
-        warm_up_steps = self.optimizer_cfg.warm_up_steps
-        warm_up = torch.optim.lr_scheduler.LinearLR(
-            optimizer, 1 / warm_up_steps, 1, total_iters=warm_up_steps,
-        )
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=get_cfg()["trainer"]["max_steps"], eta_min=self.optimizer_cfg.lr * 0.1,
-        )
-        lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer, schedulers=[warm_up, lr_scheduler], milestones=[warm_up_steps],
-        )
+        # One multiplicative factor for all groups (linear warmup, then cosine
+        # 1 -> 0.1) so every group keeps its configured lr ratio; a shared
+        # absolute floor would flatten or invert the schedule of low-lr groups.
+        warm_up_steps = cfg.warm_up_steps
+        max_steps = get_cfg()["trainer"]["max_steps"]
+
+        def lr_lambda(step: int) -> float:
+            if step < warm_up_steps:
+                return (step + 1) / warm_up_steps
+            t = min(1.0, (step - warm_up_steps) / max(1, max_steps - warm_up_steps))
+            return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * t))
+
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         return {
             "optimizer": optimizer,
