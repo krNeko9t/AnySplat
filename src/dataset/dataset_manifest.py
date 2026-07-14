@@ -298,7 +298,7 @@ class DatasetManifest(Dataset):
         if self.physics_parser is not None:
             phys_target = self.physics_parser.parse(scene, self.root)
             if phys_target is not None:
-                example["physics_target"] = phys_target
+                example[self.physics_parser.target_key] = phys_target
 
         # Crop to patchsize (same convention as other datasets).
         if self.stage == "train" and getattr(self.cfg, "intr_augment", False):

@@ -1,0 +1,5 @@
+# Physics property loss: formula only (no readout weights).
+# Pred/target: depth_dict["physics_property_prediction"] / ["physics_property_target"].
+phys_prop:
+  weight: 1.0
+  var_weight: 1.0

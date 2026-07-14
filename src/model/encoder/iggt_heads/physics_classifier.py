@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from .physics_pool import pool_one_sample
+
 
 class PhysicsClassifier(nn.Module):
     """Masked average-pool dense physics features → per-instance logits."""
@@ -69,10 +71,16 @@ class PhysicsClassifier(nn.Module):
             feat_b = feat_map[b]
             mask_b = instance_mask[b]
             vm_b = valid_mask[b] if valid_mask is not None else None
-            pooled, ids = self._pool_one(feat_b, mask_b, vm_b)
+            pooled, ids = pool_one_sample(
+                feat_b, mask_b, vm_b, ignore_id=self.ignore_id
+            )
             if pooled.shape[0] == 0:
                 logits_list.append(
-                    torch.empty((0, self.num_classes), device=feat_map.device, dtype=torch.float32)
+                    torch.empty(
+                        (0, self.num_classes),
+                        device=feat_map.device,
+                        dtype=torch.float32,
+                    )
                 )
                 ids_list.append(
                     torch.empty((0,), device=feat_map.device, dtype=torch.long)
@@ -87,51 +95,3 @@ class PhysicsClassifier(nn.Module):
             dense = dense.reshape(B, V, self.num_classes, H, W)
 
         return logits_list, ids_list, dense
-
-    def _pool_one(
-        self,
-        feat_map: Tensor,
-        inst_mask: Tensor,
-        valid_mask: Tensor | None,
-    ) -> tuple[Tensor, Tensor]:
-        """Pool one sample. feat_map [V,C,H,W], mask [V,H,W] → ([K,C], [K])."""
-        V, C, H, W = feat_map.shape
-
-        if valid_mask is not None:
-            if valid_mask.ndim == 3 and valid_mask.shape[-1] == 1:
-                valid_mask = valid_mask.squeeze(-1)
-            inst_mask = inst_mask.clone()
-            inst_mask[~valid_mask.bool()] = self.ignore_id
-
-        flat_mask = inst_mask.reshape(-1)
-        unique_ids = torch.unique(flat_mask)
-        unique_ids = unique_ids[unique_ids != self.ignore_id]
-
-        if unique_ids.numel() == 0:
-            return (
-                torch.empty((0, C), device=feat_map.device, dtype=feat_map.dtype),
-                torch.empty((0,), device=feat_map.device, dtype=torch.long),
-            )
-
-        feat_flat = feat_map.reshape(V, C, -1)
-        mask_flat = inst_mask.reshape(V, -1)
-
-        pooled_list: list[Tensor] = []
-        id_list: list[Tensor] = []
-        for inst_id in unique_ids:
-            per_view = mask_flat == inst_id
-            count = per_view.sum()
-            if count == 0:
-                continue
-            masked = feat_flat * per_view.unsqueeze(1).to(feat_flat.dtype)
-            pooled = masked.sum(dim=(0, 2)) / count.clamp(min=1).to(feat_flat.dtype)
-            pooled_list.append(pooled)
-            id_list.append(inst_id)
-
-        if not pooled_list:
-            return (
-                torch.empty((0, C), device=feat_map.device, dtype=feat_map.dtype),
-                torch.empty((0,), device=feat_map.device, dtype=torch.long),
-            )
-
-        return torch.stack(pooled_list, dim=0), torch.stack(id_list, dim=0)

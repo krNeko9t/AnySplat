@@ -42,12 +42,24 @@ Depth 相关约定是：
 
 ## Physics Label 约定
 
-Physics label 不是 instance ID，不能混用两套编号：
+Physics 监督不是 instance ID，不能混用两套编号。仓库有两套平行方案（Hydra `phys_scheme` 切换）：
+
+### scheme `class`（`PhysicsTarget`）
 
 - instance ID：`0 = ignore/background`，非零为实例。
 - physics class：`0 = ignore / unlabeled`，有效类别从 `1` 开始（LUT 存 1-indexed）。
 - 进入 cross entropy 前，`resolve_instance_ce` 把 `1..C` 转成 `0..C-1`。
 - 类别名与字符串→id 映射只活在 `src/dataset/physics/parsers.py`（如 `3dovs_json`），经 `PhysicsTarget.class_names` / `label_lut` 传出；不要在 dataset / wrapper / loss 里再写一份映射。
+
+### scheme `property`（`PhysicsPropertyTarget`）
+
+- 属性顺序权威：`PROPERTY_NAMES = (density, youngs_modulus, poisson_ratio)`（`types.py`）。
+- JSON key → 列映射只活在 `parsers.py`（`instascene_vlm`）；下游禁止再解析 raw key。
+- `valid[instance_id] == False` ⇒ ignore。**`id=0` 永远 ignore**（ScanNet VLM 标注里 id=0 不是真实物体，与 instance `ignore_id=0` 一致）。
+- mask 中出现但标注缺失 / `physical_property` 不完整的实例 → `valid=False`。
+- 监督空间由 parser 一次变换（loss 只做公式）：
+  - density / youngs_modulus：`mean_lut = log(raw_mean)`，`log_var_lut = log(raw_var + eps)`
+  - poisson_ratio：`mean_lut = raw_mean`，`log_var_lut = log(raw_var + eps)`
 
 ## 可视化和导出约定
 

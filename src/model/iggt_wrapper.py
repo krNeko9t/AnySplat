@@ -1,9 +1,12 @@
 """IGGTWrapper -- training / validation / test for IGGT (encoder only).
 
-Physics path:
+Physics class path:
   batch["physics_target"]  → depth_dict["physics_target"]
   encoder.physics_prediction → depth_dict["physics_prediction"]
-  LossPhys reads those two keys only (no classifier in loss).
+
+Physics property path:
+  batch["physics_property_target"] → depth_dict["physics_property_target"]
+  encoder.physics_property_prediction → depth_dict["physics_property_prediction"]
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import logging
 import torch
 from torch import nn
 
-from ..dataset.physics.types import PhysicsTarget
+from ..dataset.physics.types import PhysicsPropertyTarget, PhysicsTarget
 from ..dataset.types import BatchedExample
 from ..global_cfg import get_cfg
 from ..loss import Loss
@@ -105,6 +108,15 @@ class IGGTWrapper(BaseModelWrapper):
         if "physics_target" in batch:
             depth_dict_for_loss["physics_target"] = batch["physics_target"]
 
+        if encoder_output.physics_property_prediction is not None:
+            depth_dict_for_loss["physics_property_prediction"] = (
+                encoder_output.physics_property_prediction
+            )
+        if "physics_property_target" in batch:
+            depth_dict_for_loss["physics_property_target"] = batch[
+                "physics_property_target"
+            ]
+
         with torch.amp.autocast("cuda", enabled=False):
             total_loss, loss_values = self.compute_and_log_losses(
                 self.losses, None, batch, None, depth_dict_for_loss, self.global_step,
@@ -165,10 +177,11 @@ class IGGTWrapper(BaseModelWrapper):
                 )
 
             self._log_physics_predictions(encoder_output, batch)
+            self._log_physics_property_predictions(encoder_output, batch)
 
     @torch.no_grad()
     def _log_physics_predictions(self, encoder_output, batch: BatchedExample):
-        """Log per-instance physics predictions from encoder PhysicsPrediction."""
+        """Log per-instance physics class predictions."""
         pred = encoder_output.physics_prediction
         if pred is None or pred.instance_logits is None or pred.instance_ids is None:
             return
@@ -220,6 +233,63 @@ class IGGTWrapper(BaseModelWrapper):
                 "[PhysPred step=%d scene=%s]\n%s",
                 self.global_step, scene,
                 json.dumps(results, indent=2, ensure_ascii=False),
+            )
+
+    @torch.no_grad()
+    def _log_physics_property_predictions(self, encoder_output, batch: BatchedExample):
+        """Log per-instance property mean / log_var summaries."""
+        pred = encoder_output.physics_property_prediction
+        if pred is None or pred.instance_values is None or pred.instance_ids is None:
+            return
+
+        targets: list[PhysicsPropertyTarget] | None = batch.get(
+            "physics_property_target"
+        )
+        prop_names = pred.property_names or ()
+
+        results = []
+        for b_idx, (vals_b, ids_b) in enumerate(
+            zip(pred.instance_values, pred.instance_ids, strict=True)
+        ):
+            tgt = (
+                targets[b_idx]
+                if targets is not None and b_idx < len(targets)
+                else None
+            )
+            for row in range(vals_b.shape[0]):
+                id_int = int(ids_b[row].item())
+                entry = {"id": id_int, "pred": {}, "gt": {}}
+                for p_i, name in enumerate(prop_names):
+                    entry["pred"][name] = {
+                        "mean": round(float(vals_b[row, p_i, 0].item()), 4),
+                        "log_var": round(float(vals_b[row, p_i, 1].item()), 4),
+                    }
+                    if (
+                        tgt is not None
+                        and id_int < tgt.valid.shape[0]
+                        and bool(tgt.valid[id_int].item())
+                    ):
+                        entry["gt"][name] = {
+                            "mean": round(
+                                float(tgt.mean_lut[id_int, p_i].item()), 4
+                            ),
+                            "log_var": round(
+                                float(tgt.log_var_lut[id_int, p_i].item()), 4
+                            ),
+                        }
+                results.append(entry)
+
+        if results:
+            results.sort(key=lambda x: x["id"])
+            scene = batch.get("scene", "?")
+            shown = results[:32]
+            logger.info(
+                "[PhysPropPred step=%d scene=%s n=%d (show %d)]\n%s",
+                self.global_step,
+                scene,
+                len(results),
+                len(shown),
+                json.dumps(shown, indent=2, ensure_ascii=False),
             )
 
     def test_step(self, batch, batch_idx):

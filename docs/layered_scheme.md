@@ -63,12 +63,14 @@ Instance 等旧路径仍可能用 `depth_dict` 裸 key；**新路径必须用结
 | 改什么 | 改哪里 |
 |--------|--------|
 | 新标注格式 | [`src/dataset/physics/parsers.py`](../src/dataset/physics/parsers.py) → `PHYSICS_PARSERS`；`dataset.manifest.physics_parser` |
-| 监督语义 | [`src/dataset/physics/types.py`](../src/dataset/physics/types.py)（`PhysicsTarget`） |
+| 监督语义 | [`src/dataset/physics/types.py`](../src/dataset/physics/types.py)（`PhysicsTarget` / `PhysicsPropertyTarget`） |
 | dense 特征 | [`src/model/encoder/iggt_heads/physics_head.py`](../src/model/encoder/iggt_heads/physics_head.py) |
+| 方案装配 | [`src/model/encoder/physics_scheme.py`](../src/model/encoder/physics_scheme.py)（`phys_scheme`: `class` / `property`） |
 | 分类器 | [`src/model/encoder/iggt_heads/physics_classifier.py`](../src/model/encoder/iggt_heads/physics_classifier.py) |
-| 预测槽 | [`src/model/encoder/physics_prediction.py`](../src/model/encoder/physics_prediction.py) → `EncoderOutput.physics_prediction` |
-| loss | [`src/loss/loss_phys.py`](../src/loss/loss_phys.py) |
-| 实验 | [`config/experiment/phys_iggt.yaml`](../config/experiment/phys_iggt.yaml) |
+| 属性读出 | [`src/model/encoder/iggt_heads/physics_property_readout.py`](../src/model/encoder/iggt_heads/physics_property_readout.py) |
+| 预测槽 | [`physics_prediction.py`](../src/model/encoder/physics_prediction.py) / [`physics_property_prediction.py`](../src/model/encoder/physics_property_prediction.py) → `EncoderOutput` |
+| loss | [`src/loss/loss_phys.py`](../src/loss/loss_phys.py)（class）/ [`src/loss/loss_phys_prop.py`](../src/loss/loss_phys_prop.py)（property） |
+| 实验 | [`config/experiment/phys_iggt.yaml`](../config/experiment/phys_iggt.yaml) / [`phys_prop_iggt.yaml`](../config/experiment/phys_prop_iggt.yaml) |
 
 ## 3. 硬性规则
 

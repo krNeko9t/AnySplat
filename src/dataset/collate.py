@@ -1,26 +1,29 @@
-"""Batch collation that preserves PhysicsTarget objects as a list.
+"""Batch collation that preserves physics *Target objects as lists.
 
 default_collate cannot stack dataclasses or variable-length LUTs.
-Physics targets stay as ``list[PhysicsTarget]`` (length = batch size).
+Physics targets stay as Python lists (length = batch size).
 """
 
 from __future__ import annotations
 
 from torch.utils.data._utils.collate import default_collate
 
-from src.dataset.physics.types import PhysicsTarget
+_PHYSICS_TARGET_KEYS = ("physics_target", "physics_property_target")
 
 
 def collate_examples(batch: list[dict]) -> dict:
-    """Collate dataset examples; keep ``physics_target`` as a Python list."""
-    targets = [ex.pop("physics_target", None) for ex in batch]
+    """Collate dataset examples; keep physics *Target fields as Python lists."""
+    popped: dict[str, list] = {
+        key: [ex.pop(key, None) for ex in batch] for key in _PHYSICS_TARGET_KEYS
+    }
     collated = default_collate(batch)
-    if any(t is not None for t in targets):
-        # Replace None with a sentinel empty target? Prefer require all-or-nothing.
-        if not all(t is not None for t in targets):
+    for key, values in popped.items():
+        if not any(t is not None for t in values):
+            continue
+        if not all(t is not None for t in values):
             raise ValueError(
-                "physics_target must be present for every sample in the batch "
+                f"{key} must be present for every sample in the batch "
                 "(or for none). Mixed batches are not supported."
             )
-        collated["physics_target"] = targets  # list[PhysicsTarget]
+        collated[key] = values
     return collated

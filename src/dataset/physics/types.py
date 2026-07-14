@@ -1,7 +1,7 @@
 """Physics supervision types produced by dataset parsers.
 
 Layer contract (dataset → model/loss):
-  Parser reads an external annotation format and returns ``PhysicsTarget``.
+  Parser reads an external annotation format and returns a ``*Target``.
   Downstream code must not re-parse raw JSON / invent class id mappings.
 """
 
@@ -9,13 +9,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jaxtyping import Int64
+from jaxtyping import Bool, Float32, Int64
 from torch import Tensor
+
+# Canonical property order for the property-regression scheme.
+# JSON key → index mapping lives only in parsers.py.
+PROPERTY_NAMES: tuple[str, ...] = ("density", "youngs_modulus", "poisson_ratio")
 
 
 @dataclass
 class PhysicsTarget:
-    """Scene-level physics supervision.
+    """Scene-level physics **class** supervision (scheme ``class``).
 
     Conventions (see docs/conventions.md):
       - ``label_lut[instance_id]`` is 1-indexed class id; ``0`` = ignore / unlabeled.
@@ -24,3 +28,21 @@ class PhysicsTarget:
 
     label_lut: Int64[Tensor, " max_id_plus_1"]
     class_names: tuple[str, ...]
+
+
+@dataclass
+class PhysicsPropertyTarget:
+    """Scene-level physics **property** supervision (scheme ``property``).
+
+    Conventions (see docs/conventions.md):
+      - ``valid[instance_id]`` False ⇒ ignore (includes id=0 and missing labels).
+      - ``mean_lut`` / ``log_var_lut`` are in model space (parser-transformed):
+          density / youngs_modulus: mean = log(raw_mean), log_var = log(raw_var + eps)
+          poisson_ratio: mean = raw_mean, log_var = log(raw_var + eps)
+      - Column order matches ``property_names`` / ``PROPERTY_NAMES``.
+    """
+
+    mean_lut: Float32[Tensor, "max_id_plus_1 n_prop"]
+    log_var_lut: Float32[Tensor, "max_id_plus_1 n_prop"]
+    valid: Bool[Tensor, " max_id_plus_1"]
+    property_names: tuple[str, ...]

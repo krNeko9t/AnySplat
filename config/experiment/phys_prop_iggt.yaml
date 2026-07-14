@@ -1,17 +1,17 @@
 # @package _global_
-# IGGT physics property classification on a manifest dataset.
-# Usage: python src/main.py +experiment=phys_iggt
+# IGGT physics property regression on instascene VLM annotations.
+# Usage: python src/main.py +experiment=phys_prop_iggt
 #
-# Scheme = physics_parser + phys head cfg + phys loss yaml (this file).
+# Scheme = instascene_vlm parser + phys_scheme=property + phys_prop loss.
 
 defaults:
   - /dataset@_group_.manifest: manifest
   - override /model/encoder: iggt
-  - override /loss: [phys]
+  - override /loss: [phys_prop]
 
 wandb:
-  name: phys_iggt
-  tags: [physics, iggt]
+  name: phys_prop_iggt
+  tags: [physics, property, iggt]
 
 logger: tensorboard
 
@@ -21,14 +21,12 @@ data_loader:
 
 model:
   encoder:
-    pretrained_weights: "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/iggt_checkpoint.pth"
+    pretrained_weights: "/home/liaoyuanjun/iggt_checkpoint.pth"
     instance_feat_dim: 8
     intermediate_layer_idx: [4, 11, 17, 23]
-    phys_scheme: class
+    phys_scheme: property
     phys_feat_dim: 32
-    phys_num_classes: 4
-    phys_classifier_hidden: 64
-    phys_class_names: [static, rigid, soft, unknown]
+    phys_property_hidden: 64
     phys_use_point_feat: true
     phys_use_window_cross_attn: true
   decoder: null
@@ -63,16 +61,14 @@ hydra:
     dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
 
 loss:
-  phys:
+  phys_prop:
     weight: 1.0
-    num_classes: 4
-    ignore_id: 0
-    focal_gamma: 2.0
-    dense_aux_weight: 0.0
+    var_weight: 1.0
 
 dataset:
   manifest:
-    root: 3dovs/bench
-    manifest_path: manifest.jsonl
-    original_image_shape: [756, 1008]
-    physics_parser: 3dovs_json
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
+    # ScanNet++ iPhone frames are typically ~690x920; crop shim uses input_image_shape.
+    original_image_shape: [690, 920]
+    physics_parser: instascene_vlm

@@ -11,6 +11,7 @@ from .loss_chamfer_distance import LossChamferDistance, LossChamferDistanceCfgWr
 from .loss_mvc import LossMVC, LossMvcCfgWrapper
 from .loss_disc import LossDisc, LossDiscCfgWrapper
 from .loss_phys import LossPhys, LossPhysCfgWrapper
+from .loss_phys_prop import LossPhysProp, LossPhysPropCfgWrapper
 LOSSES = {
     LossDepthCfgWrapper: LossDepth,
     LossLpipsCfgWrapper: LossLpips,
@@ -24,9 +25,10 @@ LOSSES = {
     LossMvcCfgWrapper: LossMVC,
     LossDiscCfgWrapper: LossDisc,
     LossPhysCfgWrapper: LossPhys,
+    LossPhysPropCfgWrapper: LossPhysProp,
 }
 
-LossCfgWrapper = LossDepthCfgWrapper | LossLpipsCfgWrapper | LossMseCfgWrapper | LossOpacityCfgWrapper | LossDepthGTCfgWrapper | LossLODCfgWrapper | LossDepthConsisCfgWrapper | LossNormalConsisCfgWrapper | LossChamferDistanceCfgWrapper | LossMvcCfgWrapper | LossDiscCfgWrapper | LossPhysCfgWrapper
+LossCfgWrapper = LossDepthCfgWrapper | LossLpipsCfgWrapper | LossMseCfgWrapper | LossOpacityCfgWrapper | LossDepthGTCfgWrapper | LossLODCfgWrapper | LossDepthConsisCfgWrapper | LossNormalConsisCfgWrapper | LossChamferDistanceCfgWrapper | LossMvcCfgWrapper | LossDiscCfgWrapper | LossPhysCfgWrapper | LossPhysPropCfgWrapper
 
 def get_losses(cfgs: list[LossCfgWrapper]) -> list[Loss]:
     return [LOSSES[type(cfg)](cfg) for cfg in cfgs]

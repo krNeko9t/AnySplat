@@ -3,15 +3,17 @@
 Outputs ``EncoderOutput`` with:
   - ``gaussians = None``  (no Gaussian head)
   - ``instance_feat_map``  [B, V, D, H, W]
-  - ``physics_prediction`` PhysicsPrediction | None
+  - ``physics_prediction`` / ``physics_property_prediction`` via phys_scheme
   - ``pred_context_pose``  dict with extrinsic / intrinsic
   - ``depth_dict``         dict with depth / world_points / conf
 
 Physics wiring (where to edit):
-  - dense features  → PhysicsHead (iggt_heads/physics_head.py)
-  - instance logits → PhysicsClassifier (iggt_heads/physics_classifier.py)
+  - scheme selection → physics_scheme.build_physics_scheme (phys_scheme cfg)
+  - dense features  → PhysicsHead
+  - class logits    → PhysicsClassifier
+  - property values → PhysicsPropertyReadout
   - GT labels       → dataset physics parsers (not here)
-  - loss formula    → src/loss/loss_phys.py (not here)
+  - loss formula    → src/loss/loss_phys*.py (not here)
 """
 
 from __future__ import annotations
@@ -29,8 +31,8 @@ from src.dataset.types import BatchedExample, DataShim
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 from .encoder import Encoder, EncoderOutput
-from .iggt_heads import PartHead, PhysicsClassifier, PhysicsHead, SamProjector
-from .physics_prediction import PhysicsPrediction
+from .iggt_heads import PartHead, SamProjector
+from .physics_scheme import build_physics_scheme
 from .vggt.models.vggt import VGGT
 
 logger = logging.getLogger(__name__)
@@ -46,17 +48,19 @@ class EncoderIGGTCfg:
     input_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
     input_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
     pred_pose: bool = True
-    # Physics head + classifier (disabled by default)
-    phys_head_enabled: bool = False
+    # Physics scheme: None | "class" | "property" (Hydra switch; replaces phys_head_enabled)
+    phys_scheme: Optional[Literal["class", "property"]] = None
     phys_feat_dim: int = 32
-    phys_num_classes: int = 4
-    phys_classifier_hidden: int = 64
     phys_ignore_id: int = 0
-    phys_dense_logits: bool = False
     phys_use_point_feat: bool = True
     phys_use_window_cross_attn: bool = True
-    # Optional CE class names for logging (0-indexed). Override in experiment yaml.
+    # scheme == "class"
+    phys_num_classes: int = 4
+    phys_classifier_hidden: int = 64
+    phys_dense_logits: bool = False
     phys_class_names: Optional[List[str]] = None
+    # scheme == "property"
+    phys_property_hidden: int = 64
 
 
 class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
@@ -97,29 +101,7 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             window_size=8,
         )
 
-        self.phys_head_enabled = cfg.phys_head_enabled
-        self.physics_head: PhysicsHead | None = None
-        self.physics_classifier: PhysicsClassifier | None = None
-        self.phys_class_names: tuple[str, ...] | None = None
-        if self.phys_head_enabled:
-            self.physics_head = PhysicsHead(
-                in_channels=[256, 256, 256, 256],
-                features=256,
-                output_dim=cfg.phys_feat_dim,
-                patch_size=patch_size,
-                window_size=8,
-                use_point_feat=cfg.phys_use_point_feat,
-                use_window_cross_attn=cfg.phys_use_window_cross_attn,
-            )
-            self.physics_classifier = PhysicsClassifier(
-                feat_dim=cfg.phys_feat_dim,
-                num_classes=cfg.phys_num_classes,
-                hidden=cfg.phys_classifier_hidden,
-                ignore_id=cfg.phys_ignore_id,
-                dense_logits=cfg.phys_dense_logits,
-            )
-            if cfg.phys_class_names is not None:
-                self.phys_class_names = tuple(cfg.phys_class_names)
+        self.physics_scheme = build_physics_scheme(cfg)
 
     def forward(
         self,
@@ -177,27 +159,18 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
         ).to(instance_feat_map.dtype)
 
         physics_prediction = None
-        if self.physics_head is not None:
-            feat_map = self.physics_head(
+        physics_property_prediction = None
+        if self.physics_scheme is not None:
+            slots = self.physics_scheme(
                 list(adaptor_out.values()),
                 images=image,
                 patch_start_idx=patch_start_idx,
                 point_feature=point_feat_list,
+                instance_mask=instance_mask,
+                valid_mask=valid_mask,
             )
-            inst_logits = None
-            inst_ids = None
-            dense_logits = None
-            if self.physics_classifier is not None and instance_mask is not None:
-                inst_logits, inst_ids, dense_logits = self.physics_classifier(
-                    feat_map, instance_mask, valid_mask=valid_mask
-                )
-            physics_prediction = PhysicsPrediction(
-                feat_map=feat_map,
-                instance_logits=inst_logits,
-                instance_ids=inst_ids,
-                dense_logits=dense_logits,
-                class_names=self.phys_class_names,
-            )
+            physics_prediction = slots.physics_prediction
+            physics_property_prediction = slots.physics_property_prediction
 
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()
@@ -236,6 +209,7 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
             instance_feat_map=instance_feat_map,
             gaussian_instance_feat=None,
             physics_prediction=physics_prediction,
+            physics_property_prediction=physics_property_prediction,
         )
 
     def get_data_shim(self) -> DataShim:

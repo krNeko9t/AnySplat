@@ -9,6 +9,7 @@ from jaxtyping import Float
 from torch import Tensor, nn
 
 from .physics_prediction import PhysicsPrediction
+from .physics_property_prediction import PhysicsPropertyPrediction
 
 T = TypeVar("T")
 
@@ -26,8 +27,10 @@ class EncoderOutput:
     instance_feat_map: Float[Tensor, "batch view n height width"] | None = None
     # gaussian_instance_feat: [B, G, N] (aligned with gaussians order)
     gaussian_instance_feat: Float[Tensor, "batch gaussian n"] | None = None
-    # Physics head slot (feat_map + optional instance/dense logits). See PhysicsPrediction.
+    # Physics scheme "class" slot. See PhysicsPrediction.
     physics_prediction: PhysicsPrediction | None = None
+    # Physics scheme "property" slot. See PhysicsPropertyPrediction.
+    physics_property_prediction: PhysicsPropertyPrediction | None = None
 
 
 class Encoder(nn.Module, ABC, Generic[T]):
