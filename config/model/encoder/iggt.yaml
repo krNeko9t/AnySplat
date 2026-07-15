@@ -5,7 +5,7 @@ pretrained_weights: ""
 intermediate_layer_idx: [4, 11, 17, 23]
 pred_pose: true
 
-# Physics scheme: null | class | property
+# Physics scheme: null | class | property | physgm_copy
 phys_scheme: null
 phys_feat_dim: 32
 phys_ignore_id: 0
@@ -18,3 +18,5 @@ phys_dense_logits: false
 # phys_class_names: [static, rigid, soft, unknown]  # optional; else taken from PhysicsTarget
 # scheme == property
 phys_property_hidden: 64
+# scheme == physgm_copy
+physgm_hidden: 64

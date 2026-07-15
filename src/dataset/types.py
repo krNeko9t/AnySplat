@@ -34,6 +34,7 @@ class BatchedExample(TypedDict, total=False):
     # Scene-level physics supervision (list length = batch). See src/dataset/physics/.
     physics_target: list  # list[PhysicsTarget]; kept untyped here to avoid circular imports
     physics_property_target: list  # list[PhysicsPropertyTarget]; optional alternate scheme
+    physgm_target: list  # list[PhysGMTarget]; PhysGM-style property scheme
 
 
 class UnbatchedViews(TypedDict, total=False):

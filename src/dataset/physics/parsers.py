@@ -11,12 +11,13 @@ from __future__ import annotations
 import json
 import logging
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import torch
 
-from .types import PROPERTY_NAMES, PhysicsPropertyTarget, PhysicsTarget
+from .types import PROPERTY_NAMES, PhysGMTarget, PhysicsPropertyTarget, PhysicsTarget
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,47 @@ _VLM_PROP_KEYS: tuple[str, ...] = (
 _VLM_LOG_MEAN: tuple[bool, ...] = (True, True, False)
 
 
+# --- PhysGM-style normalization (scheme "physgm_copy") ----------------------
+# youngs_modulus / poisson_ratio stats are copied verbatim from the PhysGM repo
+# (utils.py: E_MEAN/E_STD over log10(Pa), NU_MEAN/NU_STD). Density has no PhysGM
+# counterpart; its log10(kg/m³) prior spans foam (~2e1) to metal (~8e3).
+
+
+@dataclass(frozen=True)
+class PhysGMNorm:
+    """Raw VLM value → z-scored model space: z = (log10(v·si_scale) - mean) / std."""
+
+    si_scale: float  # VLM unit → SI multiplier
+    log10: bool  # apply log10 before z-scoring
+    mean: float
+    std: float
+
+
+# PROPERTY_NAMES order: density, youngs_modulus, poisson_ratio.
+PHYSGM_NORMALIZATION: tuple[PhysGMNorm, ...] = (
+    PhysGMNorm(si_scale=1.0, log10=True, mean=3.0, std=0.5),  # density kg/m³
+    PhysGMNorm(si_scale=1e6, log10=True, mean=7.387210, std=2.456477),  # E: MPa→Pa
+    PhysGMNorm(si_scale=1.0, log10=False, mean=0.398, std=0.111),  # nu
+)
+
+
+def physgm_denormalize(values: torch.Tensor) -> torch.Tensor:
+    """Model space ``[..., P]`` → SI units (density kg/m³, E Pa, nu). For logging."""
+    cols = []
+    for i, spec in enumerate(PHYSGM_NORMALIZATION):
+        x = values[..., i].float() * spec.std + spec.mean
+        cols.append(torch.pow(10.0, x) if spec.log10 else x)
+    return torch.stack(cols, dim=-1)
+
+
 class PhysicsParser(Protocol):
     """External annotation → typed target. ``target_key`` selects the batch field."""
 
     target_key: str
 
-    def parse(self, scene: dict, root: Path) -> PhysicsTarget | PhysicsPropertyTarget | None:
+    def parse(
+        self, scene: dict, root: Path
+    ) -> PhysicsTarget | PhysicsPropertyTarget | PhysGMTarget | None:
         """Parse scene-level physics labels. Return None if absent."""
         ...
 
@@ -89,6 +125,39 @@ class ThreeDOVSJsonParser:
         return PhysicsTarget(label_lut=lut, class_names=_3DOVS_CLASS_NAMES)
 
 
+def _load_vlm_scene(scene: dict, root: Path, parser_name: str) -> list | None:
+    """Read the VLM scene JSON list, or None if missing/empty."""
+    path = _resolve_labels_path(scene, root)
+    if path is None:
+        return None
+    if not path.exists():
+        logger.warning("[%s] missing %s, skipping", parser_name, path)
+        return None
+    with path.open("r") as f:
+        raw = json.load(f)
+    if not isinstance(raw, list) or not raw:
+        return None
+    return raw
+
+
+def _iter_vlm_instances(raw: list):
+    """Yield ``(inst_id, physical_property dict)`` for well-formed entries (id > 0)."""
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            inst_id = int(entry["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if inst_id <= 0:
+            continue
+        response = entry.get("response") or {}
+        props = response.get("physical_property")
+        if not isinstance(props, dict):
+            continue
+        yield inst_id, props
+
+
 def _encode_mean_var(mean: float, variance: float, *, log_mean: bool) -> tuple[float, float]:
     if mean <= 0 and log_mean:
         raise ValueError(f"log-mean property requires mean > 0, got {mean}")
@@ -109,31 +178,12 @@ class InstasceneVlmParser:
     target_key: str = "physics_property_target"
 
     def parse(self, scene: dict, root: Path) -> PhysicsPropertyTarget | None:
-        path = _resolve_labels_path(scene, root)
-        if path is None:
-            return None
-        if not path.exists():
-            logger.warning("[InstasceneVlmParser] missing %s, skipping", path)
-            return None
-        with path.open("r") as f:
-            raw = json.load(f)
-        if not isinstance(raw, list) or not raw:
+        raw = _load_vlm_scene(scene, root, type(self).__name__)
+        if raw is None:
             return None
 
         parsed: dict[int, tuple[list[float], list[float]]] = {}
-        for entry in raw:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                inst_id = int(entry["id"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if inst_id <= 0:
-                continue
-            response = entry.get("response") or {}
-            props = response.get("physical_property")
-            if not isinstance(props, dict):
-                continue
+        for inst_id, props in _iter_vlm_instances(raw):
             means: list[float] = []
             log_vars: list[float] = []
             try:
@@ -176,9 +226,61 @@ class InstasceneVlmParser:
         )
 
 
+class InstasceneVlmPhysGMParser:
+    """Same VLM scene JSON as InstasceneVlmParser → PhysGMTarget.
+
+    PhysGM-style supervision: z-scored scalars (PHYSGM_NORMALIZATION), no GT
+    variance — predictive variance is learned by the Gaussian NLL loss instead.
+    """
+
+    target_key: str = "physgm_target"
+
+    def parse(self, scene: dict, root: Path) -> PhysGMTarget | None:
+        raw = _load_vlm_scene(scene, root, type(self).__name__)
+        if raw is None:
+            return None
+
+        parsed: dict[int, list[float]] = {}
+        for inst_id, props in _iter_vlm_instances(raw):
+            values: list[float] = []
+            try:
+                for key, spec in zip(_VLM_PROP_KEYS, PHYSGM_NORMALIZATION, strict=True):
+                    v = float(props[key]["mean"]) * spec.si_scale
+                    if spec.log10:
+                        # max(·, 1.0) mirrors PhysGM's log10(max(E, 1.0)).
+                        v = math.log10(max(v, 1.0))
+                    values.append((v - spec.mean) / spec.std)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug(
+                    "[InstasceneVlmPhysGMParser] skip id=%s incomplete props: %s",
+                    inst_id,
+                    e,
+                )
+                continue
+            parsed[inst_id] = values
+
+        if not parsed:
+            return None
+
+        max_id = max(parsed.keys())
+        p = len(PROPERTY_NAMES)
+        value_lut = torch.zeros(max_id + 1, p, dtype=torch.float32)
+        valid = torch.zeros(max_id + 1, dtype=torch.bool)
+        for inst_id, values in parsed.items():
+            value_lut[inst_id] = torch.tensor(values, dtype=torch.float32)
+            valid[inst_id] = True
+        # id=0 stays False by construction (never written).
+        return PhysGMTarget(
+            value_lut=value_lut,
+            valid=valid,
+            property_names=PROPERTY_NAMES,
+        )
+
+
 PHYSICS_PARSERS: dict[str, PhysicsParser] = {
     "3dovs_json": ThreeDOVSJsonParser(),
     "instascene_vlm": InstasceneVlmParser(),
+    "instascene_vlm_physgm": InstasceneVlmPhysGMParser(),
 }
 
 

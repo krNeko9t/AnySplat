@@ -1,0 +1,5 @@
+# PhysGM-style property loss: per-property Gaussian NLL + MSE (formula only).
+# Pred/target: depth_dict["physgm_prediction"] / ["physgm_target"].
+physgm:
+  weight: 1.0
+  mse_weight: 1.0

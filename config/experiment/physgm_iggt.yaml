@@ -1,0 +1,73 @@
+# @package _global_
+# PhysGM-copy physics property regression on instascene VLM annotations.
+# Usage: python src/main.py +experiment=physgm_iggt
+#
+# Scheme = instascene_vlm_physgm parser + phys_scheme=physgm_copy + physgm loss.
+# Faithful copy of PhysGM's supervision: z-scored log10(Pa) targets, per-property
+# (mu, var) readout on pooled backbone tokens, Gaussian NLL + MSE. No dense
+# physics head — the physics path adds no full-resolution activations.
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: iggt
+  - override /loss: [physgm]
+
+wandb:
+  name: physgm_iggt
+  tags: [physics, physgm, iggt]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    pretrained_weights: "/home/liaoyuanjun/iggt_checkpoint.pth"
+    instance_feat_dim: 8
+    intermediate_layer_idx: [4, 11, 17, 23]
+    phys_scheme: physgm_copy
+    physgm_hidden: 64
+  decoder: null
+
+optimizer:
+  lr: 3.0e-5
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 0.1
+  freeze_keywords: [aggregator, camera_head, point_head, depth_head, part_adaptor, part_head]
+  param_groups:
+    - keywords: [physics_scheme]
+      lr_multiplier: 1.0
+
+trainer:
+  max_steps: 60000
+  val_check_interval: 500
+  precision: bf16-mixed
+  limit_val_batches: 1
+
+checkpointing:
+  load: null
+  every_n_train_steps: 500
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  physgm:
+    weight: 1.0
+    mse_weight: 1.0
+
+dataset:
+  manifest:
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
+    # ScanNet++ iPhone frames are typically ~690x920; crop shim uses input_image_shape.
+    original_image_shape: [690, 920]
+    physics_parser: instascene_vlm_physgm
+    view_sampler:
+      num_context_views: 4
+      max_img_per_gpu: 8

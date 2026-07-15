@@ -1,7 +1,8 @@
-"""Physics scheme bundles: class vs property wiring for EncoderIGGT.
+"""Physics scheme bundles: class / property / physgm_copy wiring for EncoderIGGT.
 
 Switching is by ``phys_scheme`` registry key (Hydra), not bool flags in forward.
-Each bundle owns PhysicsHead + readout and fills the matching EncoderOutput slot.
+Each bundle owns its head + readout, consumes what it needs from
+``PhysicsSchemeInputs``, and fills the matching EncoderOutput slot.
 """
 
 from __future__ import annotations
@@ -14,11 +15,30 @@ from torch import Tensor
 
 from src.dataset.physics.types import PROPERTY_NAMES
 
+from .iggt_heads.physgm_readout import PhysGMReadout
 from .iggt_heads.physics_classifier import PhysicsClassifier
 from .iggt_heads.physics_head import PhysicsHead
 from .iggt_heads.physics_property_readout import PhysicsPropertyReadout
+from .physgm_prediction import PhysGMPrediction
 from .physics_prediction import PhysicsPrediction
 from .physics_property_prediction import PhysicsPropertyPrediction
+
+
+@dataclass
+class PhysicsSchemeInputs:
+    """Everything the encoder exposes to physics schemes (named cross-layer type)."""
+
+    # SamProjector multi-scale maps, 4 × [B*S, C_i, H_i, W_i] (class / property).
+    adaptor_features: list[Tensor]
+    # Raw aggregator tokens per requested layer, each [B, S, N, token_dim] (physgm_copy).
+    aggregated_tokens: list[Tensor]
+    images: Tensor  # [B, S, 3, H, W]
+    patch_start_idx: int
+    patch_size: int
+    # Point-head intermediate DPT features (class / property cross-attn).
+    point_feature: list[Tensor] | None
+    instance_mask: Tensor | None  # [B, S, H, W]
+    valid_mask: Tensor | None  # [B, S, H, W] (or [..., 1])
 
 
 @dataclass
@@ -27,19 +47,11 @@ class PhysicsSchemeSlots:
 
     physics_prediction: PhysicsPrediction | None = None
     physics_property_prediction: PhysicsPropertyPrediction | None = None
+    physgm_prediction: PhysGMPrediction | None = None
 
 
 class PhysicsSchemeBundle(Protocol):
-    def forward(
-        self,
-        adaptor_features: list,
-        *,
-        images: Tensor,
-        patch_start_idx: int,
-        point_feature: list | None,
-        instance_mask: Tensor | None,
-        valid_mask: Tensor | None,
-    ) -> PhysicsSchemeSlots:
+    def forward(self, inputs: PhysicsSchemeInputs) -> PhysicsSchemeSlots:
         ...
 
 
@@ -78,28 +90,19 @@ class ClassPhysicsBundle(nn.Module):
             dense_logits=phys_dense_logits,
         )
 
-    def forward(
-        self,
-        adaptor_features: list,
-        *,
-        images: Tensor,
-        patch_start_idx: int,
-        point_feature: list | None,
-        instance_mask: Tensor | None,
-        valid_mask: Tensor | None,
-    ) -> PhysicsSchemeSlots:
+    def forward(self, inputs: PhysicsSchemeInputs) -> PhysicsSchemeSlots:
         feat_map = self.physics_head(
-            adaptor_features,
-            images=images,
-            patch_start_idx=patch_start_idx,
-            point_feature=point_feature,
+            inputs.adaptor_features,
+            images=inputs.images,
+            patch_start_idx=inputs.patch_start_idx,
+            point_feature=inputs.point_feature,
         )
         inst_logits = None
         inst_ids = None
         dense_logits = None
-        if instance_mask is not None:
+        if inputs.instance_mask is not None:
             inst_logits, inst_ids, dense_logits = self.physics_classifier(
-                feat_map, instance_mask, valid_mask=valid_mask
+                feat_map, inputs.instance_mask, valid_mask=inputs.valid_mask
             )
         return PhysicsSchemeSlots(
             physics_prediction=PhysicsPrediction(
@@ -142,27 +145,18 @@ class PropertyPhysicsBundle(nn.Module):
             property_names=PROPERTY_NAMES,
         )
 
-    def forward(
-        self,
-        adaptor_features: list,
-        *,
-        images: Tensor,
-        patch_start_idx: int,
-        point_feature: list | None,
-        instance_mask: Tensor | None,
-        valid_mask: Tensor | None,
-    ) -> PhysicsSchemeSlots:
+    def forward(self, inputs: PhysicsSchemeInputs) -> PhysicsSchemeSlots:
         feat_map = self.physics_head(
-            adaptor_features,
-            images=images,
-            patch_start_idx=patch_start_idx,
-            point_feature=point_feature,
+            inputs.adaptor_features,
+            images=inputs.images,
+            patch_start_idx=inputs.patch_start_idx,
+            point_feature=inputs.point_feature,
         )
         inst_values = None
         inst_ids = None
-        if instance_mask is not None:
+        if inputs.instance_mask is not None:
             inst_values, inst_ids = self.physics_property_readout(
-                feat_map, instance_mask, valid_mask=valid_mask
+                feat_map, inputs.instance_mask, valid_mask=inputs.valid_mask
             )
         return PhysicsSchemeSlots(
             physics_property_prediction=PhysicsPropertyPrediction(
@@ -174,7 +168,52 @@ class PropertyPhysicsBundle(nn.Module):
         )
 
 
-def build_physics_scheme(cfg: Any) -> nn.Module | None:
+class PhysGMCopyBundle(nn.Module):
+    """PhysGMReadout on raw backbone tokens → physgm_prediction.
+
+    No dense head: per-instance tokens are pooled straight from the (frozen)
+    aggregator patch tokens, then decoded PhysGM-style into (mu, var).
+    """
+
+    def __init__(
+        self,
+        *,
+        token_dim: int,
+        physgm_hidden: int,
+        phys_ignore_id: int,
+    ) -> None:
+        super().__init__()
+        self.physgm_readout = PhysGMReadout(
+            token_dim=token_dim,
+            hidden=physgm_hidden,
+            ignore_id=phys_ignore_id,
+            property_names=PROPERTY_NAMES,
+        )
+
+    def forward(self, inputs: PhysicsSchemeInputs) -> PhysicsSchemeSlots:
+        if inputs.instance_mask is None:
+            return PhysicsSchemeSlots(
+                physgm_prediction=PhysGMPrediction(property_names=PROPERTY_NAMES)
+            )
+        mu, var, ids = self.physgm_readout(
+            inputs.aggregated_tokens[-1],
+            patch_start_idx=inputs.patch_start_idx,
+            images=inputs.images,
+            patch_size=inputs.patch_size,
+            instance_mask=inputs.instance_mask,
+            valid_mask=inputs.valid_mask,
+        )
+        return PhysicsSchemeSlots(
+            physgm_prediction=PhysGMPrediction(
+                instance_mu=mu,
+                instance_var=var,
+                instance_ids=ids,
+                property_names=PROPERTY_NAMES,
+            )
+        )
+
+
+def build_physics_scheme(cfg: Any, *, token_dim: int = 2048) -> nn.Module | None:
     """Factory: ``cfg.phys_scheme`` → bundle module (or None)."""
     scheme = getattr(cfg, "phys_scheme", None)
     if scheme is None:
@@ -199,6 +238,13 @@ def build_physics_scheme(cfg: Any) -> nn.Module | None:
             phys_use_point_feat=cfg.phys_use_point_feat,
             phys_use_window_cross_attn=cfg.phys_use_window_cross_attn,
         )
+    if scheme == "physgm_copy":
+        return PhysGMCopyBundle(
+            token_dim=token_dim,
+            physgm_hidden=cfg.physgm_hidden,
+            phys_ignore_id=cfg.phys_ignore_id,
+        )
     raise ValueError(
-        f"Unknown phys_scheme={scheme!r}. Expected None, 'class', or 'property'."
+        f"Unknown phys_scheme={scheme!r}. "
+        "Expected None, 'class', 'property', or 'physgm_copy'."
     )

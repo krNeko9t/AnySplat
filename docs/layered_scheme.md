@@ -67,10 +67,15 @@ Instance 等旧路径仍可能用 `depth_dict` 裸 key；**新路径必须用结
 | dense 特征 | [`src/model/encoder/iggt_heads/physics_head.py`](../src/model/encoder/iggt_heads/physics_head.py) |
 | 方案装配 | [`src/model/encoder/physics_scheme.py`](../src/model/encoder/physics_scheme.py)（`phys_scheme`: `class` / `property`） |
 | 分类器 | [`src/model/encoder/iggt_heads/physics_classifier.py`](../src/model/encoder/iggt_heads/physics_classifier.py) |
-| 属性读出 | [`src/model/encoder/iggt_heads/physics_property_readout.py`](../src/model/encoder/iggt_heads/physics_property_readout.py) |
-| 预测槽 | [`physics_prediction.py`](../src/model/encoder/physics_prediction.py) / [`physics_property_prediction.py`](../src/model/encoder/physics_property_prediction.py) → `EncoderOutput` |
-| loss | [`src/loss/loss_phys.py`](../src/loss/loss_phys.py)（class）/ [`src/loss/loss_phys_prop.py`](../src/loss/loss_phys_prop.py)（property） |
-| 实验 | [`config/experiment/phys_iggt.yaml`](../config/experiment/phys_iggt.yaml) / [`phys_prop_iggt.yaml`](../config/experiment/phys_prop_iggt.yaml) |
+| 属性读出 | [`src/model/encoder/iggt_heads/physics_property_readout.py`](../src/model/encoder/iggt_heads/physics_property_readout.py)（property）/ [`physgm_readout.py`](../src/model/encoder/iggt_heads/physgm_readout.py)（physgm_copy，直接池化 backbone token，无 dense head） |
+| 预测槽 | [`physics_prediction.py`](../src/model/encoder/physics_prediction.py) / [`physics_property_prediction.py`](../src/model/encoder/physics_property_prediction.py) / [`physgm_prediction.py`](../src/model/encoder/physgm_prediction.py) → `EncoderOutput` |
+| loss | [`src/loss/loss_phys.py`](../src/loss/loss_phys.py)（class）/ [`src/loss/loss_phys_prop.py`](../src/loss/loss_phys_prop.py)（property）/ [`src/loss/loss_physgm.py`](../src/loss/loss_physgm.py)（physgm_copy：NLL+MSE） |
+| 实验 | [`config/experiment/phys_iggt.yaml`](../config/experiment/phys_iggt.yaml) / [`phys_prop_iggt.yaml`](../config/experiment/phys_prop_iggt.yaml) / [`physgm_iggt.yaml`](../config/experiment/physgm_iggt.yaml) |
+
+Scheme 输入统一为命名类型 `PhysicsSchemeInputs`（`physics_scheme.py`）：新 bundle 需要新的
+encoder 中间量（如 physgm_copy 用原始 aggregator token）时给它加字段，不改 bundle 签名。
+PhysGM 归一化（log10(Pa) z-score 等）与反归一化 helper 只活在 `parsers.py`
+（`PHYSGM_NORMALIZATION` / `physgm_denormalize`）。
 
 ## 3. 硬性规则
 

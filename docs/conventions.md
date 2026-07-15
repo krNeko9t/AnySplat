@@ -42,7 +42,7 @@ Depth 相关约定是：
 
 ## Physics Label 约定
 
-Physics 监督不是 instance ID，不能混用两套编号。仓库有两套平行方案（Hydra `phys_scheme` 切换）：
+Physics 监督不是 instance ID，不能混用两套编号。仓库有三套平行方案（Hydra `phys_scheme` 切换）：
 
 ### scheme `class`（`PhysicsTarget`）
 
@@ -60,6 +60,16 @@ Physics 监督不是 instance ID，不能混用两套编号。仓库有两套平
 - 监督空间由 parser 一次变换（loss 只做公式）：
   - density / youngs_modulus：`mean_lut = log(raw_mean)`，`log_var_lut = log(raw_var + eps)`
   - poisson_ratio：`mean_lut = raw_mean`，`log_var_lut = log(raw_var + eps)`
+
+### scheme `physgm_copy`（`PhysGMTarget`）
+
+- 属性顺序 / `id=0` ignore / `valid` 语义与 scheme `property` 相同。
+- 监督空间照抄 PhysGM：z-score 后的标量（`value_lut`），无 GT 方差 —
+  预测方差由 loss 的 Gaussian NLL 学出（aleatoric，不回归 VLM 的 variance）。
+  - density：`(log10(kg/m³) - 3.0) / 0.5`
+  - youngs_modulus：`(log10(Pa) - 7.387210) / 2.456477`（PhysGM `E_MEAN/E_STD`；VLM 的 MPa 先 ×1e6）
+  - poisson_ratio：`(raw - 0.398) / 0.111`（PhysGM `NU_MEAN/NU_STD`）
+- 归一化常量与反归一化 helper 只活在 `parsers.py`（`PHYSGM_NORMALIZATION` / `physgm_denormalize`）。
 
 ## 可视化和导出约定
 

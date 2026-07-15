@@ -31,6 +31,26 @@ class PhysicsTarget:
 
 
 @dataclass
+class PhysGMTarget:
+    """Scene-level physics **property** supervision, PhysGM-style (scheme ``physgm_copy``).
+
+    Conventions (see docs/conventions.md):
+      - ``valid[instance_id]`` False ⇒ ignore (includes id=0 and missing labels).
+      - ``value_lut`` holds z-scored model-space scalars (parser-transformed):
+          density / youngs_modulus: (log10(raw SI) - mean) / std
+          poisson_ratio:            (raw - mean) / std
+        Normalization stats live in parsers.py (PHYSGM_NORMALIZATION).
+      - Unlike PhysicsPropertyTarget there is no GT variance: the PhysGM loss
+        learns predictive variance via Gaussian NLL instead of regressing it.
+      - Column order matches ``property_names`` / ``PROPERTY_NAMES``.
+    """
+
+    value_lut: Float32[Tensor, "max_id_plus_1 n_prop"]
+    valid: Bool[Tensor, " max_id_plus_1"]
+    property_names: tuple[str, ...]
+
+
+@dataclass
 class PhysicsPropertyTarget:
     """Scene-level physics **property** supervision (scheme ``property``).
 

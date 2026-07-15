@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from torch.utils.data._utils.collate import default_collate
 
-_PHYSICS_TARGET_KEYS = ("physics_target", "physics_property_target")
+_PHYSICS_TARGET_KEYS = ("physics_target", "physics_property_target", "physgm_target")
 
 
 def collate_examples(batch: list[dict]) -> dict:

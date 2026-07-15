@@ -8,6 +8,7 @@ from ..types import Gaussians
 from jaxtyping import Float
 from torch import Tensor, nn
 
+from .physgm_prediction import PhysGMPrediction
 from .physics_prediction import PhysicsPrediction
 from .physics_property_prediction import PhysicsPropertyPrediction
 
@@ -31,6 +32,8 @@ class EncoderOutput:
     physics_prediction: PhysicsPrediction | None = None
     # Physics scheme "property" slot. See PhysicsPropertyPrediction.
     physics_property_prediction: PhysicsPropertyPrediction | None = None
+    # Physics scheme "physgm_copy" slot. See PhysGMPrediction.
+    physgm_prediction: PhysGMPrediction | None = None
 
 
 class Encoder(nn.Module, ABC, Generic[T]):
