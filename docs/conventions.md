@@ -61,7 +61,12 @@ Physics 监督不是 instance ID，不能混用两套编号。仓库有三套平
   - density / youngs_modulus：`mean_lut = log(raw_mean)`，`log_var_lut = log(raw_var + eps)`
   - poisson_ratio：`mean_lut = raw_mean`，`log_var_lut = log(raw_var + eps)`
 
-### scheme `physgm_copy`（`PhysGMTarget`）
+### scheme `physgm_copy` / `physgm_dpt`（`PhysGMTarget`）
+
+两个 scheme 共享同一套 target / loss（下述），只在特征来源上不同：
+`physgm_copy` 直接池化 frozen aggregator patch token（37×37，无可训练 head）；
+`physgm_dpt` 先过 DPT `PhysicsHead` 得到图像分辨率 dense feature，再用全分辨率
+instance mask 池化（容量大，小物体不丢）。
 
 - 属性顺序 / `id=0` ignore / `valid` 语义与 scheme `property` 相同。
 - 监督空间照抄 PhysGM：z-score 后的标量（`value_lut`），无 GT 方差 —
