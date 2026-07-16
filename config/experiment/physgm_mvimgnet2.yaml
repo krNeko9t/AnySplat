@@ -1,0 +1,37 @@
+# @package _global_
+# IGGT physics property regression on MVImgNet2.0 scenes annotated by instascene VLM.
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=4,5,6,7 python src/main.py +experiment=phys_prop_mvimgnet2_315
+
+defaults:
+  - physgm_iggt
+
+wandb:
+  name: physgm_mvimgnet2
+  tags: [physics, physgm, iggt, mvimgnet2]
+
+logger: tensorboard
+
+dataset:
+  manifest:
+    root: /mnt/storage_pool/liaoyuanjun/data/single_object/MVImgNet/MVImgNet2.0
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_mvimgnet2_pred_phys_1000.jsonl
+    original_image_shape: [1920, 1080]
+    input_image_shape: [252, 448]
+    physics_parser: instascene_vlm_physgm
+    view_sampler:
+      num_context_views: 24
+      max_img_per_gpu: 24
+      min_distance_between_context_views: 4
+      max_distance_between_context_views: 10
+      min_gap_multiplier: 1
+      max_gap_multiplier: 2
+
+data_loader:
+  train:
+    num_workers: 8
+    batch_size: 1
+  val:
+    num_workers: 1
+
