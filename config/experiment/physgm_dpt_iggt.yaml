@@ -1,0 +1,80 @@
+# @package _global_
+# PhysGM supervision + DPT physics head (scheme physgm_dpt).
+# Usage: python src/main.py +experiment=physgm_dpt_iggt
+#
+# Same z-scored targets / NLL+MSE loss as physgm_iggt, but the per-instance
+# feature comes from a dense DPT PhysicsHead at image resolution (capacity)
+# pooled with the full-resolution instance mask, instead of pooling raw
+# frozen aggregator patch tokens.
+#
+# lr follows PhysGM's decoder training (configs/train.yaml: lr=2e-4, cosine,
+# weight_decay=0.05) — everything except physics_scheme is frozen, so the
+# base lr applies to the physics path only.
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: iggt
+  - override /loss: [physgm]
+
+wandb:
+  name: physgm_dpt_iggt
+  tags: [physics, physgm, dpt, iggt]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    pretrained_weights: "/home/liaoyuanjun/iggt_checkpoint.pth"
+    instance_feat_dim: 8
+    intermediate_layer_idx: [4, 11, 17, 23]
+    phys_scheme: physgm_dpt
+    phys_feat_dim: 32
+    physgm_hidden: 64
+    phys_use_point_feat: true
+    phys_use_window_cross_attn: true
+  decoder: null
+
+optimizer:
+  lr: 2.0e-4
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 0.1
+  freeze_keywords: [aggregator, camera_head, point_head, depth_head, part_adaptor, part_head]
+  param_groups:
+    - keywords: [physics_scheme]
+      lr_multiplier: 1.0
+
+trainer:
+  max_steps: 60000
+  val_check_interval: 500
+  precision: bf16-mixed
+  limit_val_batches: 1
+
+checkpointing:
+  load: null
+  every_n_train_steps: 500
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  physgm:
+    weight: 1.0
+    mse_weight: 1.0
+
+dataset:
+  manifest:
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
+    # ScanNet++ iPhone frames are typically ~690x920; crop shim uses input_image_shape.
+    original_image_shape: [690, 920]
+    physics_parser: instascene_vlm_physgm
+    view_sampler:
+      num_context_views: 4
+      max_img_per_gpu: 8

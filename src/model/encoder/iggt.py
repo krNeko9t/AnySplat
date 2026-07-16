@@ -50,7 +50,7 @@ class EncoderIGGTCfg:
     input_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
     pred_pose: bool = True
     # Physics scheme: None | "class" | "property" | "physgm_copy" (Hydra switch)
-    phys_scheme: Optional[Literal["class", "property", "physgm_copy"]] = None
+    phys_scheme: Optional[Literal["class", "property", "physgm_copy", "physgm_dpt"]] = None
     phys_feat_dim: int = 32
     phys_ignore_id: int = 0
     phys_use_point_feat: bool = True
