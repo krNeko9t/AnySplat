@@ -386,7 +386,7 @@ class BaseModelWrapper(LightningModule):
         loss_values: dict[str, float],
         batch: dict,
     ) -> Tensor:
-        """Shared end-of-training-step: logging, skip, step tracker, GC."""
+        """Shared end-of-training-step: logging, nan/inf guard, step tracker, GC."""
         self.log("loss/total", total_loss)
 
         if (
@@ -401,16 +401,16 @@ class BaseModelWrapper(LightningModule):
             msg = ", ".join([f"{k}={loss_values[k]:.6g}" for k in keys])
             logger.info("loss breakdown: %s", msg)
 
-        SKIP_AFTER_STEP = 1000
-        LOSS_THRESHOLD = 10.0
-        if self.global_step > SKIP_AFTER_STEP and total_loss > LOSS_THRESHOLD:
+        # Only skip numerically broken batches. Absolute loss thresholds are not
+        # portable across loss formulas (e.g. PhysGM NLL can legitimately be >>10).
+        if not torch.isfinite(total_loss).all():
             logger.warning(
-                "Skipping batch with high loss (%s) at step %s on Rank %s",
-                total_loss.item() if hasattr(total_loss, "item") else total_loss,
+                "Skipping batch with non-finite loss (%s) at step %s on Rank %s",
+                total_loss.detach() if hasattr(total_loss, "detach") else total_loss,
                 self.global_step,
                 self.global_rank,
             )
-            return total_loss * 1e-10
+            return total_loss * 0.0
 
         if (
             self.global_rank == 0
