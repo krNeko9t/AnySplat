@@ -71,14 +71,20 @@ class PhysGMDenseReadout(nn.Module):
                 vm_b,
                 ignore_id=self.ignore_id,
             )
-            if pooled.shape[0] == 0:
-                mu_list.append(torch.empty((0, p), device=feat_map.device, dtype=torch.float32))
-                var_list.append(torch.empty((0, p), device=feat_map.device, dtype=torch.float32))
-                ids_list.append(torch.empty((0,), device=feat_map.device, dtype=torch.long))
-                continue
-
             # Force fp32 readout (repo convention: heads/loss outside bf16 autocast).
+            # Empty pool: still run a dummy decode and slice [:0] so the [0, P]
+            # tensors keep a grad_fn (bare torch.empty has none → loss backward crash).
             with torch.amp.autocast("cuda", enabled=False):
+                if pooled.shape[0] == 0:
+                    pooled = feat_map[b].float().reshape(feat_map.shape[2], -1).mean(-1).unsqueeze(0)
+                    outs = [decoder(pooled) for decoder in self.decoders]
+                    out = torch.stack(outs, dim=1)  # [1, P, 2]
+                    mu_list.append(out[..., 0][:0])
+                    var_list.append((F.softplus(out[..., 1]) + 1e-2)[:0])
+                    ids_list.append(
+                        torch.empty((0,), device=feat_map.device, dtype=torch.long)
+                    )
+                    continue
                 pooled = pooled.float()
                 outs = [decoder(pooled) for decoder in self.decoders]  # P × [K, 2]
             out = torch.stack(outs, dim=1)  # [K, P, 2]

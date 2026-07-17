@@ -132,7 +132,24 @@ class LossPhysGM(Loss[LossPhysGMCfg, LossPhysGMCfgWrapper]):
                         return v.device
             return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        _zero = lambda: torch.tensor(0.0, device=_device(), dtype=torch.float32)
+        def _zero(pred: PhysGMPrediction | None = None) -> Tensor:
+            """Scalar 0 that stays on the autograd graph when predictions exist.
+
+            Bare ``torch.tensor(0.)`` has no grad_fn; with physgm as the sole
+            loss, an empty-supervision batch would then crash on backward.
+            """
+            terms: list[Tensor] = []
+            if pred is not None:
+                if pred.instance_mu:
+                    terms.extend(m.float().sum() for m in pred.instance_mu)
+                if pred.instance_var:
+                    terms.extend(v.float().sum() for v in pred.instance_var)
+            if terms:
+                acc = terms[0]
+                for t in terms[1:]:
+                    acc = acc + t
+                return acc * 0.0
+            return torch.zeros((), device=_device(), dtype=torch.float32, requires_grad=True)
 
         if depth_dict is None:
             return _zero()
@@ -148,7 +165,7 @@ class LossPhysGM(Loss[LossPhysGMCfg, LossPhysGMCfgWrapper]):
                     pred is not None,
                     target is not None,
                 )
-            return _zero()
+            return _zero(pred)
 
         mu, var, gt = resolve_instance_physgm(pred, target)
         device = mu.device
@@ -158,7 +175,7 @@ class LossPhysGM(Loss[LossPhysGMCfg, LossPhysGMCfgWrapper]):
                 "physgm_loss_raw": torch.tensor(0.0, device=device),
                 "physgm_num_instances": torch.tensor(0.0, device=device),
             }
-            return _zero()
+            return _zero(pred)
 
         prop_names = pred.property_names or tuple(
             f"prop_{i}" for i in range(mu.shape[1])
