@@ -401,8 +401,7 @@ class BaseModelWrapper(LightningModule):
             msg = ", ".join([f"{k}={loss_values[k]:.6g}" for k in keys])
             logger.info("loss breakdown: %s", msg)
 
-        # Only skip numerically broken batches. Absolute loss thresholds are not
-        # portable across loss formulas (e.g. PhysGM NLL can legitimately be >>10).
+        # Skip numerically broken batches.
         if not torch.isfinite(total_loss).all():
             logger.warning(
                 "Skipping batch with non-finite loss (%s) at step %s on Rank %s",
