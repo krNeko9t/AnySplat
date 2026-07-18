@@ -14,8 +14,8 @@ from typing import Union
 import torch
 from torch import nn
 
-from ..decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
-from ..encoder.anysplat import EncoderAnySplatCfg
+from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
+from src.model.encoder.anysplat import EncoderAnySplatCfg
 from .anysplat import AnySplat
 
 logger = logging.getLogger(__name__)

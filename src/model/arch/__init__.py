@@ -1,10 +1,13 @@
 import logging
-from typing import Optional, Union
+from typing import Optional
 
-from ..encoder.anysplat import EncoderAnySplatCfg
-from ..encoder.iggt import EncoderIGGTCfg
-from ..decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
 from torch import nn
+
+from src.model.decoder import DecoderCfg
+from src.model.encoder import EncoderCfg
+from src.model.encoder.anysplat import EncoderAnySplatCfg
+from src.model.encoder.iggt import EncoderIGGTCfg
+
 from .anysplat import AnySplat
 from .iggt import IGGTModel
 from .weight_loading import init_anysplat_from_hf
@@ -13,9 +16,6 @@ MODELS = {
     "anysplat": AnySplat,
     "iggt": IGGTModel,
 }
-
-EncoderCfg = Union[EncoderAnySplatCfg, EncoderIGGTCfg]
-DecoderCfg = DecoderSplattingCUDACfg
 
 logger = logging.getLogger(__name__)
 

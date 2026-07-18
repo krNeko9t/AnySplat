@@ -5,7 +5,7 @@ from typing import Generic, Literal, TypeVar
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from ..types import Gaussians
+from src.model.types import Gaussians
 
 DepthRenderingMode = Literal[
     "depth",

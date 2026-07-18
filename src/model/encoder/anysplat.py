@@ -1,9 +1,5 @@
 import copy
 import logging
-
-# VGGT parts
-import os
-import sys
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Literal, Optional
@@ -32,16 +28,13 @@ from torch_scatter import scatter_add, scatter_max
 
 logger = logging.getLogger(__name__)
 
-from ..types import Gaussians
+from src.model.types import Gaussians
 from src.model.heads.gaussian.gaussian_adapter import (
     GaussianAdapter,
     GaussianAdapterCfg,
     UnifiedGaussianAdapter,
 )
 from .encoder import Encoder, EncoderOutput
-
-root_path = os.path.abspath(".")
-sys.path.append(root_path)
 from src.model.vggt.models.vggt import VGGT
 from src.model.heads.instance import PartHead, SamProjector
 

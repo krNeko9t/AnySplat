@@ -4,7 +4,7 @@ from typing import Generic, TypeVar
 from torch import nn
 from dataclasses import dataclass
 from src.dataset.types import BatchedViews, DataShim
-from ..types import Gaussians
+from src.model.types import Gaussians
 from jaxtyping import Float
 from torch import Tensor, nn
 
