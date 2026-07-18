@@ -33,16 +33,12 @@ from torch_scatter import scatter_add, scatter_max
 logger = logging.getLogger(__name__)
 
 from ..types import Gaussians
-from .backbone import Backbone, BackboneCfg, get_backbone
-
-from .backbone.croco.misc import transpose_to_landscape
 from .common.gaussian_adapter import (
     GaussianAdapter,
     GaussianAdapterCfg,
     UnifiedGaussianAdapter,
 )
 from .encoder import Encoder, EncoderOutput
-from .visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
 
 root_path = os.path.abspath(".")
 sys.path.append(root_path)
@@ -79,8 +75,6 @@ class EncoderAnySplatCfg:
     d_feature: int
     add_view: bool
     num_monocular_samples: int
-    backbone: BackboneCfg
-    visualizer: EncoderVisualizerEpipolarCfg
     gaussian_adapter: GaussianAdapterCfg
     apply_bounds_shim: bool
     opacity_mapping: OpacityMappingCfg
@@ -126,7 +120,6 @@ def rearrange_head(feat, patch_size, H, W):
 
 
 class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
-    backbone: nn.Module
     gaussian_adapter: GaussianAdapter
 
     def __init__(self, cfg: EncoderAnySplatCfg) -> None:

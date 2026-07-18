@@ -43,7 +43,7 @@ from .base_wrapper import (
     visualize_instance_features,
 )
 from .decoder.decoder import DecoderOutput
-from .encoder.visualization.encoder_visualizer import EncoderVisualizer
+from .encoder.encoder_visualizer import EncoderVisualizer
 from .ply_export import export_ply
 from src.utils.point import get_normal_map
 

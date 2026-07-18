@@ -3,7 +3,6 @@
 defaults:
   - /dataset@_group_.dl3dv: dl3dv
   - override /model/encoder: anysplat
-  - override /model/encoder/backbone: croco
   - override /loss: [mse, lpips, depth_consis] # ablate: opacity loss
 
 wandb:

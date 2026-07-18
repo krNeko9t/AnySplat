@@ -3,7 +3,6 @@
 defaults:
   - /dataset@_group_.manifest: manifest
   - override /model/encoder: anysplat
-  - override /model/encoder/backbone: croco
   - override /model/decoder: splatting_cuda
   - override /loss: [mse, lpips, disc]
 

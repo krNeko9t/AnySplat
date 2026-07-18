@@ -1,7 +1,7 @@
 from typing import Optional, Union
 
 from .encoder import Encoder
-from .visualization.encoder_visualizer import EncoderVisualizer
+from .encoder_visualizer import EncoderVisualizer
 from .anysplat import EncoderAnySplat, EncoderAnySplatCfg
 from .iggt import EncoderIGGT, EncoderIGGTCfg
 
