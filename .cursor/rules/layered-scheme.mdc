@@ -19,7 +19,7 @@ Parser → *Target  |  Head(+Classifier) → *Prediction  |  Loss = resolver + �
 |--------|--------|
 | 标注格式 | `src/dataset/<domain>/parsers.py` + 注册表 |
 | 监督语义 | `*Target` + `docs/conventions.md` |
-| 特征 head | `src/model/encoder/.../*_head.py` |
+| 特征 head | `src/model/heads/<domain>/*_head.py` |
 | 分类器 | encoder 侧 `*_classifier.py`（**禁止放 loss**） |
 | 预测槽 | `*Prediction` → `EncoderOutput` 可选字段 |
 | 公式 / 对齐 | `src/loss/loss_*.py` 的 `resolve_*` |
