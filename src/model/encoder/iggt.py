@@ -30,12 +30,12 @@ from torch import Tensor, nn
 
 from src.dataset.shims.normalize_shim import apply_normalize_shim
 from src.dataset.types import BatchedExample, DataShim
-from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 from .encoder import Encoder, EncoderOutput
 from .iggt_heads import PartHead, SamProjector
 from .physics_scheme import PhysicsSchemeInputs, build_physics_scheme
-from .vggt.models.vggt import VGGT
+from src.model.vggt.models.vggt import VGGT
 
 logger = logging.getLogger(__name__)
 

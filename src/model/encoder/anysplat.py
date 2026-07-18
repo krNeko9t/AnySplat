@@ -21,11 +21,11 @@ from src.dataset.types import BatchedExample, DataShim
 from src.geometry.projection import sample_image_grid
 
 from src.model.encoder.heads.vggt_dpt_gs_head import VGGT_DPT_GS_Head
-from src.model.encoder.vggt.utils.geometry import (
+from src.model.vggt.utils.geometry import (
     batchify_unproject_depth_map_to_point_map,
     unproject_depth_map_to_point_map,
 )
-from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.utils.geometry import get_rel_pos  # used for model hub
 from torch import nn, Tensor
 from torch_scatter import scatter_add, scatter_max
@@ -42,7 +42,7 @@ from .encoder import Encoder, EncoderOutput
 
 root_path = os.path.abspath(".")
 sys.path.append(root_path)
-from src.model.encoder.vggt.models.vggt import VGGT
+from src.model.vggt.models.vggt import VGGT
 from src.model.encoder.iggt_heads import PartHead, SamProjector
 
 inf = float("inf")

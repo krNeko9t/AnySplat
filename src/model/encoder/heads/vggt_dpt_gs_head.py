@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.model.encoder.vggt.heads.dpt_head import DPTHead
+from src.model.vggt.heads.dpt_head import DPTHead
 
 
 class VGGT_DPT_GS_Head(DPTHead):
