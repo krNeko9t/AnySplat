@@ -13,26 +13,26 @@ from jaxtyping import Float
 from lightning.pytorch.utilities import rank_zero_only
 from torch import Tensor, nn
 
-from ..dataset.types import BatchedExample
-from ..evaluation.metrics import compute_lpips, compute_psnr, compute_ssim, abs_relative_difference, delta1_acc
-from ..global_cfg import get_cfg
-from ..loss import Loss
-from ..loss.loss_distill import DistillLoss
-from ..loss.loss_huber import HuberLoss
-from ..misc.cam_utils import rotation_6d_to_matrix
-from ..misc.image_io import prep_image, save_image, save_video
-from ..misc.step_tracker import StepTracker
-from ..misc.utils import inverse_normalize, vis_depth_map, get_overlap_tag
-from ..visualization.annotation import add_label
-from ..visualization.camera_trajectory.interpolation import (
+from src.dataset.types import BatchedExample
+from src.evaluation.metrics import compute_lpips, compute_psnr, compute_ssim, abs_relative_difference, delta1_acc
+from src.global_cfg import get_cfg
+from src.loss import Loss
+from src.loss.loss_distill import DistillLoss
+from src.loss.loss_huber import HuberLoss
+from src.misc.cam_utils import rotation_6d_to_matrix
+from src.misc.image_io import prep_image, save_image, save_video
+from src.misc.step_tracker import StepTracker
+from src.misc.utils import inverse_normalize, vis_depth_map, get_overlap_tag
+from src.visualization.annotation import add_label
+from src.visualization.camera_trajectory.interpolation import (
     interpolate_extrinsics,
     interpolate_intrinsics,
 )
-from ..visualization.camera_trajectory.wobble import (
+from src.visualization.camera_trajectory.wobble import (
     generate_wobble,
     generate_wobble_transformation,
 )
-from ..visualization.layout import add_border, hcat, vcat
+from src.visualization.layout import add_border, hcat, vcat
 from .base_wrapper import (
     BaseModelWrapper,
     OptimizerCfg,
@@ -42,9 +42,9 @@ from .base_wrapper import (
     log_video,
     visualize_instance_features,
 )
-from .decoder.decoder import DecoderOutput
-from .encoder.encoder_visualizer import EncoderVisualizer
-from .ply_export import export_ply
+from src.model.decoder.decoder import DecoderOutput
+from src.model.encoder.encoder_visualizer import EncoderVisualizer
+from src.model.ply_export import export_ply
 from src.utils.point import get_normal_map
 
 logger = logging.getLogger(__name__)

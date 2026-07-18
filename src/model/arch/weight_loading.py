@@ -126,13 +126,13 @@ def load_model_from_run(
     step_tracker = StepTracker()
 
     if isinstance(cfg.model.encoder, EncoderIGGTCfg):
-        from src.model.iggt_wrapper import IGGTWrapper
+        from src.model.wrapper.iggt_wrapper import IGGTWrapper
 
         wrapper = IGGTWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
         )
     else:
-        from src.model.anysplat_wrapper import AnySplatWrapper
+        from src.model.wrapper.anysplat_wrapper import AnySplatWrapper
 
         wrapper = AnySplatWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,

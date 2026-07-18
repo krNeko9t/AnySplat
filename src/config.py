@@ -10,7 +10,7 @@ from .dataset.data_module import DataLoaderCfg
 from .loss import LossCfgWrapper
 from .model.decoder import DecoderCfg
 from .model.encoder import EncoderCfg
-from .model.base_wrapper import OptimizerCfg, ParamGroupCfg, TestCfg, TrainCfg
+from .model.wrapper.base_wrapper import OptimizerCfg, ParamGroupCfg, TestCfg, TrainCfg
 
 
 @dataclass

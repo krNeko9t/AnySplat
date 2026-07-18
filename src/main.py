@@ -126,12 +126,12 @@ def train(cfg_dict: DictConfig):
     model = get_model(cfg.model.encoder, decoder_cfg)
 
     if isinstance(cfg.model.encoder, EncoderIGGTCfg):
-        from src.model.iggt_wrapper import IGGTWrapper
+        from src.model.wrapper.iggt_wrapper import IGGTWrapper
         model_wrapper = IGGTWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
         )
     else:
-        from src.model.anysplat_wrapper import AnySplatWrapper
+        from src.model.wrapper.anysplat_wrapper import AnySplatWrapper
         model_wrapper = AnySplatWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
         )

@@ -21,17 +21,17 @@ import logging
 import torch
 from torch import nn
 
-from ..dataset.physics.parsers import physgm_denormalize
-from ..dataset.physics.types import PhysGMTarget, PhysicsPropertyTarget, PhysicsTarget
-from ..dataset.types import BatchedExample
-from ..global_cfg import get_cfg
-from ..loss import Loss
-from ..loss.loss_huber import HuberLoss
-from ..misc.image_io import prep_image
-from ..misc.step_tracker import StepTracker
-from ..misc.utils import inverse_normalize, vis_depth_map
-from ..visualization.annotation import add_label
-from ..visualization.layout import add_border, hcat, vcat
+from src.dataset.physics.parsers import physgm_denormalize
+from src.dataset.physics.types import PhysGMTarget, PhysicsPropertyTarget, PhysicsTarget
+from src.dataset.types import BatchedExample
+from src.global_cfg import get_cfg
+from src.loss import Loss
+from src.loss.loss_huber import HuberLoss
+from src.misc.image_io import prep_image
+from src.misc.step_tracker import StepTracker
+from src.misc.utils import inverse_normalize, vis_depth_map
+from src.visualization.annotation import add_label
+from src.visualization.layout import add_border, hcat, vcat
 from .base_wrapper import (
     BaseModelWrapper,
     OptimizerCfg,

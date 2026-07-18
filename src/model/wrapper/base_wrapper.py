@@ -25,26 +25,26 @@ from lightning.pytorch.utilities import rank_zero_only
 from tabulate import tabulate
 from torch import Tensor, nn
 
-from ..dataset.data_module import get_data_shim
-from ..dataset.types import BatchedExample
-from ..global_cfg import get_cfg
-from ..loss import Loss
-from ..misc.benchmarker import Benchmarker
-from ..misc.image_io import prep_image
-from ..misc.LocalLogger import LOG_PATH, LocalLogger
-from ..misc.tb_logger import TBLogger
-from ..misc.step_tracker import StepTracker
-from ..misc.utils import inverse_normalize
-from ..visualization.annotation import add_label
-from ..visualization.instance_viz import (
+from src.dataset.data_module import get_data_shim
+from src.dataset.types import BatchedExample
+from src.global_cfg import get_cfg
+from src.loss import Loss
+from src.misc.benchmarker import Benchmarker
+from src.misc.image_io import prep_image
+from src.misc.LocalLogger import LOG_PATH, LocalLogger
+from src.misc.tb_logger import TBLogger
+from src.misc.step_tracker import StepTracker
+from src.misc.utils import inverse_normalize
+from src.visualization.annotation import add_label
+from src.visualization.instance_viz import (
     cluster_instance_embeddings,
     colorize_labels,
     knn_smooth_instance_features,
     make_color_lut,
     pca_visualize_embeddings,
 )
-from ..visualization.layout import add_border, hcat, vcat
-from .decoder.decoder import DepthRenderingMode
+from src.visualization.layout import add_border, hcat, vcat
+from src.model.decoder.decoder import DepthRenderingMode
 
 logger = logging.getLogger(__name__)
 
