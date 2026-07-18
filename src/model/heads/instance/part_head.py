@@ -18,8 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .attention_blocks import MemEffCrossAttention
-from .window_attention import SwinCA, SwinSA
+from src.model.heads.attention_blocks import MemEffCrossAttention
+from src.model.heads.window_attention import SwinCA, SwinSA
 
 
 # ---------------------------------------------------------------------------

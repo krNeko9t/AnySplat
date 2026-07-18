@@ -33,7 +33,7 @@ from src.dataset.types import BatchedExample, DataShim
 from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 from .encoder import Encoder, EncoderOutput
-from .iggt_heads import PartHead, SamProjector
+from src.model.heads.instance import PartHead, SamProjector
 from .physics_scheme import PhysicsSchemeInputs, build_physics_scheme
 from src.model.vggt.models.vggt import VGGT
 

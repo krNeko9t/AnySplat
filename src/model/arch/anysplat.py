@@ -12,7 +12,7 @@ import numpy as np
 import torch.nn.functional as F
 from dataclasses import dataclass
 
-from src.model.encoder.common.gaussian_adapter import GaussianAdapterCfg
+from src.model.heads.gaussian.gaussian_adapter import GaussianAdapterCfg
 from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDA, DecoderSplattingCUDACfg
 from src.model.encoder.anysplat import EncoderAnySplat, EncoderAnySplatCfg, OpacityMappingCfg
 

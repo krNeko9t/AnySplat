@@ -15,11 +15,11 @@ from torch import Tensor
 
 from src.dataset.physics.types import PROPERTY_NAMES
 
-from .iggt_heads.physgm_dense_readout import PhysGMDenseReadout
-from .iggt_heads.physgm_readout import PhysGMReadout
-from .iggt_heads.physics_classifier import PhysicsClassifier
-from .iggt_heads.physics_head import PhysicsHead
-from .iggt_heads.physics_property_readout import PhysicsPropertyReadout
+from src.model.heads.physics.physgm_dense_readout import PhysGMDenseReadout
+from src.model.heads.physics.physgm_readout import PhysGMReadout
+from src.model.heads.physics.physics_classifier import PhysicsClassifier
+from src.model.heads.physics.physics_head import PhysicsHead
+from src.model.heads.physics.physics_property_readout import PhysicsPropertyReadout
 from .physgm_prediction import PhysGMPrediction
 from .physics_prediction import PhysicsPrediction
 from .physics_property_prediction import PhysicsPropertyPrediction

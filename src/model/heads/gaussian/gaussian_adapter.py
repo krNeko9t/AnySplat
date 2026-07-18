@@ -11,7 +11,7 @@ from src.geometry.projection import get_world_rays
 from src.misc.sh_rotation import rotate_sh
 from .gaussians import build_covariance
 
-from ...types import Gaussians
+from src.model.types import Gaussians
 
 @dataclass
 class GaussianAdapterCfg:

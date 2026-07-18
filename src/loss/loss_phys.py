@@ -11,7 +11,7 @@ Classifier / pooling live on the encoder. This module only resolves
 Where to edit:
   - New loss formula          → this file
   - New pred/target alignment → ``resolve_instance_ce``
-  - New head / classifier     → ``src/model/encoder/iggt_heads/``, not here
+  - New head / classifier     → ``src/model/heads/physics/``, not here
 """
 
 from __future__ import annotations

@@ -20,7 +20,7 @@ from src.dataset.shims.patch_shim import apply_patch_shim
 from src.dataset.types import BatchedExample, DataShim
 from src.geometry.projection import sample_image_grid
 
-from src.model.encoder.heads.vggt_dpt_gs_head import VGGT_DPT_GS_Head
+from src.model.heads.gaussian.vggt_dpt_gs_head import VGGT_DPT_GS_Head
 from src.model.vggt.utils.geometry import (
     batchify_unproject_depth_map_to_point_map,
     unproject_depth_map_to_point_map,
@@ -33,7 +33,7 @@ from torch_scatter import scatter_add, scatter_max
 logger = logging.getLogger(__name__)
 
 from ..types import Gaussians
-from .common.gaussian_adapter import (
+from src.model.heads.gaussian.gaussian_adapter import (
     GaussianAdapter,
     GaussianAdapterCfg,
     UnifiedGaussianAdapter,
@@ -43,7 +43,7 @@ from .encoder import Encoder, EncoderOutput
 root_path = os.path.abspath(".")
 sys.path.append(root_path)
 from src.model.vggt.models.vggt import VGGT
-from src.model.encoder.iggt_heads import PartHead, SamProjector
+from src.model.heads.instance import PartHead, SamProjector
 
 inf = float("inf")
 
