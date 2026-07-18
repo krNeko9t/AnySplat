@@ -8,9 +8,11 @@ from ..types import Gaussians
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from .physgm_prediction import PhysGMPrediction
-from .physics_prediction import PhysicsPrediction
-from .physics_property_prediction import PhysicsPropertyPrediction
+from .predictions import (
+    PhysGMPrediction,
+    PhysicsPrediction,
+    PhysicsPropertyPrediction,
+)
 
 T = TypeVar("T")
 
