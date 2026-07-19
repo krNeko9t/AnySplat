@@ -1,12 +1,12 @@
 import logging
-from typing import Optional
+from typing import Optional, Union
 
 from torch import nn
 
 from src.model.decoder import DecoderCfg
-from src.model.encoder import EncoderCfg
-from src.model.encoder.anysplat import EncoderAnySplatCfg
-from src.model.encoder.iggt import EncoderIGGTCfg
+
+from .anysplat import EncoderAnySplatCfg
+from .iggt import EncoderIGGTCfg
 
 from .anysplat import AnySplat
 from .iggt import IGGTModel
@@ -16,6 +16,8 @@ MODELS = {
     "anysplat": AnySplat,
     "iggt": IGGTModel,
 }
+
+EncoderCfg = Union[EncoderAnySplatCfg, EncoderIGGTCfg]
 
 logger = logging.getLogger(__name__)
 

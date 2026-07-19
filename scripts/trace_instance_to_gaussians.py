@@ -246,7 +246,7 @@ def load_and_preprocess_images_resize(image_path_list, resize_target_size):
 
 def load_iggt_model(model_path, device="cuda"):
     """Load the IGGT model for part-feature extraction using the integrated module."""
-    from src.model.encoder.iggt import EncoderIGGTCfg
+    from src.model.arch.iggt import EncoderIGGTCfg
     from src.model.arch.iggt import IGGTModel
 
     cfg = EncoderIGGTCfg(

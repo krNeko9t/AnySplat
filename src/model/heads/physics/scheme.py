@@ -20,7 +20,7 @@ from src.model.heads.physics.physgm_readout import PhysGMReadout
 from src.model.heads.physics.physics_classifier import PhysicsClassifier
 from src.model.heads.physics.physics_head import PhysicsHead
 from src.model.heads.physics.physics_property_readout import PhysicsPropertyReadout
-from .predictions import (
+from src.model.outputs import (
     PhysGMPrediction,
     PhysicsPrediction,
     PhysicsPropertyPrediction,

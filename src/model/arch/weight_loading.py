@@ -15,8 +15,7 @@ import torch
 from torch import nn
 
 from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
-from src.model.encoder.anysplat import EncoderAnySplatCfg
-from .anysplat import AnySplat
+from .anysplat import AnySplat, EncoderAnySplatCfg
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +112,7 @@ def load_model_from_run(
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
     from src.model.arch import get_model
-    from src.model.encoder.iggt import EncoderIGGTCfg
+    from src.model.arch.iggt import EncoderIGGTCfg
 
     run_dir = Path(run_dir)
     ckpt_path = Path(ckpt_path)
