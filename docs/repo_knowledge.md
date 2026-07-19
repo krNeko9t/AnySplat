@@ -21,7 +21,7 @@
 
 ## 2. 分层架构（最重要的一节）
 
-从底到顶四层，**只允许上层依赖下层**：
+从底到顶三层，**只允许上层依赖下层**；层间只通过 `src/model/outputs.py` 的命名契约传数据：
 
 ```
 底层部件   src/model/vggt/  src/model/heads/  src/model/decoder/
@@ -33,21 +33,22 @@
            │   ├─ gaussian/          VGGT_DPT_GS_Head + GaussianAdapter(AnySplat 高斯路线)
            │   ├─ instance/          SamProjector、PartHead(IGGT 抠来)
            │   ├─ physics/           PhysicsHead/Classifier/pool + 三个 readout
+           │   │                     + scheme.py(phys_scheme 装配:class/property/physgm_copy/physgm_dpt)
            │   └─ attention_blocks.py / window_attention.py  instance 与 physics 共享的注意力层
            └─ decoder/               splatting CUDA 渲染 decoder(目前只有 AnySplat 用)
 
-encoder 层 src/model/encoder/   负责"backbone + heads 组装",输出 EncoderOutput
-           ├─ encoder.py            Encoder 基类 + EncoderOutput 契约
-           ├─ anysplat.py           EncoderAnySplat:VGGT + GS head(可选挂 instance head)
-           ├─ iggt.py               EncoderIGGT:VGGT + PartHead(可选 physics scheme),无 GS head
-           ├─ physics_scheme.py     phys_scheme 装配(class/property/physgm_copy/physgm_dpt)
-           ├─ predictions.py        PhysicsPrediction / PhysicsPropertyPrediction / PhysGMPrediction 槽位
-           └─ encoder_visualizer.py EncoderVisualizer 抽象基类
+契约       src/model/outputs.py  EncoderOutput + PhysicsPrediction / PhysicsPropertyPrediction /
+           src/model/types.py    PhysGMPrediction;Gaussians。encoder 产出、wrapper/loss 只读。
 
-arch 层    src/model/arch/     负责"最终组装模型"
-           ├─ anysplat.py           AnySplat = encoder + decoder
-           ├─ iggt.py               IGGTModel = 纯 encoder(无 decoder)+ 官方 ckpt 键名重映射加载
-           └─ __init__.py           get_model(encoder_cfg, decoder_cfg):按 cfg 类型分发 + 预训练权重加载逻辑
+arch 层    src/model/arch/     模型组装,一条路线一个文件
+           ├─ base.py               Encoder 抽象基类
+           ├─ anysplat.py           EncoderAnySplat(VGGT+GS head,可选 instance head)
+           │                        + AnySplat(encoder+decoder 壳,HF mixin)
+           ├─ iggt.py               EncoderIGGT(VGGT+PartHead,可选 physics scheme,无 GS head)
+           │                        + IGGTModel(纯 encoder 壳 + 官方 ckpt 键名重映射加载)
+           ├─ weight_loading.py     HF/Lightning/run_dir 权重加载权威实现
+           └─ __init__.py           get_model(encoder_cfg, decoder_cfg):按 cfg 类型分发;
+                                    EncoderCfg union 唯一权威
 
 wrapper 层 src/model/wrapper/   负责"再包一层训练",对接 Lightning 训练/推理
            ├─ base_wrapper.py       BaseModelWrapper:optimizer 分组、loss 汇总、日志、可视化等公共逻辑
@@ -57,9 +58,9 @@ wrapper 层 src/model/wrapper/   负责"再包一层训练",对接 Lightning 训
 入口       src/main.py          Hydra 入口;scripts/ 下各推理/导出脚本
 ```
 
-Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同目录兄弟可用单点相对;vggt/ 内部维持 vendored 原样。`EncoderCfg` union 的唯一权威在 `src/model/encoder/__init__.py`(arch 从这里导入,不再重复定义)。
+Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同目录兄弟可用单点相对;vggt/ 内部维持 vendored 原样。Hydra config group 仍叫 `config/model/encoder/`(yaml 组名与代码目录解耦,未随代码搬家)。
 
-**统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/encoder/encoder.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_prediction`（`PhysicsPrediction | None`）。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
+**统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/outputs.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_prediction`（`PhysicsPrediction | None`）。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
 
 **分发点（改组合时要看的三个注册表）**：
 
