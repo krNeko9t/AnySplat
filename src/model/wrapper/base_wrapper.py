@@ -261,7 +261,6 @@ class BaseModelWrapper(LightningModule):
         self.train_cfg = train_cfg
         self.step_tracker = step_tracker
 
-        self.encoder_visualizer = None
         self.model = model
         self.data_shim = get_data_shim(self.model.encoder)
         self.losses = nn.ModuleList(losses)

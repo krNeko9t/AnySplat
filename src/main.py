@@ -36,8 +36,6 @@ with install_import_hook(
     from src.misc.logging_factory import create_logger
     from src.misc.step_tracker import StepTracker
     from src.misc.wandb_tools import update_checkpoint_path
-    from src.model.decoder import get_decoder
-    from src.model.encoder import get_encoder
     from src.model.encoder.iggt import EncoderIGGTCfg
 
 

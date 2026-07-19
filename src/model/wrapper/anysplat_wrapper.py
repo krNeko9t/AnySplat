@@ -43,7 +43,6 @@ from .base_wrapper import (
     visualize_instance_features,
 )
 from src.model.decoder.decoder import DecoderOutput
-from src.model.encoder.encoder_visualizer import EncoderVisualizer
 from src.model.ply_export import export_ply
 from src.utils.point import get_normal_map
 
@@ -436,10 +435,6 @@ class AnySplatWrapper(BaseModelWrapper):
                     encoder_output, batch, context_img, depth_dict,
                     self.logger, self.global_step,
                 )
-
-                if self.encoder_visualizer is not None:
-                    for k, image in self.encoder_visualizer.visualize(batch["context"], self.global_step).items():
-                        self.logger.log_image(k, [prep_image(image)], step=self.global_step)
 
                 self.render_video_interpolation(batch)
                 self.render_video_wobble(batch)

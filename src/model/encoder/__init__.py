@@ -1,21 +1,7 @@
-from typing import Optional, Union
+from typing import Union
 
 from .encoder import Encoder
-from .encoder_visualizer import EncoderVisualizer
 from .anysplat import EncoderAnySplat, EncoderAnySplatCfg
 from .iggt import EncoderIGGT, EncoderIGGTCfg
 
-ENCODERS = {
-    "anysplat": (EncoderAnySplat, None),
-    "iggt": (EncoderIGGT, None),
-}
-
 EncoderCfg = Union[EncoderAnySplatCfg, EncoderIGGTCfg]
-
-
-def get_encoder(cfg: EncoderCfg) -> tuple[Encoder, Optional[EncoderVisualizer]]:
-    encoder, visualizer = ENCODERS[cfg.name]
-    encoder = encoder(cfg)
-    if visualizer is not None:
-        visualizer = visualizer(cfg.visualizer, encoder)
-    return encoder, visualizer
