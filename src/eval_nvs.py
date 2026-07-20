@@ -19,7 +19,7 @@ from misc.image_io import save_image, save_interpolated_video
 from src.utils.image import process_image
 
 from src.model.arch.anysplat import AnySplat
-from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 def setup_args():
     """Set up command-line arguments for the eval NVS script."""

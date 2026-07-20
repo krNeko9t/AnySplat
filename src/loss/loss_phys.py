@@ -11,7 +11,7 @@ Classifier / pooling live on the encoder. This module only resolves
 Where to edit:
   - New loss formula          → this file
   - New pred/target alignment → ``resolve_instance_ce``
-  - New head / classifier     → ``src/model/encoder/iggt_heads/``, not here
+  - New head / classifier     → ``src/model/heads/physics/``, not here
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from torch import Tensor
 from src.dataset.physics.types import PhysicsTarget
 from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
-from src.model.encoder.physics_prediction import PhysicsPrediction
+from src.model.outputs import PhysicsPrediction
 from .loss import Loss
 
 logger = logging.getLogger(__name__)

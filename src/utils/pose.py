@@ -1,7 +1,7 @@
 import torch
 import numpy as np
-from src.model.encoder.vggt.utils.rotation import mat_to_quat
-from src.model.encoder.vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
+from src.model.vggt.utils.rotation import mat_to_quat
+from src.model.vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
 
 
 def convert_pt3d_RT_to_opencv(Rot, Trans):

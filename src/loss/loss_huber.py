@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 from copy import copy, deepcopy
 
-from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from src.model.encoder.vggt.utils.rotation import mat_to_quat
+from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.vggt.utils.rotation import mat_to_quat
 
 def extri_intri_to_pose_encoding(
     extrinsics,

@@ -15,8 +15,8 @@ from lpips import LPIPS
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.model.arch.anysplat import AnySplat
-from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
+from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.vggt.utils.load_fn import load_and_preprocess_images
 from src.utils.pose import align_to_first_camera, calculate_auc_np, convert_pt3d_RT_to_opencv, se3_to_relative_pose_error
 from src.misc.cam_utils import camera_normalization, pose_auc, rotation_6d_to_matrix, update_pose, get_pnp_pose
 

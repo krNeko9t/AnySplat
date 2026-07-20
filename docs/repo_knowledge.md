@@ -21,32 +21,46 @@
 
 ## 2. 分层架构（最重要的一节）
 
-从底到顶四层，**只允许上层依赖下层**：
+从底到顶三层，**只允许上层依赖下层**；层间只通过 `src/model/outputs.py` 的命名契约传数据：
 
 ```
-底层部件   src/model/encoder/  src/model/decoder/
-           ├─ encoder/vggt/          VGGT backbone（aggregator + camera/point/depth head）
-           ├─ encoder/backbone/      AnySplat 原有 backbone（croco/dino/resnet）
-           ├─ encoder/heads/         AnySplat 的 GS head（DPT 等）
-           ├─ encoder/iggt_heads/    SamProjector、PartHead、PhysicsHead、PhysicsClassifier
-           ├─ encoder/anysplat.py    EncoderAnySplat：backbone + GS head（可选挂 instance head）
-           ├─ encoder/iggt.py        EncoderIGGT：VGGT + PartHead（可选 PhysicsHead+Classifier），无 GS head
-           └─ decoder/               splatting CUDA 渲染 decoder（目前只有 AnySplat 用）
+底层部件   src/model/vggt/  src/model/heads/  src/model/decoder/
+           ├─ vggt/                  vendored VGGT backbone,整体一个盒子(models/ layers/ heads/ utils/)。
+           │                         camera/dpt/track head 是预训练模型自带的,留在盒子里;
+           │                         track_head 虽无人调用,但 VGGT.__init__ 无条件构造,
+           │                         删了会破坏 from_pretrained 权重加载,必须保留。
+           ├─ heads/                 自研 head,按领域分组:
+           │   ├─ gaussian/          VGGT_DPT_GS_Head + GaussianAdapter(AnySplat 高斯路线)
+           │   ├─ instance/          SamProjector、PartHead(IGGT 抠来)
+           │   ├─ physics/           PhysicsHead/Classifier/pool + 三个 readout
+           │   │                     + scheme.py(phys_scheme 装配:class/property/physgm_copy/physgm_dpt)
+           │   └─ attention_blocks.py / window_attention.py  instance 与 physics 共享的注意力层
+           └─ decoder/               splatting CUDA 渲染 decoder(目前只有 AnySplat 用)
 
-arch 层    src/model/arch/     负责"最终组装模型"
-           ├─ anysplat.py           AnySplat = encoder + decoder
-           ├─ iggt.py               IGGTModel = 纯 encoder（无 decoder）+ 官方 ckpt 键名重映射加载
-           └─ __init__.py           get_model(encoder_cfg, decoder_cfg)：按 cfg 类型分发 + 预训练权重加载逻辑
+契约       src/model/outputs.py  EncoderOutput + PhysicsPrediction / PhysicsPropertyPrediction /
+           src/model/types.py    PhysGMPrediction;Gaussians。encoder 产出、wrapper/loss 只读。
 
-wrapper 层 src/model/           负责"再包一层训练"，对接 Lightning 训练/推理
-           ├─ base_wrapper.py       BaseModelWrapper：optimizer 分组、loss 汇总、日志、可视化等公共逻辑
-           ├─ anysplat_wrapper.py   渲染重建训练（decoder 渲染 → mse/lpips/depth 等）
-           └─ iggt_wrapper.py       encoder-only 训练（instance/physics 特征 → disc/mvc/phys loss），无渲染
+arch 层    src/model/arch/     模型组装,一条路线一个文件
+           ├─ base.py               Encoder 抽象基类
+           ├─ anysplat.py           EncoderAnySplat(VGGT+GS head,可选 instance head)
+           │                        + AnySplat(encoder+decoder 壳,HF mixin)
+           ├─ iggt.py               EncoderIGGT(VGGT+PartHead,可选 physics scheme,无 GS head)
+           │                        + IGGTModel(纯 encoder 壳 + 官方 ckpt 键名重映射加载)
+           ├─ weight_loading.py     HF/Lightning/run_dir 权重加载权威实现
+           └─ __init__.py           get_model(encoder_cfg, decoder_cfg):按 cfg 类型分发;
+                                    EncoderCfg union 唯一权威
 
-入口       src/main.py          Hydra 入口；scripts/ 下各推理/导出脚本
+wrapper 层 src/model/wrapper/   负责"再包一层训练",对接 Lightning 训练/推理
+           ├─ base_wrapper.py       BaseModelWrapper:optimizer 分组、loss 汇总、日志、可视化等公共逻辑
+           ├─ anysplat_wrapper.py   渲染重建训练(decoder 渲染 → mse/lpips/depth 等)
+           └─ iggt_wrapper.py       encoder-only 训练(instance/physics 特征 → disc/mvc/phys loss),无渲染
+
+入口       src/main.py          Hydra 入口;scripts/ 下各推理/导出脚本
 ```
 
-**统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/encoder/encoder.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_prediction`（`PhysicsPrediction | None`）。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
+Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同目录兄弟可用单点相对;vggt/ 内部维持 vendored 原样。Hydra config group 仍叫 `config/model/encoder/`(yaml 组名与代码目录解耦,未随代码搬家)。
+
+**统一的层间契约**：所有 encoder 的 forward 返回 `EncoderOutput`（`src/model/outputs.py`），字段包括 `gaussians`（IGGT 为 None）、`pred_context_pose`、`depth_dict`、`instance_feat_map [B,V,N,H,W]`、`gaussian_instance_feat`、`physics_prediction`（`PhysicsPrediction | None`）。**新增 head 输出时，往 EncoderOutput 加可选字段（默认 None），不要改已有字段语义**——这是 wrapper 与 loss 之间解耦的接口。
 
 **分发点（改组合时要看的三个注册表）**：
 
@@ -139,14 +153,14 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 ## 7. 已知的坑 / AI 常犯错误清单
 
 1. **训练数据管线统一在** `src/dataset/`。`src/instseg/` 只保留推理/trace 后处理工具（kmeans / hdbscan_assign / export 等），不要在这里新增 dataset/datamodule 副本。
-2. **两套 heads 目录**：`encoder/heads/` 是 AnySplat 原有 GS head，`encoder/iggt_heads/` 是 IGGT 抠来的 instance head。新分割/属性 head 放 `iggt_heads/` 或新建目录，别混进 `heads/`。
+2. **heads 按领域分组**：自研 head 统一在 `src/model/heads/{gaussian,instance,physics}/`；vendored VGGT 自带的 camera/dpt/track head 留在 `src/model/vggt/heads/` 盒子里，两边不要互相搬。新 head 按领域入组，或新建领域子目录。
 3. `EncoderIGGT.forward` 里对 `instance_feat_map` 有**硬编码 L2 normalize**（`iggt.py` 有注释 "hard code normalize for iggt"）；而 disc loss 又"没按原文做 L2 归一化"——改归一化策略时两处要一起考虑，别重复归一化。
 4. `EncoderAnySplat` 的 instance head 由 `instance_feat_dim` 控制（0 = 禁用，`config/model/encoder/anysplat.yaml` 默认 0）；IGGT 默认 8。同一个 PartHead 被两个 encoder 共享——这正是"同一 head 换 backbone"的实验入口，**改 PartHead 接口时两个 encoder 都要过一遍**。
 5. 参数冻结唯一入口是 `optimizer.freeze_keywords`（`BaseWrapper.setup`，在 DDP wrap 前应用；非空时全盘接管 requires_grad，关键词零匹配直接报错）；`param_groups` 只管分组学习率，`lr_multiplier` 必须 > 0，想冻结就写进 `freeze_keywords`。判断"某参数是否在训练"看 freeze_keywords + arch 加载日志。例外：`EncoderAnySplat` 自带 `freeze_backbone`/`freeze_module`，仅在 freeze_keywords 为空时生效。
 6. 精度约定：VGGT aggregator 跑 bf16 autocast，camera/point/depth head 强制 fp32，loss 计算强制 fp32（`autocast enabled=False`）。别"顺手统一"精度。
 7. Hydra 配置是**类型化的**（`src/config.py` `load_typed_root_config` + dataclass + beartype/jaxtyping import hook）。加配置项必须同步改对应 cfg dataclass，否则启动即报错；jaxtyping 的 shape 标注是运行时校验，改张量布局时记得改标注。
 8. 历史上已做过的清理，不要走回头路：post_opt 已全删；blender2opencv 手写矩阵已清理（统一走 src/coord）；trace 相机加载已抽到 src/trace_cameras 注册表。
-9. 本仓库有很多 AnySplat 原始遗留（`src/model/encoder/backbone/`、`heads/`、evaluation、visualization 的部分文件），当前 IGGT 分割路线**不经过它们**。不要因为"看起来没用"就删除，也不要误以为它们在当前训练路径上。
+9. AnySplat 原始遗留死代码已于 2026-07 按引用图证据清理（`encoder/backbone/` croco/dino/resnet 全树、`model/transformer/`、`model/encodings/`、epipolar visualizer、`decoder/cuda_splatting.py`、`vggt/utils/visual_track.py`、`utils/ba.py`、`loss_point.py`、`validation_in_3d.py`、`ptc_geometry.py`）。仍保留的"看似没用"代码只有一处是刻意的：`vggt/heads/track_head.py` + `track_modules/`（`VGGT.__init__` 无条件构造，删了会破坏 HF 权重加载）。今后删代码前先做引用图核查（含函数内惰性导入），有证据即可删，git 历史兜底。
 
 
 

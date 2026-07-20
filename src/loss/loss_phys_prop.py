@@ -21,7 +21,7 @@ from torch import Tensor
 from src.dataset.physics.types import PhysicsPropertyTarget
 from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
-from src.model.encoder.physics_property_prediction import PhysicsPropertyPrediction
+from src.model.outputs import PhysicsPropertyPrediction
 from .loss import Loss
 
 logger = logging.getLogger(__name__)

@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from copy import copy, deepcopy
 
-from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from src.model.encoder.vggt.utils.rotation import mat_to_quat
+from src.model.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.vggt.utils.rotation import mat_to_quat
 from src.utils.point import get_normal_map
 
 def extri_intri_to_pose_encoding(

@@ -82,7 +82,7 @@ def _mem_suffix() -> str:
 
 def load_model(model_path: str, device: str = "cuda"):
     """Load the IGGT model for part-feature extraction using the integrated module."""
-    from src.model.encoder.iggt import EncoderIGGTCfg
+    from src.model.arch.iggt import EncoderIGGTCfg
     from src.model.arch.iggt import IGGTModel
 
     logger.info("Loading IGGT model from %s ...", model_path)

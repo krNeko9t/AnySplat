@@ -26,7 +26,7 @@ from torch import Tensor
 from src.dataset.physics.types import PhysGMTarget
 from src.dataset.types import BatchedExample
 from src.model.decoder.decoder import DecoderOutput
-from src.model.encoder.physgm_prediction import PhysGMPrediction
+from src.model.outputs import PhysGMPrediction
 from .loss import Loss
 
 logger = logging.getLogger(__name__)

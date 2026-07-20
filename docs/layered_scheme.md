@@ -52,7 +52,7 @@ Instance 等旧路径仍可能用 `depth_dict` 裸 key；**新路径必须用结
 |--------|--------|
 | 新标注格式 | `src/dataset/<domain>/parsers.py` + 注册表；experiment 设 `*_parser` |
 | 监督字段 / 编号语义 | `src/dataset/<domain>/types.py`（`*Target`）+ `docs/conventions.md` |
-| dense / 特征 head | `src/model/encoder/.../<name>_head.py` |
+| dense / 特征 head | `src/model/heads/<domain>/<name>_head.py` |
 | 分类器 / 可学习读出头 | 同目录 `*_classifier.py`（或 head 内子模块）；**挂在 encoder** |
 | 预测槽字段 | `*Prediction` dataclass → `EncoderOutput` 可选字段（默认 `None`） |
 | loss 公式 / pred↔GT 对齐 | `src/loss/loss_*.py`（`resolve_*` + 公式） |
@@ -64,15 +64,15 @@ Instance 等旧路径仍可能用 `depth_dict` 裸 key；**新路径必须用结
 |--------|--------|
 | 新标注格式 | [`src/dataset/physics/parsers.py`](../src/dataset/physics/parsers.py) → `PHYSICS_PARSERS`；`dataset.manifest.physics_parser` |
 | 监督语义 | [`src/dataset/physics/types.py`](../src/dataset/physics/types.py)（`PhysicsTarget` / `PhysicsPropertyTarget`） |
-| dense 特征 | [`src/model/encoder/iggt_heads/physics_head.py`](../src/model/encoder/iggt_heads/physics_head.py) |
-| 方案装配 | [`src/model/encoder/physics_scheme.py`](../src/model/encoder/physics_scheme.py)（`phys_scheme`: `class` / `property` / `physgm_copy` / `physgm_dpt`） |
-| 分类器 | [`src/model/encoder/iggt_heads/physics_classifier.py`](../src/model/encoder/iggt_heads/physics_classifier.py) |
-| 属性读出 | [`src/model/encoder/iggt_heads/physics_property_readout.py`](../src/model/encoder/iggt_heads/physics_property_readout.py)（property）/ [`physgm_readout.py`](../src/model/encoder/iggt_heads/physgm_readout.py)（physgm_copy，直接池化 backbone token，无 dense head）/ [`physgm_dense_readout.py`](../src/model/encoder/iggt_heads/physgm_dense_readout.py)（physgm_dpt，DPT dense feature + 全分辨率 mask 池化） |
-| 预测槽 | [`physics_prediction.py`](../src/model/encoder/physics_prediction.py) / [`physics_property_prediction.py`](../src/model/encoder/physics_property_prediction.py) / [`physgm_prediction.py`](../src/model/encoder/physgm_prediction.py) → `EncoderOutput` |
+| dense 特征 | [`src/model/heads/physics/physics_head.py`](../src/model/heads/physics/physics_head.py) |
+| 方案装配 | [`src/model/heads/physics/scheme.py`](../src/model/heads/physics/scheme.py)（`phys_scheme`: `class` / `property` / `physgm_copy` / `physgm_dpt`） |
+| 分类器 | [`src/model/heads/physics/physics_classifier.py`](../src/model/heads/physics/physics_classifier.py) |
+| 属性读出 | [`src/model/heads/physics/physics_property_readout.py`](../src/model/heads/physics/physics_property_readout.py)（property）/ [`physgm_readout.py`](../src/model/heads/physics/physgm_readout.py)（physgm_copy，直接池化 backbone token，无 dense head）/ [`physgm_dense_readout.py`](../src/model/heads/physics/physgm_dense_readout.py)（physgm_dpt，DPT dense feature + 全分辨率 mask 池化） |
+| 预测槽 | [`src/model/outputs.py`](../src/model/outputs.py)（PhysicsPrediction / PhysicsPropertyPrediction / PhysGMPrediction）→ `EncoderOutput` |
 | loss | [`src/loss/loss_phys.py`](../src/loss/loss_phys.py)（class）/ [`src/loss/loss_phys_prop.py`](../src/loss/loss_phys_prop.py)（property）/ [`src/loss/loss_physgm.py`](../src/loss/loss_physgm.py)（physgm_copy 与 physgm_dpt 共用：NLL+MSE） |
 | 实验 | [`config/experiment/phys_iggt.yaml`](../config/experiment/phys_iggt.yaml) / [`phys_prop_iggt.yaml`](../config/experiment/phys_prop_iggt.yaml) / [`physgm_iggt.yaml`](../config/experiment/physgm_iggt.yaml) / [`physgm_dpt_iggt.yaml`](../config/experiment/physgm_dpt_iggt.yaml) |
 
-Scheme 输入统一为命名类型 `PhysicsSchemeInputs`（`physics_scheme.py`）：新 bundle 需要新的
+Scheme 输入统一为命名类型 `PhysicsSchemeInputs`（`heads/physics/scheme.py`）：新 bundle 需要新的
 encoder 中间量（如 physgm_copy 用原始 aggregator token）时给它加字段，不改 bundle 签名。
 PhysGM 归一化（log10(Pa) z-score 等）与反归一化 helper 只活在 `parsers.py`
 （`PHYSGM_NORMALIZATION` / `physgm_denormalize`）。

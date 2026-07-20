@@ -14,9 +14,8 @@ from typing import Union
 import torch
 from torch import nn
 
-from ..decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
-from ..encoder.anysplat import EncoderAnySplatCfg
-from .anysplat import AnySplat
+from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
+from .anysplat import AnySplat, EncoderAnySplatCfg
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +112,7 @@ def load_model_from_run(
     from src.loss import get_losses
     from src.misc.step_tracker import StepTracker
     from src.model.arch import get_model
-    from src.model.encoder.iggt import EncoderIGGTCfg
+    from src.model.arch.iggt import EncoderIGGTCfg
 
     run_dir = Path(run_dir)
     ckpt_path = Path(ckpt_path)
@@ -126,13 +125,13 @@ def load_model_from_run(
     step_tracker = StepTracker()
 
     if isinstance(cfg.model.encoder, EncoderIGGTCfg):
-        from src.model.iggt_wrapper import IGGTWrapper
+        from src.model.wrapper.iggt_wrapper import IGGTWrapper
 
         wrapper = IGGTWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
         )
     else:
-        from src.model.anysplat_wrapper import AnySplatWrapper
+        from src.model.wrapper.anysplat_wrapper import AnySplatWrapper
 
         wrapper = AnySplatWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
