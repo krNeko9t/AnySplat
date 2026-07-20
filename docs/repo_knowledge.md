@@ -82,9 +82,21 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 | 3   | 实例（IGGT 路线）             | `instseg_iggt.yaml`（变体：`instseg_iggt_infinigen_mv`）                                                | iggt（encoder-only）；SamProjector + PartHead                                                                      | manifest                 | —                            | disc                     |
 | 4   | 实例 + 物理分类               | `phys_iggt.yaml`                                                                                   | iggt（`phys_scheme: class`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsClassifier | manifest                 | `physics_parser: 3dovs_json` | phys                     |
 | 5   | 实例 + 物理量回归             | `phys_prop_iggt.yaml`                                                                              | iggt（`phys_scheme: property`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsPropertyReadout | manifest                 | `physics_parser: instascene_vlm` | phys_prop                |
+| 6   | SegVGGT 端到端实例（推理，iter 1） | —（暂无，仅推理脚本 `scripts/segvggt_infer.py`）                                                              | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead                          | —（脚本直读图像文件夹）        | —                            | —（训练待 iter 2）           |
 
 
 新增第 5 套算法时：新建 experiment yaml 组合三元组，并在本表加一行。
+
+### SegVGGT 路线（新增，iteration 1 = 仅推理）
+
+与 IGGT 不同：SegVGGT 把实例推理做进 transformer 内部——object queries 在每层 global attention 后 cross-attend 图像 token，每个 query 直接出「per-view mask + 类别分布（末通道 = no-object，天然排除背景/空 query）」，端到端、无聚类后处理、无 GT-mask 池化。这正是把 per-object 物理属性挂在 query 上的天然载体（iter 3 目标）。
+
+- **vendored box**：`src/model/segvggt/`（改版 aggregator + CrossBlock/CrossAttention + SemanticHead + LoRA，忠实照搬官方，import 重写为 `src.model.segvggt.*`）。与现有 `src/model/vggt/` box 隔离，互不牵动。不搬 `dependency/`（VGGSfM tracker）与 `utils/geometry`。
+- **arch**：`src/model/arch/segvggt.py`（`EncoderSegVGGTCfg` / `EncoderSegVGGT` 持有 vendored `SegVGGT` 为 `self.model`，forward 重打包成 `EncoderOutput`；`SegVGGTModel.from_checkpoint` 给官方 `.pt` 键加 `encoder.model.` 前缀后 shape 对齐 strict=False）。已注册进 `MODELS` / `EncoderCfg` union / `get_model`。
+- **契约槽**：`EncoderOutput.segvggt_prediction`（`SegVGGTPrediction`：query_masks / query_class_logits / query_embed / feature_map / attn_frame_mean）。`query_embed`（per-object 嵌入）iter 1 暂不暴露（vendored forward 用完即弃），iter 3 需要时再接。
+- **config**：`config/model/encoder/segvggt.yaml`（`enable_semantic: 20|200` 对应官方两套 ckpt；LoRA rank 32 必须与训练一致）。
+- **权重**：官方 HuggingFace `JinyuanQu/SegVGGT`（`checkpoint/segvggt_scannet{v2,200}.pt`，各约 6.6GB，含 DINO backbone，非 `hf:` 前缀走 from_checkpoint）。**官方无训练代码**，loss（Hungarian + BCE/Dice + FADA JS + teacher 蒸馏）需 iter 2 民间复现。
+- **验证到位**：本仓库构建的 state_dict 键集与官方 `SegVGGT`（同 eval 配置）**逐键一致（2606=2606，零差异）**→ 官方 ckpt 加载零 bad-missing/unexpected；随机权重 CPU 端到端小前向 shape 全部打通。真权重前向/掩码质量待集群跑（本机无 GPU、缺 gsplat/hydra，仅开发机）。
 
 ## 3. 权重加载（按来源分流，权威在 arch）
 

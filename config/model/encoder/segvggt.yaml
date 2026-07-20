@@ -1,0 +1,36 @@
+name: segvggt
+
+# Path to the official SegVGGT .pt (HuggingFace JinyuanQu/SegVGGT). Non-empty and
+# not "hf:"-prefixed -> loaded via SegVGGTModel.from_checkpoint (key remap).
+pretrained_weights: ""
+
+# backbone / heads (mirror the official eval config)
+img_size: 518
+patch_size: 14
+embed_dim: 1024
+enable_camera: true
+enable_depth: true
+enable_point: false
+enable_track: false
+enable_semantic: 20  # 20 (ScanNetv2 ckpt) or 200 (ScanNet200 ckpt)
+return_feature_maps_down_ratio: 2
+
+# instance branch (object queries)
+enable_instance_seg: true
+instance_query_num: 400
+query_self_attention: true
+query_sa_mlp_ratio: 1.0
+supervise_attend_frame: true
+
+# LoRA fine-tuning of frame/global attention (must match the trained ckpt: rank 32)
+use_lora: true
+lora_rank: 32
+lora_alpha: 32.0
+lora_dropout: 0.0
+lora_target_frame_blocks: true
+lora_target_global_blocks: true
+lora_verbose: false
+
+# data shim (dataset [-1,1] -> wrapper (x+1)/2 -> [0,1] model input)
+input_mean: [0.5, 0.5, 0.5]
+input_std: [0.5, 0.5, 0.5]

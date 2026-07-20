@@ -69,6 +69,32 @@ class PhysGMPrediction:
 
 
 @dataclass
+class SegVGGTPrediction:
+    """SegVGGT instance-segmentation branch outputs for one forward pass.
+
+    End-to-end instance reasoning via object queries (no clustering post-process,
+    no GT mask pooling): each of the ``Q`` learnable queries yields a per-view mask
+    and a class distribution whose last channel is the *no-object* logit, so
+    background / empty queries are dropped by argmax rather than a heuristic.
+
+    ``query_embed`` (the projected object-query vectors) is the natural per-object
+    instance embedding to hang downstream per-object physics readouts on; it is
+    left ``None`` in the inference-only path and populated once needed.
+    """
+
+    # Per-query per-view mask logits (pre-sigmoid): [B, Q, V, h, w]
+    query_masks: Float[Tensor, "batch query view h w"] | None = None
+    # Per-query class logits incl. trailing no-object channel: [B, Q, C_plus_1]
+    query_class_logits: Float[Tensor, "batch query classes"] | None = None
+    # Projected object-query embeddings (mask / physics space): [B, Q, D]
+    query_embed: Float[Tensor, "batch query dim"] | None = None
+    # Dense instance feature maps (mask source): [B, V, h, w, D]
+    feature_map: Float[Tensor, "batch view h w dim"] | None = None
+    # FADA frame-level cross-attention weights (training only): [L, B, Q, V]
+    attn_frame_mean: Float[Tensor, "layers batch query view"] | None = None
+
+
+@dataclass
 class EncoderOutput:
     gaussians: Gaussians | None
     pred_pose_enc_list: list[Float[Tensor, "batch view 6"]] | None
@@ -87,3 +113,5 @@ class EncoderOutput:
     physics_property_prediction: PhysicsPropertyPrediction | None = None
     # Physics scheme "physgm_copy" slot. See PhysGMPrediction.
     physgm_prediction: PhysGMPrediction | None = None
+    # SegVGGT end-to-end instance branch. See SegVGGTPrediction.
+    segvggt_prediction: SegVGGTPrediction | None = None
