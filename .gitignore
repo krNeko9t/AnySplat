@@ -177,8 +177,8 @@ table.tex
 /test/*
 
 wandb/
-output*
-results*
+/output*
+/results*
 
 *.ply
 *.mp4
