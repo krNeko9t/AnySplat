@@ -177,9 +177,13 @@ class DynamicBatchSampler(Sampler):
 
         while True:
             try:
-                # Sample random image number and aspect ratio
+                # Sample random image number and patch height.
+                # h_range is input_image_shape [H, W]; height is sampled between the
+                # shorter and longer side so portrait (H>W) and landscape (H<=W) both work.
                 random_image_num = int(np.random.choice(self.possible_nums, p=self.normalized_weights))
-                random_ps_h = np.random.randint(low=(self.h_range[0] // 14), high=(self.h_range[1] // 14)+1)
+                ps_h_lo = min(self.h_range[0], self.h_range[1]) // 14
+                ps_h_hi = max(self.h_range[0], self.h_range[1]) // 14
+                random_ps_h = np.random.randint(low=ps_h_lo, high=ps_h_hi + 1)
 
                 # Update sampler parameters
                 self.sampler.update_parameters(
