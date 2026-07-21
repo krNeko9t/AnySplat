@@ -1,0 +1,15 @@
+# SegVGGT instance loss: Hungarian-matched classification + mask (BCE+Dice) + FADA (JS).
+# Formula only (matcher has no learnable params). Pred/target come from depth_dict
+# ["segvggt_prediction"] / ["instance_mask"]. Weights follow the paper (A.4).
+segvggt:
+  weight: 1.0
+  lambda_cls: 0.5      # L_cls
+  lambda_mask: 1.0     # L_bce + L_dice
+  lambda_js: 0.5       # FADA regularisation
+  cost_cls: 0.5        # matching cost = loss weights (paper A.4)
+  cost_mask: 1.0
+  cost_js: 0.5         # set 0 to disable FADA cost term (Table 3 row 2)
+  no_object_weight: 0.1
+  ignore_id: 0
+  class_agnostic: true # true -> single foreground class (no semantic labels needed)
+  dice_eps: 1.0

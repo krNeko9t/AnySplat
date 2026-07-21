@@ -110,6 +110,9 @@ class TrainCfg:
     render_ba: bool = False
     render_ba_after_step: int = 0
     video_use_gt_trajectory: bool = False
+    # SegVGGT geometry supervision source: "gt" (manifest camera/depth) or
+    # "teacher" (frozen pretrained VGGT distillation, paper-faithful, opt-in).
+    segvggt_geo_supervision: str = "gt"
 
 
 # ---------------------------------------------------------------------------

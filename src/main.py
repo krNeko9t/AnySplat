@@ -37,6 +37,7 @@ with install_import_hook(
     from src.misc.step_tracker import StepTracker
     from src.misc.wandb_tools import update_checkpoint_path
     from src.model.arch.iggt import EncoderIGGTCfg
+    from src.model.arch.segvggt import EncoderSegVGGTCfg
 
 
 logging_logger = logging.getLogger(__name__)
@@ -123,7 +124,12 @@ def train(cfg_dict: DictConfig):
     decoder_cfg = getattr(cfg.model, "decoder", None)
     model = get_model(cfg.model.encoder, decoder_cfg)
 
-    if isinstance(cfg.model.encoder, EncoderIGGTCfg):
+    if isinstance(cfg.model.encoder, EncoderSegVGGTCfg):
+        from src.model.wrapper.segvggt_wrapper import SegVGGTWrapper
+        model_wrapper = SegVGGTWrapper(
+            cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,
+        )
+    elif isinstance(cfg.model.encoder, EncoderIGGTCfg):
         from src.model.wrapper.iggt_wrapper import IGGTWrapper
         model_wrapper = IGGTWrapper(
             cfg.optimizer, cfg.test, cfg.train, model, get_losses(cfg.loss), step_tracker,

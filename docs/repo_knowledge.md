@@ -82,7 +82,7 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 | 3   | 实例（IGGT 路线）             | `instseg_iggt.yaml`（变体：`instseg_iggt_infinigen_mv`）                                                | iggt（encoder-only）；SamProjector + PartHead                                                                      | manifest                 | —                            | disc                     |
 | 4   | 实例 + 物理分类               | `phys_iggt.yaml`                                                                                   | iggt（`phys_scheme: class`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsClassifier | manifest                 | `physics_parser: 3dovs_json` | phys                     |
 | 5   | 实例 + 物理量回归             | `phys_prop_iggt.yaml`                                                                              | iggt（`phys_scheme: property`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsPropertyReadout | manifest                 | `physics_parser: instascene_vlm` | phys_prop                |
-| 6   | SegVGGT 端到端实例（推理，iter 1） | —（暂无，仅推理脚本 `scripts/segvggt_infer.py`）                                                              | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead                          | —（脚本直读图像文件夹）        | —                            | —（训练待 iter 2）           |
+| 6   | SegVGGT 端到端实例（iter 1 推理 + iter 2 训练） | `segvggt_scannet.yaml`（训练）；`scripts/segvggt_infer.py`（推理）                                             | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead                          | manifest（instance_mask+相机+深度）  | —（class-agnostic 默认，可选 semantic） | segvggt（cls+BCE+Dice+FADA）, segvggt_geo（camera+depth） |
 
 
 新增第 5 套算法时：新建 experiment yaml 组合三元组，并在本表加一行。
@@ -96,7 +96,19 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 - **契约槽**：`EncoderOutput.segvggt_prediction`（`SegVGGTPrediction`：query_masks / query_class_logits / query_embed / feature_map / attn_frame_mean）。`query_embed`（per-object 嵌入）iter 1 暂不暴露（vendored forward 用完即弃），iter 3 需要时再接。
 - **config**：`config/model/encoder/segvggt.yaml`（`enable_semantic: 20|200` 对应官方两套 ckpt；LoRA rank 32 必须与训练一致）。
 - **权重**：官方 HuggingFace `JinyuanQu/SegVGGT`（`checkpoint/segvggt_scannet{v2,200}.pt`，各约 6.6GB，含 DINO backbone，非 `hf:` 前缀走 from_checkpoint）。**官方无训练代码**，loss（Hungarian + BCE/Dice + FADA JS + teacher 蒸馏）需 iter 2 民间复现。
-- **验证到位**：本仓库构建的 state_dict 键集与官方 `SegVGGT`（同 eval 配置）**逐键一致（2606=2606，零差异）**→ 官方 ckpt 加载零 bad-missing/unexpected；随机权重 CPU 端到端小前向 shape 全部打通。真权重前向/掩码质量待集群跑（本机无 GPU、缺 gsplat/hydra，仅开发机）。
+- **验证到位（iter 1）**：本仓库构建的 state_dict 键集与官方 `SegVGGT`（同 eval 配置）**逐键一致（2606=2606，零差异）**→ 官方 ckpt 加载零 bad-missing/unexpected；随机权重 CPU 端到端小前向 shape 全部打通。真权重前向/掩码质量待集群跑（本机无 GPU、缺 gsplat/hydra，仅开发机）。
+
+#### iteration 2 = 训练复现（官方无训练代码，对照论文民间复现）
+
+论文（`~/tmp/move_segvggt/segvggt/SegVGGT.md` + `mental-model.md`）给了完整训练配方：`L_total = L_geo + L_inst + λ_js·L_js`。官方只发权重不发训练码，故按 IGGT 的 disc/mvc 先例民间复现。**全部落在 loss 层（纯公式，无可学习参数）+ wrapper 层**，backbone box 与 arch 契约零改动。
+
+- **matcher**：`src/loss/segvggt_matcher.py`（纯 torch+scipy，无仓库依赖，可单测）。DETR/Mask2Former 式二部图匹配，cost = `-λ_cls·c_{j,ck} + λ_mask·(BCE+Dice) + λ_js·C_js`（论文 Eq.5）。多视角 mask 摊平成 `N·H·W` 即等价点云 mask，直接继承点云分割的 BCE+Dice。`C_js`=帧级注意力 JS 散度（Eq.8）。
+- **实例 loss**：`src/loss/loss_segvggt.py`（`LossSegVGGT`，注册名 `segvggt`）。跑 matcher → `λ_cls·CE(带 no-object 通道) + λ_mask·(BCE+Dice) + λ_js·L_js(FADA)`。GT 全部从多视角 `instance_mask` 现推：每实例二值 mask（area 降采到预测分辨率）、帧可见度分布（面积占比，用于 FADA）、类别（默认 class-agnostic 单前景类；给 `instance_semantic` 逐像素图则多数投票转类别监督）。
+- **FADA 关键接线**：vendored forward 已出 `attn_frame_mean`（`[L,B,Q,S]`，= 每帧注意力质量的 `1/P·Σ`，即论文 `p̂` 差一个逐帧常数 P）；loss 里**沿帧维重归一化**即恢复论文归一化分布。FADA 双角色：既是 matcher 的 cost 项（`cost_js>0`），又是 matched pair 的正则 loss（`λ_js`）——两者共享一次匹配，故合在同一个 Loss 内算。
+- **几何 loss**：`src/loss/loss_segvggt_geo.py`（`LossSegVGGTGeo`，注册名 `segvggt_geo`）。`λ_camera·L_camera + λ_depth·L_depth`。camera=9 维 pose encoding 上的 Huber（沿 camera head 迭代 γ 衰减，复用 `loss_huber`）；depth=按序列单一 median scale 对齐后 L1+梯度（VGGT 上到尺度）。监督源解耦：wrapper 经 `depth_dict["segvggt_geo_target"]` 喂 target——默认 `gt`（manifest 干净相机/深度，恒可跑），可选 `teacher`（冻结 VGGT 蒸馏，论文原味，需 1B 权重+全环境，`train.segvggt_geo_supervision: teacher` 开）。
+- **wrapper**：`src/model/wrapper/segvggt_wrapper.py`（`SegVGGTWrapper`，镜像 `IGGTWrapper`，encoder-only 无渲染）。context+target 视角拼一起送 encoder，把 `segvggt_prediction`/`instance_mask`/`pred_pose_enc_list`/`depth`/`geo_target` 塞进 `depth_dict` 交给 loss。`src/main.py` 分发新增 `isinstance(EncoderSegVGGTCfg)→SegVGGTWrapper`（在 IGGT 分支之前）。
+- **超参对齐论文 A.4**：`λ_camera=5, λ_depth=1, λ_cls=0.5, λ_mask=1, λ_js=0.5`，matching cost 权重=loss 权重；新参数 lr `2e-4`、pre-existing `6e-5`（=6e-5×3.333 param_group）、DINO(`patch_embed`) 冻结、LoRA rank 32、梯度裁剪。experiment：`config/experiment/segvggt_scannet.yaml`。
+- **验证到位（iter 2）**：CPU 合成张量端到端跑通 matcher（二部图分配合法、cost 有限、JS(p,p)=0）+ `LossSegVGGT`（cls/BCE/Dice/FADA 四项有限、matched 计数正确、梯度回传到 query mask/类别 logits、空场景→仅 no-object CE、`cost_js=0` 退化为 loss-only FADA）+ `LossSegVGGTGeo`（camera/depth 有限、梯度回传、缺 target→0）。真数据训练/收敛待集群（本机无 GPU）。
 
 ## 3. 权重加载（按来源分流，权威在 arch）
 

@@ -1,0 +1,74 @@
+# @package _global_
+# SegVGGT end-to-end 3D instance segmentation training on a manifest dataset
+# (iteration 2: reproduced training -- Hungarian matching + BCE/Dice + FADA JS +
+# geometry supervision; the official release ships no training code).
+# Usage: python src/main.py experiment=segvggt_scannet
+#
+# Supervision the manifest already carries = exactly what SegVGGT needs:
+#   instance_mask (multi-view 2D masks) -> query matching + BCE/Dice + FADA
+#   extrinsics / intrinsics / depth      -> geometry loss (geo_supervision: gt)
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: segvggt
+  - override /loss: [segvggt, segvggt_geo]
+
+wandb:
+  name: segvggt_scannet
+  tags: [instseg, segvggt]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    # Non-empty local path -> SegVGGTModel.from_checkpoint (official .pt key remap).
+    # Leave "" to train the instance branch from the VGGT-initialised backbone.
+    pretrained_weights: ""
+    enable_semantic: 20            # 20 (ScanNetv2) or 200 (ScanNet200)
+    instance_query_num: 400
+  decoder: null
+
+optimizer:
+  lr: 6.0e-5                       # pre-existing params (paper A.4)
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 1.0      # pre-existing (camera/depth heads, LoRA base) at base lr
+  freeze_keywords: [patch_embed]   # DINO backbone frozen (paper)
+  param_groups:
+    # newly-introduced params (cross/self-attn, instance queries, semantic DPT, LoRA)
+    # trained at 2e-4 = 6e-5 * 3.333 (paper A.4)
+    - keywords: [instance_, semantic_head, lora_]
+      lr_multiplier: 3.333
+
+train:
+  segvggt_geo_supervision: gt      # "gt" (manifest) or "teacher" (frozen VGGT, opt-in)
+
+trainer:
+  max_steps: 100000
+  val_check_interval: 500
+  precision: bf16-mixed
+  gradient_clip_val: 1.0           # paper: gradient clipping
+  limit_val_batches: 1
+
+checkpointing:
+  load: null
+  every_n_train_steps: 1000
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  segvggt:
+    weight: 1.0
+    class_agnostic: true
+  segvggt_geo:
+    weight: 1.0
+
+dataset:
+  manifest: {}

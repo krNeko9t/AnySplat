@@ -1,0 +1,14 @@
+# SegVGGT geometry loss: L_geo = lambda_camera * L_camera + lambda_depth * L_depth.
+# Camera = Huber on the 9-D pose encoding (VGGT convention); depth = per-sequence
+# scale-aligned L1 + gradient. Target (GT or VGGT teacher) is supplied by the wrapper
+# via depth_dict["segvggt_geo_target"]. Weights follow the paper (A.4).
+segvggt_geo:
+  weight: 1.0
+  lambda_camera: 5.0
+  lambda_depth: 1.0
+  camera_gamma: 0.6
+  weight_T: 1.0
+  weight_R: 1.0
+  weight_fl: 0.5
+  depth_grad_weight: 0.5
+  align_scale: true

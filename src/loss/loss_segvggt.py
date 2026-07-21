@@ -1,0 +1,272 @@
+"""SegVGGT end-to-end instance loss: classification + mask (BCE+Dice) + FADA (JS).
+
+Reproduces the instance training objective of SegVGGT (paper Sec. 3.3 / 3.4), which
+the official release does not ship.  After a Hungarian match between the O object
+queries and the GT instances of a scene (see :mod:`segvggt_matcher`), we apply::
+
+    L_inst = lambda_cls * L_cls + lambda_mask * (L_bce + L_dice)
+    L_js   = 1/(|M|*L*N) * sum_{(j,k) in M} sum_l JS(p_k^gt || p_hat_j^(l))
+
+and this module returns their weighted sum ``lambda_cls*L_cls +
+lambda_mask*(L_bce+L_dice) + lambda_js*L_js`` (the FADA term is folded in here
+because it shares the match).  The geometry terms (``L_camera``, ``L_depth``) live
+in :mod:`loss_segvggt_geo`.
+
+GT construction (all derived from the multi-view ``instance_mask``, no extra parser):
+  * per-instance binary masks, area-downsampled to the prediction resolution (h, w)
+    and flattened to the ``N*h*w`` sequence the paper treats as a point-cloud mask;
+  * per-instance frame-visibility distribution ``p_k^gt`` (area-proportional over the
+    N frames, unseen frames -> 0), used by the FADA JS term;
+  * per-instance class label.  Defaults to **class-agnostic** (every instance -> class
+    0, no-object = last logit).  If a per-pixel ``instance_semantic`` map is supplied
+    via ``depth_dict`` it is majority-voted per instance to give class-aware targets.
+
+Inputs (provided by :class:`SegVGGTWrapper` through ``depth_dict``):
+  - depth_dict['segvggt_prediction']: :class:`SegVGGTPrediction`
+      * query_masks        [B, Q, S, h, w]  (raw logits, pre-sigmoid)
+      * query_class_logits [B, Q, C+1]      (last channel = no-object)
+      * attn_frame_mean    [L, B, Q, S]     (per-frame attn mass; renormalised here)
+  - depth_dict['instance_mask']:       Int64 [B, S, H, W]
+  - depth_dict['instance_valid_mask']: Bool  [B, S, H, W]  (optional)
+  - depth_dict['instance_semantic']:   Int64 [B, S, H, W]  (optional, class-aware)
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+import torch
+import torch.nn.functional as F
+from jaxtyping import Float
+from torch import Tensor
+
+from src.dataset.types import BatchedExample
+from .loss import Loss
+from .segvggt_matcher import (
+    HungarianMatcher,
+    MatcherWeights,
+    batch_dice_cost,
+    js_divergence,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class LossSegVGGTCfg:
+    weight: float = 1.0
+    # loss-term weights (paper A.4: lambda_cls=0.5, lambda_mask=1.0, lambda_js=0.5)
+    lambda_cls: float = 0.5
+    lambda_mask: float = 1.0
+    lambda_js: float = 0.5
+    # matching-cost weights (paper: "exactly match their corresponding loss counterparts")
+    cost_cls: float = 0.5
+    cost_mask: float = 1.0
+    cost_js: float = 0.5
+    # DETR down-weights the no-object class in the classification CE
+    no_object_weight: float = 0.1
+    ignore_id: int = 0          # instance id treated as background / ignore
+    class_agnostic: bool = True  # every instance -> class 0 (no semantic labels needed)
+    dice_eps: float = 1.0        # Laplace smoothing for Dice
+
+
+@dataclass
+class LossSegVGGTCfgWrapper:
+    segvggt: LossSegVGGTCfg
+
+
+class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
+    """Hungarian-matched classification + mask + FADA loss for SegVGGT."""
+
+    def __init__(self, cfg: LossSegVGGTCfgWrapper) -> None:
+        super().__init__(cfg)
+        self.matcher = HungarianMatcher(
+            MatcherWeights(
+                cost_cls=self.cfg.cost_cls,
+                cost_mask=self.cfg.cost_mask,
+                cost_js=self.cfg.cost_js,
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # GT builders (pure tensor ops, no learnable params)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _downsample_masks(binary: Tensor, hw: tuple[int, int]) -> Tensor:
+        """[K, S, H, W] binary -> [K, S, h, w] binary via area resample + 0.5 thresh."""
+        k, s, H, W = binary.shape
+        h, w = hw
+        if (H, W) == (h, w):
+            return binary
+        x = binary.reshape(k * s, 1, H, W).float()
+        x = F.interpolate(x, size=(h, w), mode="area")
+        return (x.reshape(k, s, h, w) > 0.5).float()
+
+    def _build_targets(
+        self,
+        inst_mask_b: Tensor,          # [S, H, W] int64
+        semantic_b: Tensor | None,    # [S, H, W] int64 or None
+        hw: tuple[int, int],
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return (gt_classes [K], gt_masks [K, S, h, w], gt_visibility [K, S])."""
+        s, H, W = inst_mask_b.shape
+        ids = torch.unique(inst_mask_b)
+        ids = ids[ids != self.cfg.ignore_id]
+        device = inst_mask_b.device
+        if ids.numel() == 0:
+            h, w = hw
+            return (
+                torch.zeros(0, dtype=torch.long, device=device),
+                torch.zeros(0, s, h, w, device=device),
+                torch.zeros(0, s, device=device),
+            )
+
+        masks_full = (inst_mask_b[None] == ids[:, None, None, None]).float()  # [K,S,H,W]
+        # frame-visibility distribution p_k^gt (area-proportional over S frames)
+        per_frame = masks_full.sum(dim=(-1, -2))                 # [K, S]
+        visibility = per_frame / per_frame.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+        gt_masks = self._downsample_masks(masks_full, hw)        # [K, S, h, w]
+
+        if self.cfg.class_agnostic or semantic_b is None:
+            gt_classes = torch.zeros(ids.numel(), dtype=torch.long, device=device)
+        else:
+            gt_classes = torch.empty(ids.numel(), dtype=torch.long, device=device)
+            for i, inst_id in enumerate(ids):
+                sem_vals = semantic_b[inst_mask_b == inst_id]
+                sem_vals = sem_vals[sem_vals >= 0]
+                if sem_vals.numel() == 0:
+                    gt_classes[i] = 0
+                else:
+                    gt_classes[i] = torch.bincount(sem_vals).argmax()
+        return gt_classes, gt_masks, visibility
+
+    # ------------------------------------------------------------------ #
+    # Loss interface
+    # ------------------------------------------------------------------ #
+    def forward(
+        self,
+        prediction,
+        batch: BatchedExample,
+        gaussians,
+        depth_dict: dict | None,
+        global_step: int,
+    ) -> Float[Tensor, ""]:
+        self.extra_logs: dict[str, Tensor] = {}
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        def _zero():
+            return torch.tensor(0.0, device=device, dtype=torch.float32)
+
+        if depth_dict is None:
+            return _zero()
+        pred = depth_dict.get("segvggt_prediction")
+        inst_mask = depth_dict.get("instance_mask")
+        if pred is None or inst_mask is None:
+            return _zero()
+        if pred.query_masks is None or pred.query_class_logits is None:
+            return _zero()
+
+        query_masks = pred.query_masks                    # [B, Q, S, h, w]
+        query_cls = pred.query_class_logits               # [B, Q, C+1]
+        attn = pred.attn_frame_mean                        # [L, B, Q, S] or None
+        device = query_masks.device
+
+        B, Q, S, h, w = query_masks.shape
+        n_cls = query_cls.shape[-1]
+        no_obj = n_cls - 1
+
+        valid_mask = depth_dict.get("instance_valid_mask")
+        if valid_mask is not None:
+            if valid_mask.shape[-1] == 1:
+                valid_mask = valid_mask.squeeze(-1)
+            inst_mask = inst_mask * valid_mask.to(inst_mask.dtype)
+        semantic = depth_dict.get("instance_semantic")
+
+        # class-weight vector: down-weight no-object (DETR convention)
+        cls_weight = torch.ones(n_cls, device=device)
+        cls_weight[no_obj] = self.cfg.no_object_weight
+
+        total_cls = _zero()
+        total_bce = _zero()
+        total_dice = _zero()
+        total_js = _zero()
+        n_masks = 0  # matched pairs across the batch (mask/js normaliser)
+
+        for b in range(B):
+            gt_classes, gt_masks, visibility = self._build_targets(
+                inst_mask[b], None if semantic is None else semantic[b], (h, w)
+            )
+            k = gt_classes.shape[0]
+
+            cls_logits_b = query_cls[b].float()                    # [Q, C+1]
+            cls_prob_b = cls_logits_b.softmax(-1)
+            mask_logits_b = query_masks[b].reshape(Q, S * h * w).float()  # [Q, N]
+
+            pred_attn_b = None
+            if attn is not None:
+                a = attn[:, b].float()                              # [L, Q, S]
+                pred_attn_b = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+
+            # ----- classification target (default = no-object) -----
+            tgt_classes = torch.full((Q,), no_obj, dtype=torch.long, device=device)
+
+            if k > 0:
+                gt_masks_flat = gt_masks.reshape(k, S * h * w)     # [K, N]
+                q_idx, g_idx = self.matcher.match_one(
+                    cls_prob_b, mask_logits_b, gt_classes, gt_masks_flat,
+                    pred_attn_b, visibility,
+                )
+                tgt_classes[q_idx] = gt_classes[g_idx]
+
+                # ----- mask losses on matched pairs -----
+                m_logits = mask_logits_b[q_idx]                    # [M, N]
+                m_gt = gt_masks_flat[g_idx]                        # [M, N]
+                total_bce = total_bce + F.binary_cross_entropy_with_logits(
+                    m_logits, m_gt, reduction="mean"
+                ) * q_idx.numel()
+                # Dice loss (1 - dice) on the matched diagonal
+                dice_pairs = batch_dice_cost(m_logits, m_gt, self.cfg.dice_eps).diagonal()
+                total_dice = total_dice + dice_pairs.sum()
+
+                # ----- FADA JS regularisation on matched pairs -----
+                if pred_attn_b is not None:
+                    p_gt = visibility[g_idx]                       # [M, S]
+                    p_hat = pred_attn_b[:, q_idx, :]               # [L, M, S]
+                    js = js_divergence(p_gt[None], p_hat)          # [L, M]
+                    total_js = total_js + (js.mean(dim=0) / S).sum()
+
+                n_masks += q_idx.numel()
+
+            # ----- classification CE over all queries (matched + no-object) -----
+            total_cls = total_cls + F.cross_entropy(
+                cls_logits_b, tgt_classes, weight=cls_weight, reduction="mean"
+            )
+
+        # normalise
+        total_cls = total_cls / max(B, 1)
+        norm = max(n_masks, 1)
+        total_bce = total_bce / norm
+        total_dice = total_dice / norm
+        total_js = total_js / norm
+
+        l_cls = self.cfg.lambda_cls * total_cls
+        l_mask = self.cfg.lambda_mask * (total_bce + total_dice)
+        l_js = self.cfg.lambda_js * total_js
+        loss = self.cfg.weight * (l_cls + l_mask + l_js)
+        loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+
+        self.extra_logs = {
+            "loss_segvggt_cls": total_cls.detach(),
+            "loss_segvggt_bce": total_bce.detach(),
+            "loss_segvggt_dice": total_dice.detach(),
+            "loss_segvggt_js": total_js.detach(),
+            "loss_segvggt_num_matched": torch.tensor(float(n_masks)),
+        }
+        if global_step % 100 == 0:
+            logger.info(
+                "[LossSegVGGT step=%d] cls=%.4f bce=%.4f dice=%.4f js=%.4f matched=%d",
+                global_step, total_cls.item(), total_bce.item(),
+                total_dice.item(), total_js.item(), n_masks,
+            )
+        return loss
