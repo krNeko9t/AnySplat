@@ -506,8 +506,13 @@ class BaseModelWrapper(LightningModule):
             matched = [kw for kw in freeze_kw if kw in name]
             for kw in matched:
                 hit_counts[kw] += 1
-            param.requires_grad = not matched
-            n_frozen += bool(matched)
+            # Additive only: never flip requires_grad back on. Some modules freeze
+            # params at construction time (e.g. LoRA freezes the base weights of the
+            # attention layers it wraps); an unconditional assignment here would
+            # silently un-freeze them and train base + adapter together.
+            if matched:
+                param.requires_grad = False
+                n_frozen += 1
         missed = [kw for kw, n in hit_counts.items() if n == 0]
         if missed:
             raise ValueError(f"freeze_keywords matched no parameters: {missed}")
