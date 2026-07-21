@@ -130,6 +130,20 @@ class SegVGGT(nn.Module, PyTorchModelHubMixin):
                     )
                     predictions["semantic_feature_maps"] = semantic_feature_maps    # (B, S, h, w, D), downsampled semantic feature maps
 
+            # Instance decode in fp32 (matches official eval: proj/einsum/cls outside bf16 autocast).
+            if self.aggregator.enable_instance_seg:
+                instance_queries_for_mask = self.aggregator.instance_queries_proj(
+                    instance_queries.float()
+                )  # (B, instance_query_num, D)
+                predictions["instance_maps"] = torch.einsum(
+                    "bnd, bshwd -> bnshw",
+                    instance_queries_for_mask,
+                    semantic_feature_maps.float(),
+                )  # (B, instance_query_num, S, h, w)
+                predictions["instance_labels"] = self.semantic_head.scratch.output_instance(
+                    instance_queries_for_mask
+                )  # (B, instance_query_num, num_instance_classes + 1)
+
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(
                 aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
@@ -142,10 +156,6 @@ class SegVGGT(nn.Module, PyTorchModelHubMixin):
             predictions["images"] = images  # store the images for visualization during inference
 
         if self.aggregator.enable_instance_seg:
-            instance_queries_for_mask = self.aggregator.instance_queries_proj(instance_queries)  # (B, instance_query_num, D)
-            predictions["instance_maps"] = torch.einsum('bnd, bshwd -> bn shw', instance_queries_for_mask, semantic_feature_maps)  # (B, instance_query_num, S, h, w)
-            predictions["instance_labels"] = self.semantic_head.scratch.output_instance(instance_queries_for_mask)  # (B, instance_query_num, num_instance_classes + 1)
-
             if ("attn_frame_mean" not in predictions) and len(attn_frame_mean_list) > 0:
                 predictions["attn_frame_mean"] = torch.stack(attn_frame_mean_list, dim=0)  # (L, B, instance_query_num, S)
 

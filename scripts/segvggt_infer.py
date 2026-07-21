@@ -9,6 +9,11 @@ channel is *no-object*; queries surviving score / area thresholds become instanc
 Preprocessing matches the official eval exactly (width -> 518, height rounded to a
 multiple of 14, portrait center-cropped square, pixels in [0, 1]).
 
+Decoding mirrors ``eval/instance_eval_common.predict_by_feat_instance`` (class-aware
+by default). A non-zero ``--score_thr`` is required for readable overlays: with the
+old default of 0.0 nearly every query survives and ~300 overlapping masks look like
+noise.
+
 Examples:
   # official ScanNetv2 weights, auto-download, run on the bundled example views
   python scripts/segvggt_infer.py --hf --semantic 20 \
@@ -73,7 +78,7 @@ def load_and_preprocess(paths: list[Path], target_width: int = 518) -> torch.Ten
 
 
 # --------------------------------------------------------------------------- #
-# decode object queries -> instance masks (class-agnostic, mirrors official)
+# decode object queries -> instance masks (mirrors official predict_by_feat_instance)
 # --------------------------------------------------------------------------- #
 def decode_instances(
     cls_logits: torch.Tensor,   # [Q, C+1]
@@ -81,28 +86,46 @@ def decode_instances(
     mask_thr: float = 0.4,
     topk: int = 600,
     npoint_thr: int = 200,
-    score_thr: float = 0.0,
+    score_thr: float = 0.25,
+    class_agnostic: bool = False,
 ):
+    """Return (binary_masks [N, V*h*w], scores [N], labels [N])."""
     cls_logits = cls_logits.float().cpu()
     mask_logits = mask_logits.float().cpu()
 
-    probs = F.softmax(cls_logits, dim=-1)
-    scores = 1.0 - probs[:, -1]  # 1 - P(no-object)
-    topk = min(topk, scores.shape[0])
-    scores, idx = scores.topk(topk, sorted=False)
+    if class_agnostic:
+        probs = F.softmax(cls_logits, dim=-1)
+        scores = 1.0 - probs[:, -1]  # 1 - P(no-object)
+        topk = min(topk, scores.shape[0])
+        scores, idx = scores.topk(topk, sorted=False)
+        m = mask_logits[idx]
+        labels = torch.zeros_like(scores, dtype=torch.long)
+    else:
+        # Per-(query, class) scores, excluding the trailing no-object channel.
+        n_classes = cls_logits.shape[1] - 1
+        scores = F.softmax(cls_logits, dim=-1)[:, :-1]
+        labels = (
+            torch.arange(n_classes, device=scores.device)
+            .unsqueeze(0)
+            .repeat(len(cls_logits), 1)
+            .flatten(0, 1)
+        )
+        scores, flat_idx = scores.flatten(0, 1).topk(min(topk, scores.numel()), sorted=False)
+        labels = labels[flat_idx]
+        idx = torch.div(flat_idx, n_classes, rounding_mode="floor")
+        m = mask_logits[idx]
 
-    m = mask_logits[idx]
     m_sig = m.sigmoid()
     mask_scores = (m_sig * (m > 0)).sum(1) / ((m > 0).sum(1) + 1e-6)
     scores = scores * mask_scores
 
     binary = m_sig > mask_thr
     keep = scores > score_thr
-    scores, binary = scores[keep], binary[keep]
+    scores, binary, labels = scores[keep], binary[keep], labels[keep]
     keep = binary.sum(1) > npoint_thr
-    scores, binary = scores[keep], binary[keep]
+    scores, binary, labels = scores[keep], binary[keep], labels[keep]
     order = scores.argsort(descending=True)
-    return binary[order], scores[order]
+    return binary[order], scores[order], labels[order]
 
 
 def _palette(n: int) -> np.ndarray:
@@ -110,10 +133,29 @@ def _palette(n: int) -> np.ndarray:
     return rng.integers(40, 230, size=(max(n, 1), 3), dtype=np.uint8)
 
 
-def visualize(images: torch.Tensor, binary: torch.Tensor, V: int, h: int, w: int,
-              out_dir: Path, alpha: float = 0.5):
+def visualize(
+    images: torch.Tensor,
+    binary: torch.Tensor,
+    V: int,
+    h: int,
+    w: int,
+    out_dir: Path,
+    alpha: float = 0.5,
+    max_instances: int = 50,
+):
     """Overlay per-view instance masks and write PNGs."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    if binary.numel() == 0:
+        logger.warning("no instances to visualize")
+        return
+    if binary.shape[0] > max_instances:
+        logger.info(
+            "visualizing top-%d / %d instances (raise --max_instances to show more)",
+            max_instances,
+            binary.shape[0],
+        )
+        binary = binary[:max_instances]
+
     imgs = (images[0].permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)  # [V,H,W,3]
     H, W = imgs.shape[1:3]
     colors = _palette(binary.shape[0])
@@ -129,8 +171,10 @@ def visualize(images: torch.Tensor, binary: torch.Tensor, V: int, h: int, w: int
             mk = cv2.resize(mk, (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
             overlay[mk] = colors[i]
         blended = cv2.addWeighted(overlay, alpha, base, 1 - alpha, 0)
-        cv2.imwrite(str(out_dir / f"view_{v:03d}_instances.png"),
-                    cv2.cvtColor(blended, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(
+            str(out_dir / f"view_{v:03d}_instances.png"),
+            cv2.cvtColor(blended, cv2.COLOR_RGB2BGR),
+        )
     logger.info("wrote %d view overlays -> %s", V, out_dir)
 
 
@@ -144,6 +188,21 @@ def main():
                     help="20 = ScanNetv2 ckpt, 200 = ScanNet200 ckpt")
     ap.add_argument("--max_views", type=int, default=8)
     ap.add_argument("--mask_thr", type=float, default=0.4)
+    ap.add_argument(
+        "--score_thr",
+        type=float,
+        default=0.25,
+        help="drop queries with score <= thr (0.0 keeps ~all and yields noisy overlays)",
+    )
+    ap.add_argument("--npoint_thr", type=int, default=200)
+    ap.add_argument("--topk", type=int, default=600)
+    ap.add_argument(
+        "--class_agnostic",
+        action="store_true",
+        help="score by 1-P(no-object); default is official class-aware top-k",
+    )
+    ap.add_argument("--max_instances", type=int, default=50,
+                    help="max instances to draw in the overlay")
     ap.add_argument("--out_dir", default="outputs/segvggt_demo")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -175,11 +234,31 @@ def main():
     Q, V, h, w = qm.shape
     logger.info("queries=%d views=%d mask=%dx%d classes=%d", Q, V, h, w, ql.shape[-1])
 
-    binary, scores = decode_instances(ql, qm.reshape(Q, -1), mask_thr=args.mask_thr)
-    logger.info("kept %d instances (scores %.3f..%.3f)", binary.shape[0],
-                float(scores.max()) if len(scores) else 0.0,
-                float(scores.min()) if len(scores) else 0.0)
-    visualize(images, binary, V, h, w, Path(args.out_dir))
+    binary, scores, labels = decode_instances(
+        ql,
+        qm.reshape(Q, -1),
+        mask_thr=args.mask_thr,
+        topk=args.topk,
+        npoint_thr=args.npoint_thr,
+        score_thr=args.score_thr,
+        class_agnostic=args.class_agnostic,
+    )
+    logger.info(
+        "kept %d instances (scores %.3f..%.3f, mode=%s)",
+        binary.shape[0],
+        float(scores.max()) if len(scores) else 0.0,
+        float(scores.min()) if len(scores) else 0.0,
+        "class_agnostic" if args.class_agnostic else "class_aware",
+    )
+    if len(labels):
+        uniq, cnt = labels.unique(return_counts=True)
+        logger.info(
+            "label hist: %s",
+            {int(u): int(c) for u, c in zip(uniq.tolist(), cnt.tolist())},
+        )
+    visualize(
+        images, binary, V, h, w, Path(args.out_dir), max_instances=args.max_instances
+    )
 
 
 if __name__ == "__main__":
