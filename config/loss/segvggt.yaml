@@ -11,5 +11,8 @@ segvggt:
   cost_js: 0.5         # set 0 to disable FADA cost term (Table 3 row 2)
   no_object_weight: 0.1
   ignore_id: 0
-  class_agnostic: true # true -> single foreground class (no semantic labels needed)
+  # true -> marginalise the classifier to objectness, P(object) = 1 - P(no-object);
+  # keeps the pretrained head intact. Needed because manifest datasets carry instance
+  # ids but no semantic labels. false -> class-aware (requires instance_semantic).
+  class_agnostic: true
   dice_eps: 1.0

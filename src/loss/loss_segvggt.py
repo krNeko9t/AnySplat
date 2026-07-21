@@ -17,9 +17,16 @@ GT construction (all derived from the multi-view ``instance_mask``, no extra par
     and flattened to the ``N*h*w`` sequence the paper treats as a point-cloud mask;
   * per-instance frame-visibility distribution ``p_k^gt`` (area-proportional over the
     N frames, unseen frames -> 0), used by the FADA JS term;
-  * per-instance class label.  Defaults to **class-agnostic** (every instance -> class
-    0, no-object = last logit).  If a per-pixel ``instance_semantic`` map is supplied
-    via ``depth_dict`` it is majority-voted per instance to give class-aware targets.
+  * per-instance class label.  Defaults to **class-agnostic**: this repo's manifest
+    datasets only carry multi-view-consistent instance ids, no semantic label.  In that
+    mode the classification collapses to *objectness* by marginalising the class
+    distribution, ``P(object) = sum_c P(c) = 1 - P(no-object)``, i.e. a 2-way CE over
+    ``[logsumexp(foreground logits), no-object logit]``.  This keeps the pretrained
+    classifier intact (no head surgery, no channel is arbitrarily repurposed), matches
+    the ``1 - P(no-object)`` criterion used at inference, and leaves the foreground
+    channels' semantic structure available for later per-query readouts.
+    If a per-pixel ``instance_semantic`` map is supplied via ``depth_dict`` *and*
+    ``class_agnostic=False``, it is majority-voted per instance for class-aware targets.
 
 Inputs (provided by :class:`SegVGGTWrapper` through ``depth_dict``):
   - depth_dict['segvggt_prediction']: :class:`SegVGGTPrediction`
@@ -27,7 +34,8 @@ Inputs (provided by :class:`SegVGGTWrapper` through ``depth_dict``):
       * query_class_logits [B, Q, C+1]      (last channel = no-object)
       * attn_frame_mean    [L, B, Q, S]     (per-frame attn mass; renormalised here)
   - depth_dict['instance_mask']:       Int64 [B, S, H, W]
-  - depth_dict['instance_valid_mask']: Bool  [B, S, H, W]  (optional)
+  - depth_dict['instance_valid_mask']: Bool  [B, S, H, W]  (optional).  Invalid pixels
+    are *ignored* by the mask loss, not turned into negatives -- see ``unlabeled_as_ignore``.
   - depth_dict['instance_semantic']:   Int64 [B, S, H, W]  (optional, class-aware)
 """
 from __future__ import annotations
@@ -65,8 +73,18 @@ class LossSegVGGTCfg:
     cost_js: float = 0.5
     # DETR down-weights the no-object class in the classification CE
     no_object_weight: float = 0.1
-    ignore_id: int = 0          # instance id treated as background / ignore
-    class_agnostic: bool = True  # every instance -> class 0 (no semantic labels needed)
+    ignore_id: int = 0          # instance id that does not define an instance
+    # What id == ignore_id means for the *mask* loss.  False (default): those pixels
+    # are known-empty and supervised as negatives -- correct when the dataset labels
+    # every object and id 0 really is background.  True: they are unknown and dropped
+    # from BCE/Dice entirely -- use when id 0 only means "non-foreground" and may hide
+    # unannotated objects, otherwise training actively teaches those away.
+    # WARNING: with True, negatives come only from *other* instances, so if id 0
+    # dominates the frame the masks lose their pressure to stay tight and will grow.
+    unlabeled_as_ignore: bool = False
+    # Collapse classification to objectness (see module docstring).  True for this
+    # repo's manifest datasets, which carry instance ids but no semantic labels.
+    class_agnostic: bool = True
     dice_eps: float = 1.0        # Laplace smoothing for Dice
 
 
@@ -129,6 +147,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         gt_masks = self._downsample_masks(masks_full, hw)        # [K, S, h, w]
 
         if self.cfg.class_agnostic or semantic_b is None:
+            # class 0 = the "object" column of the marginalised objectness distribution
             gt_classes = torch.zeros(ids.numel(), dtype=torch.long, device=device)
         else:
             gt_classes = torch.empty(ids.numel(), dtype=torch.long, device=device)
@@ -173,14 +192,34 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         device = query_masks.device
 
         B, Q, S, h, w = query_masks.shape
+
+        # Class-agnostic: marginalise the class distribution into a binary objectness
+        # one, [logsumexp(foreground), no-object].  Mathematically P(object) = 1 -
+        # P(no-object), so the pretrained classifier keeps its meaning as-is instead of
+        # having channel 0 repurposed from a semantic class into "any object".
+        if self.cfg.class_agnostic:
+            query_cls = torch.stack(
+                [query_cls[..., :-1].logsumexp(dim=-1), query_cls[..., -1]], dim=-1
+            )                                              # [B, Q, 2]
         n_cls = query_cls.shape[-1]
         no_obj = n_cls - 1
 
+        # Invalid pixels carry an untrustworthy id: they must not define instances,
+        # and they must not be supervised either way.  Zeroing them into the mask (as
+        # the contrastive IGGT losses do) is harmless for a pull/push objective but
+        # wrong for set prediction -- it would assert "no object here".  So zero them
+        # for target *construction* and drop them from the mask loss via `keep`.
         valid_mask = depth_dict.get("instance_valid_mask")
+        keep_full = None  # [S, H, W] float, 1 = supervised pixel
         if valid_mask is not None:
             if valid_mask.shape[-1] == 1:
                 valid_mask = valid_mask.squeeze(-1)
+            valid_mask = valid_mask.to(torch.bool)
             inst_mask = inst_mask * valid_mask.to(inst_mask.dtype)
+            keep_full = valid_mask.float()
+        if self.cfg.unlabeled_as_ignore:
+            unlabeled = (inst_mask == self.cfg.ignore_id).float()
+            keep_full = (1.0 - unlabeled) if keep_full is None else keep_full * (1.0 - unlabeled)
         semantic = depth_dict.get("instance_semantic")
 
         # class-weight vector: down-weight no-object (DETR convention)
@@ -203,6 +242,11 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
             cls_prob_b = cls_logits_b.softmax(-1)
             mask_logits_b = query_masks[b].reshape(Q, S * h * w).float()  # [Q, N]
 
+            # per-pixel supervision mask, same resolution/flattening as the masks
+            keep_b = None
+            if keep_full is not None:
+                keep_b = self._downsample_masks(keep_full[b][None], (h, w)).reshape(-1)
+
             pred_attn_b = None
             if attn is not None:
                 a = attn[:, b].float()                              # [L, Q, S]
@@ -215,18 +259,27 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
                 gt_masks_flat = gt_masks.reshape(k, S * h * w)     # [K, N]
                 q_idx, g_idx = self.matcher.match_one(
                     cls_prob_b, mask_logits_b, gt_classes, gt_masks_flat,
-                    pred_attn_b, visibility,
+                    pred_attn_b, visibility, keep_b,
                 )
                 tgt_classes[q_idx] = gt_classes[g_idx]
 
-                # ----- mask losses on matched pairs -----
+                # ----- mask losses on matched pairs (ignored pixels excluded) -----
                 m_logits = mask_logits_b[q_idx]                    # [M, N]
                 m_gt = gt_masks_flat[g_idx]                        # [M, N]
-                total_bce = total_bce + F.binary_cross_entropy_with_logits(
-                    m_logits, m_gt, reduction="mean"
-                ) * q_idx.numel()
+                bce_el = F.binary_cross_entropy_with_logits(
+                    m_logits, m_gt, reduction="none"
+                )
+                if keep_b is None:
+                    bce_mean = bce_el.mean()
+                else:
+                    bce_mean = (bce_el * keep_b).sum() / (
+                        keep_b.sum().clamp_min(1.0) * max(q_idx.numel(), 1)
+                    )
+                total_bce = total_bce + bce_mean * q_idx.numel()
                 # Dice loss (1 - dice) on the matched diagonal
-                dice_pairs = batch_dice_cost(m_logits, m_gt, self.cfg.dice_eps).diagonal()
+                dice_pairs = batch_dice_cost(
+                    m_logits, m_gt, self.cfg.dice_eps, keep=keep_b
+                ).diagonal()
                 total_dice = total_dice + dice_pairs.sum()
 
                 # ----- FADA JS regularisation on matched pairs -----

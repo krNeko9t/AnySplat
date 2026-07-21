@@ -1,0 +1,80 @@
+# @package _global_
+# Stage 1: adapt the official SegVGGT checkpoint to CLASS-AGNOSTIC instance
+# segmentation on this repo's manifest datasets (multi-view-consistent instance
+# ids, no semantic labels).  "IGGT end-to-end, minus the background."
+# Usage: python src/main.py experiment=segvggt_finetune_agnostic
+#
+# Why this is cheap: the loss marginalises the pretrained classifier into
+# objectness, P(object) = 1 - P(no-object), so the checkpoint is *already*
+# class-agnostic-correct at init -- no head surgery, no channel repurposed.
+# Only the instance branch has to adapt, so the whole aggregator (DINO, frame /
+# global blocks incl. their pretrained LoRA) and the geometry heads stay frozen.
+# Geometry therefore cannot drift and `segvggt_geo` is switched off.
+#
+# For the full paper recipe (LoRA + geometry co-training) use
+# experiment=segvggt_scannet instead.
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: segvggt
+  - override /loss: [segvggt, segvggt_geo]
+
+wandb:
+  name: segvggt_finetune_agnostic
+  tags: [instseg, segvggt, class_agnostic, finetune]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    # REQUIRED: local path to the official checkpoint (segvggt_scannetv2.pt).
+    # use_lora must stay true -- the checkpoint carries trained LoRA weights.
+    pretrained_weights: ???
+    enable_semantic: 20
+    instance_query_num: 400
+  decoder: null
+
+optimizer:
+  # Nothing is randomly initialised here (we are adapting, not training from
+  # scratch), so the paper's 2e-4 group would be far too hot -- single LR.
+  lr: 2.0e-5
+  warm_up_steps: 200
+  backbone_lr_multiplier: 1.0
+  # Freeze every pre-existing module: DINO, the frame/global blocks (and the
+  # pretrained LoRA adapters inside them), and the geometry heads.
+  # -> 487M trainable, all in the instance branch + instance classifier.
+  freeze_keywords: [patch_embed, frame_blocks, global_blocks, camera_head, depth_head]
+
+train:
+  segvggt_geo_supervision: gt
+
+trainer:
+  max_steps: 20000
+  val_check_interval: 250
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  limit_val_batches: 4
+
+checkpointing:
+  load: null
+  every_n_train_steps: 1000
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  segvggt:
+    weight: 1.0
+    class_agnostic: true
+  segvggt_geo:
+    weight: 0.0   # geometry is frozen in this stage; flip on only if unfreezing
+
+dataset:
+  manifest: {}

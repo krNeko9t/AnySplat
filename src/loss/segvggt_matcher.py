@@ -42,36 +42,54 @@ except Exception:  # pragma: no cover - fallback keeps the matcher importable
 # --------------------------------------------------------------------------- #
 # Pairwise cost primitives (all return a [Q, K] cost matrix)
 # --------------------------------------------------------------------------- #
-def batch_sigmoid_ce_cost(mask_logits: Tensor, gt_masks: Tensor) -> Tensor:
+def batch_sigmoid_ce_cost(
+    mask_logits: Tensor, gt_masks: Tensor, keep: Tensor | None = None
+) -> Tensor:
     """Binary-cross-entropy matching cost between every prediction and GT.
 
     Parameters
     ----------
     mask_logits : Tensor [Q, N]   raw (pre-sigmoid) query .dot. feature scores
     gt_masks    : Tensor [K, N]   binary {0,1} flattened multi-view GT masks
+    keep        : Tensor [N] or None   1 = supervised pixel, 0 = ignored.  An ignored
+        pixel counts as neither positive nor negative.  Needed wherever the label is
+        *unknown* rather than known-empty: folding those into the negatives would
+        actively teach the model "there is no object here".
 
     Returns
     -------
-    Tensor [Q, K]  mean-per-element BCE cost.
+    Tensor [Q, K]  mean-per-element BCE cost over the kept pixels.
     """
-    n = mask_logits.shape[1]
+    n = mask_logits.shape[1] if keep is None else keep.sum().clamp_min(1.0)
     pos = F.binary_cross_entropy_with_logits(
         mask_logits, torch.ones_like(mask_logits), reduction="none"
     )
     neg = F.binary_cross_entropy_with_logits(
         mask_logits, torch.zeros_like(mask_logits), reduction="none"
     )
+    if keep is not None:
+        pos = pos * keep
+        neg = neg * keep
     # cost[q, k] = mean_n( pos[q,n] * gt[k,n] + neg[q,n] * (1 - gt[k,n]) )
     cost = pos @ gt_masks.transpose(0, 1) + neg @ (1.0 - gt_masks).transpose(0, 1)
     return cost / n
 
 
-def batch_dice_cost(mask_logits: Tensor, gt_masks: Tensor, eps: float = 1.0) -> Tensor:
+def batch_dice_cost(
+    mask_logits: Tensor,
+    gt_masks: Tensor,
+    eps: float = 1.0,
+    keep: Tensor | None = None,
+) -> Tensor:
     """Dice matching cost with Laplace smoothing (V-Net style, eps=1).
 
     mask_logits : [Q, N] logits ; gt_masks : [K, N] binary.  Returns [Q, K].
+    ``keep`` [N] drops ignored pixels from both numerator and denominator.
     """
     probs = mask_logits.sigmoid()
+    if keep is not None:
+        probs = probs * keep
+        gt_masks = gt_masks * keep
     numerator = 2.0 * (probs @ gt_masks.transpose(0, 1))          # [Q, K]
     denominator = probs.sum(-1)[:, None] + gt_masks.sum(-1)[None, :]  # [Q, K]
     return 1.0 - (numerator + eps) / (denominator + eps)
@@ -134,8 +152,13 @@ class HungarianMatcher:
         gt_masks: Tensor,           # [K, N]   binary flattened multi-view GT masks
         pred_frame_attn: Tensor | None = None,  # [L, Q, S]
         gt_visibility: Tensor | None = None,    # [K, S]
+        keep: Tensor | None = None,             # [N] 1 = supervised, 0 = ignored
     ) -> tuple[Tensor, Tensor]:
-        """Return ``(query_idx, gt_idx)`` LongTensors of the matched pairs."""
+        """Return ``(query_idx, gt_idx)`` LongTensors of the matched pairs.
+
+        ``keep`` must be the same pixel mask the loss uses, otherwise matching and
+        supervision disagree about which pixels count.
+        """
         device = mask_logits.device
         k = gt_classes.shape[0]
         if k == 0:
@@ -146,9 +169,9 @@ class HungarianMatcher:
         cost_cls = -cls_prob[:, gt_classes]                       # [Q, K]
 
         # -- mask cost: BCE + Dice over flattened NHW --------------------------
-        cost_mask = batch_sigmoid_ce_cost(mask_logits, gt_masks) + batch_dice_cost(
-            mask_logits, gt_masks
-        )
+        cost_mask = batch_sigmoid_ce_cost(
+            mask_logits, gt_masks, keep
+        ) + batch_dice_cost(mask_logits, gt_masks, keep=keep)
 
         cost = self.w.cost_cls * cost_cls + self.w.cost_mask * cost_mask
 
