@@ -24,20 +24,81 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from src.dataset.types import BatchedExample
+from src.evaluation.instance_metrics import compute_instance_metrics_batch
 from src.loss import Loss
 from src.loss.loss_huber import extri_intri_to_pose_encoding
 from src.misc.step_tracker import StepTracker
 from src.misc.utils import inverse_normalize, vis_depth_map
 from src.visualization.annotation import add_label
+from src.visualization.instance_viz import colorize_labels, make_color_lut
 from src.visualization.layout import add_border, hcat, vcat
 from src.misc.image_io import prep_image
 from .base_wrapper import BaseModelWrapper, OptimizerCfg, TestCfg, TrainCfg
 
 logger = logging.getLogger(__name__)
+
+# Objectness cut-off shared by val metrics, the "queries fired" counter and the
+# visualisation, so all three tell the same story. Matches the inference decoder's
+# `1 - P(no-object)` criterion (scripts/segvggt_infer.py).
+VAL_SCORE_THRESHOLD = 0.5
+
+
+def _labels_to_rgb(labels_hw: np.ndarray, lut: np.ndarray, device) -> torch.Tensor:
+    """[H, W] int labels -> [3, H, W] float tensor in [0, 1] (id 0 stays black)."""
+    rgb = colorize_labels(labels_hw, lut, ignore_label=0)
+    return torch.from_numpy(rgb).permute(2, 0, 1).float().to(device) / 255.0
+
+
+def _colorize_gt_instances(inst_mask: torch.Tensor, device) -> list[torch.Tensor]:
+    """[V, H, W] instance ids -> per-view [3, H, W] colour images (id 0 = black)."""
+    gt = inst_mask.detach().cpu().numpy().astype(np.int32)
+    ids = np.unique(gt)
+    ids = ids[ids != 0]
+    lut = make_color_lut(max(1, len(ids) + 1), seed=1)
+    contiguous = np.zeros_like(gt, dtype=np.int32)
+    for j, uid in enumerate(ids.tolist()):
+        contiguous[gt == uid] = j + 1
+    return [_labels_to_rgb(contiguous[v], lut, device) for v in range(gt.shape[0])]
+
+
+@torch.no_grad()
+def _colorize_pred_instances(
+    query_masks: torch.Tensor,
+    query_class_logits: torch.Tensor,
+    hw: tuple[int, int],
+    device,
+) -> list[torch.Tensor] | None:
+    """Per-view predicted instance map from the object queries.
+
+    ``query_masks`` [Q, V, h, w] logits, ``query_class_logits`` [Q, C+1].  Queries
+    whose objectness clears the threshold are upsampled to ``hw`` and each pixel takes
+    the argmax query, provided that query's own mask probability also clears 0.5
+    (otherwise the pixel is background).  Returns None when nothing fired.
+
+    NOTE: the palette is independent of the GT one -- query index k has no reason to
+    equal instance id k -- so compare *shapes*, not colours.
+    """
+    scores = 1.0 - query_class_logits.float().softmax(-1)[:, -1]
+    fired = scores > VAL_SCORE_THRESHOLD
+    if not bool(fired.any()):
+        return None
+
+    logits = query_masks[fired].float()                       # [F, V, h, w]
+    logits = F.interpolate(logits, size=hw, mode="bilinear", align_corners=False)
+    probs = logits.sigmoid()                                  # [F, V, H, W]
+    best = probs.argmax(dim=0)                                # [V, H, W]
+    conf = probs.max(dim=0).values
+    labels = torch.where(conf > 0.5, best + 1, torch.zeros_like(best))
+    labels_np = labels.cpu().numpy().astype(np.int32)
+
+    lut = make_color_lut(int(fired.sum()) + 1, seed=7)
+    return [_labels_to_rgb(labels_np[v], lut, device) for v in range(labels_np.shape[0])]
 
 
 def _cat_ctx_tgt(batch: BatchedExample, key: str):
@@ -184,10 +245,39 @@ class SegVGGTWrapper(BaseModelWrapper):
         # log a coarse "how many queries fired" signal (1 - P(no-object) > 0.5)
         if pred is not None and pred.query_class_logits is not None:
             probs = pred.query_class_logits[0].float().softmax(-1)
-            fired = int((1.0 - probs[:, -1] > 0.5).sum().item())
+            fired = int((1.0 - probs[:, -1] > VAL_SCORE_THRESHOLD).sum().item())
             self.log("val/queries_fired", float(fired))
         if "depth" in depth_dict and depth_dict["depth"] is not None:
             self.log("val/depth_mean", depth_dict["depth"].float().mean())
+
+        # ---- instance-segmentation metrics --------------------------------
+        # The only in-flight signal that distinguishes "not converged yet" from
+        # "the training objective is not being optimised at all": val/matched_iou_mean
+        # is exactly what the mask loss maximises and should climb towards >0.5.
+        # See src/evaluation/instance_metrics.py for what each number means.
+        if (
+            pred is not None
+            and pred.query_masks is not None
+            and pred.query_class_logits is not None
+            and inst_mask is not None
+        ):
+            metrics = compute_instance_metrics_batch(
+                pred.query_masks,
+                pred.query_class_logits,
+                inst_mask,
+                valid_mask,
+                score_threshold=VAL_SCORE_THRESHOLD,
+            )
+            for key, value in metrics.items():
+                self.log(f"val/{key}", float(value))
+            if self.trainer.global_rank == 0 and batch_idx % 100 == 0:
+                logger.info(
+                    "[val step=%d] matched_iou=%.4f best_iou_per_gt=%.4f "
+                    "ap50=%.4f ap25=%.4f n_gt=%.1f n_fired=%.1f area=%.4f",
+                    self.global_step, metrics["matched_iou_mean"],
+                    metrics["best_iou_per_gt_mean"], metrics["ap50"], metrics["ap25"],
+                    metrics["n_gt"], metrics["n_fired"], metrics["mask_area_mean"],
+                )
 
         if self.trainer.global_rank == 0 and batch_idx % 100 == 0:
             logger.info(
@@ -196,6 +286,23 @@ class SegVGGTWrapper(BaseModelWrapper):
             )
             context_img = inverse_normalize(batch["context"]["image"][0])
             cols = [add_label(vcat(*context_img), "Context")]
+            if inst_mask is not None:
+                gt_cols = _colorize_gt_instances(inst_mask[0], context_img.device)
+                cols.append(add_label(vcat(*gt_cols), "GT inst"))
+            if (
+                pred is not None
+                and pred.query_masks is not None
+                and pred.query_class_logits is not None
+            ):
+                pred_cols = _colorize_pred_instances(
+                    pred.query_masks[0],
+                    pred.query_class_logits[0],
+                    context_img.shape[-2:],
+                    context_img.device,
+                )
+                # palettes are independent of the GT one -- compare shapes, not colours
+                if pred_cols is not None:
+                    cols.append(add_label(vcat(*pred_cols), "Pred inst"))
             if "depth" in depth_dict and depth_dict["depth"] is not None:
                 d = depth_dict["depth"].squeeze(-1)[0]
                 cols.append(add_label(vcat(*vis_depth_map(d)), "Depth"))

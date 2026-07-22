@@ -177,6 +177,32 @@ class EncoderSegVGGT(Encoder["EncoderSegVGGTCfg"]):
         return data_shim
 
 
+def _strip_lightning_prefix(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Drop the ``model.`` prefix a Lightning checkpoint adds, if present.
+
+    ``SegVGGTWrapper`` holds this model as its ``model`` attribute, so a fine-tuned
+    checkpoint keys everything as ``model.encoder.model.aggregator...`` while the
+    official ``.pt`` uses bare ``aggregator...``.  Stripping the prefix lets both load
+    through the same path.
+
+    The ``model.encoder.`` guard is what makes this safe: official checkpoints have no
+    such key, so they are returned untouched.
+    """
+    if not any(k.startswith("model.encoder.") for k in state_dict):
+        return state_dict
+    stripped = {
+        (k[len("model."):] if k.startswith("model.") else k): v
+        for k, v in state_dict.items()
+    }
+    logger.info(
+        "Detected a Lightning checkpoint; stripped the 'model.' prefix from %d keys",
+        sum(1 for k in state_dict if k.startswith("model.")),
+    )
+    return stripped
+
+
 def _remap_segvggt_checkpoint_keys(
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
@@ -270,6 +296,7 @@ class SegVGGTModel(nn.Module):
         elif isinstance(raw_sd, dict) and "state_dict" in raw_sd:
             raw_sd = raw_sd["state_dict"]
         raw_sd = {k.replace("module.", "", 1): v for k, v in raw_sd.items()}
+        raw_sd = _strip_lightning_prefix(raw_sd)
 
         remapped = _remap_segvggt_checkpoint_keys(raw_sd)
         aligned = _align_state_dicts(model.state_dict(), remapped)

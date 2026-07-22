@@ -181,7 +181,13 @@ def visualize(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image_dir", required=True, help="folder of multi-view images")
-    ap.add_argument("--ckpt", default="", help="local official SegVGGT .pt")
+    ap.add_argument(
+        "--ckpt",
+        default="",
+        help="local checkpoint -- either an official SegVGGT .pt, or a fine-tuned "
+             "Lightning .ckpt from SegVGGTWrapper (its 'model.' key prefix is "
+             "stripped automatically)",
+    )
     ap.add_argument("--hf", action="store_true",
                     help="download the checkpoint from JinyuanQu/SegVGGT")
     ap.add_argument("--semantic", type=int, default=20, choices=[20, 200],
