@@ -31,6 +31,8 @@ lora_target_frame_blocks: true
 lora_target_global_blocks: true
 lora_verbose: false
 
-# data shim (dataset [-1,1] -> wrapper (x+1)/2 -> [0,1] model input)
-input_mean: [0.5, 0.5, 0.5]
-input_std: [0.5, 0.5, 0.5]
+# data shim (dataset [-1,1] -> wrapper (x+1)/2 -> [0,1] model input): input_mean /
+# input_std default to (0.5, 0.5, 0.5) in EncoderSegVGGTCfg and are intentionally NOT
+# listed here. They are tuple[float,...] fields, and dacite (config.py's Config has no
+# cast=[tuple]) refuses to coerce a YAML list into a tuple -- writing them out would
+# fail the encoder union match. iggt/anysplat omit them for the same reason.

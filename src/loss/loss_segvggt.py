@@ -74,13 +74,14 @@ class LossSegVGGTCfg:
     # DETR down-weights the no-object class in the classification CE
     no_object_weight: float = 0.1
     ignore_id: int = 0          # instance id that does not define an instance
-    # What id == ignore_id means for the *mask* loss.  False (default): those pixels
-    # are known-empty and supervised as negatives -- correct when the dataset labels
-    # every object and id 0 really is background.  True: they are unknown and dropped
-    # from BCE/Dice entirely -- use when id 0 only means "non-foreground" and may hide
-    # unannotated objects, otherwise training actively teaches those away.
-    # WARNING: with True, negatives come only from *other* instances, so if id 0
-    # dominates the frame the masks lose their pressure to stay tight and will grow.
+    # Drop id == ignore_id pixels from the *mask* BCE/Dice entirely (False = keep them).
+    # NOTE: this switch aims at the wrong place and defaults off.  A matched query's mask
+    # target is (inst_mask == id_k): every id-0 pixel is a truthful negative ("not part
+    # of instance k"), so the mask loss never lies even when id 0 hides an unannotated
+    # object.  The harm from under-labelling is on the *classification* side instead -- a
+    # query that latched onto that object goes unmatched and is supervised as no-object.
+    # Turning this on therefore deletes real negative signal (masks lose the pressure to
+    # stay tight and grow), without addressing the actual issue.  No known case needs it.
     unlabeled_as_ignore: bool = False
     # Collapse classification to objectness (see module docstring).  True for this
     # repo's manifest datasets, which carry instance ids but no semantic labels.
