@@ -143,6 +143,14 @@ class SegVGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["instance_labels"] = self.semantic_head.scratch.output_instance(
                     instance_queries_for_mask
                 )  # (B, instance_query_num, num_instance_classes + 1)
+                # Repo-local, purely additive: expose the object queries themselves so
+                # downstream per-object readouts (physics) can hang off them. The
+                # official forward drops them here. Nothing existing is altered -- this
+                # only adds a dict key. We publish the *pre-projection* 1024-d vectors,
+                # not instance_queries_for_mask: the 128-d projection is a bottleneck
+                # trained for the mask dot-product, while a readout head does its own
+                # projection and benefits from the full vector.
+                predictions["instance_queries"] = instance_queries.float()  # (B, Q, C)
 
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(

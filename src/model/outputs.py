@@ -77,21 +77,29 @@ class SegVGGTPrediction:
     and a class distribution whose last channel is the *no-object* logit, so
     background / empty queries are dropped by argmax rather than a heuristic.
 
-    ``query_embed`` (the projected object-query vectors) is the natural per-object
-    instance embedding to hang downstream per-object physics readouts on; it is
-    left ``None`` in the inference-only path and populated once needed.
+    ``query_embed`` (the object-query vectors) is the natural per-object instance
+    embedding to hang downstream per-object physics readouts on -- and because the
+    query exists without any ground truth, those readouts also work at inference.
+    ``query_phys_*`` hold such a readout's output when the encoder runs one.
     """
 
     # Per-query per-view mask logits (pre-sigmoid): [B, Q, V, h, w]
     query_masks: Float[Tensor, "batch query view h w"] | None = None
     # Per-query class logits incl. trailing no-object channel: [B, Q, C_plus_1]
     query_class_logits: Float[Tensor, "batch query classes"] | None = None
-    # Projected object-query embeddings (mask / physics space): [B, Q, D]
+    # Object-query embeddings, *pre*-projection (the aggregator's 1024-d vectors,
+    # not the 128-d mask-space projection): [B, Q, D]
     query_embed: Float[Tensor, "batch query dim"] | None = None
     # Dense instance feature maps (mask source): [B, V, h, w, D]
     feature_map: Float[Tensor, "batch view h w dim"] | None = None
     # FADA frame-level cross-attention weights (training only): [L, B, Q, V]
     attn_frame_mean: Float[Tensor, "layers batch query view"] | None = None
+    # Per-query physics property means, normalized model space: [B, Q, P]
+    query_phys_mu: Float[Tensor, "batch query n_prop"] | None = None
+    # Per-query learned predictive variances (softplus, > 0): [B, Q, P]
+    query_phys_var: Float[Tensor, "batch query n_prop"] | None = None
+    # Property names matching the P axis (0-indexed columns)
+    property_names: tuple[str, ...] | None = None
 
 
 @dataclass

@@ -5,8 +5,14 @@
 # Usage: python src/main.py experiment=segvggt_finetune_agnostic
 #
 # Why this is cheap: the loss marginalises the pretrained classifier into
-# objectness, P(object) = 1 - P(no-object), so the checkpoint is *already*
-# class-agnostic-correct at init -- no head surgery, no channel repurposed.
+# objectness, P(object) = 1 - P(no-object) -- no head surgery, no channel is
+# repurposed, the checkpoint's weights are used as they are.
+# This is NOT the same as the checkpoint already being class-agnostic at init:
+# ScanNet trained unannotated objects *as background*, so at init
+# `1 - P(no-object)` means "is this one of the 18 ScanNet instance classes", not
+# "is this any object at all". Marginalising only gives fine-tuning a sane
+# starting point; teaching "any object" is exactly what this stage has to do, and
+# the initial loss is not expected to be low. Do not use it as an acceptance test.
 # Only the instance branch has to adapt, so the whole aggregator (DINO, frame /
 # global blocks incl. their pretrained LoRA) and the geometry heads stay frozen.
 # Geometry therefore cannot drift and `segvggt_geo` is switched off.

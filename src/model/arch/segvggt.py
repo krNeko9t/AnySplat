@@ -14,11 +14,15 @@ The whole modified transformer + heads live in the vendored box ``src/model/segv
     (``segvggt_prediction`` slot + geometry slots), and
   - loads the official ``.pt`` checkpoint (key remap, shape-aligned, strict=False).
 
-Iteration 1 scope: load official weights + inference. Training (Hungarian matching,
-BCE/Dice, FADA JS loss, teacher distillation) is a later iteration; the official repo
-ships no training code. ``query_embed`` (per-object embedding for downstream physics
-readouts) is not exposed yet -- the vendored forward discards it after the mask
-dot-product; wire it in when the physics-on-queries iteration needs it.
+Training (Hungarian matching, BCE/Dice, FADA JS loss) lives in the loss layer --
+``src/loss/loss_segvggt{,_geo}.py`` -- since the official repo ships no training code.
+
+``query_embed`` (the pre-projection object-query vectors) is now exposed: the vendored
+forward publishes it under ``instance_queries`` and it is carried through to
+``SegVGGTPrediction``. With ``phys_scheme="query_physgm"`` this encoder additionally
+runs :class:`QueryPhysGMReadout` on those queries, yielding a per-object (mu, var) for
+each physics property. Unlike the IGGT physics path this needs no instance mask, so it
+also works at inference on an unseen scene.
 """
 
 from __future__ import annotations
@@ -30,8 +34,10 @@ from typing import Literal, Optional
 import torch
 from torch import nn
 
+from src.dataset.physics.types import PROPERTY_NAMES
 from src.dataset.shims.normalize_shim import apply_normalize_shim
 from src.dataset.types import BatchedExample, DataShim
+from src.model.heads.physics.query_physgm_readout import QueryPhysGMReadout
 from src.model.outputs import EncoderOutput, SegVGGTPrediction
 from src.model.segvggt.models.segvggt import SegVGGT
 from src.model.segvggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -68,6 +74,11 @@ class EncoderSegVGGTCfg:
     lora_target_frame_blocks: bool = True
     lora_target_global_blocks: bool = True
     lora_verbose: bool = False
+    # --- physics on queries (None = branch absent, weights unchanged) ---
+    # Only one scheme exists here, so there is no build_physics_scheme-style factory:
+    # "query_physgm" attaches QueryPhysGMReadout to the object queries.
+    phys_scheme: Optional[Literal["query_physgm"]] = None
+    physgm_hidden: int = 64
     # --- data shim (dataset [-1,1] -> wrapper (x+1)/2 -> [0,1] model input) ---
     input_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
     input_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
@@ -108,6 +119,13 @@ class EncoderSegVGGT(Encoder["EncoderSegVGGTCfg"]):
     def __init__(self, cfg: EncoderSegVGGTCfg) -> None:
         super().__init__(cfg)
         self.model = _build_segvggt(cfg)
+        self.query_physgm = None
+        if cfg.phys_scheme == "query_physgm":
+            self.query_physgm = QueryPhysGMReadout(
+                token_dim=cfg.embed_dim,
+                hidden=cfg.physgm_hidden,
+                property_names=PROPERTY_NAMES,
+            )
 
     def forward(
         self,
@@ -153,11 +171,20 @@ class EncoderSegVGGT(Encoder["EncoderSegVGGTCfg"]):
         if "depth" in preds:
             depth_dict = dict(depth=preds["depth"], depth_conf=preds.get("depth_conf"))
 
+        query_embed = preds.get("instance_queries")          # [B, Q, embed_dim]
+        query_phys_mu = query_phys_var = None
+        if self.query_physgm is not None and query_embed is not None:
+            query_phys_mu, query_phys_var = self.query_physgm(query_embed)
+
         segvggt_prediction = SegVGGTPrediction(
             query_masks=preds.get("instance_maps"),
             query_class_logits=preds.get("instance_labels"),
+            query_embed=query_embed,
             feature_map=preds.get("semantic_feature_maps"),
             attn_frame_mean=preds.get("attn_frame_mean"),
+            query_phys_mu=query_phys_mu,
+            query_phys_var=query_phys_var,
+            property_names=None if self.query_physgm is None else PROPERTY_NAMES,
         )
 
         return EncoderOutput(

@@ -82,7 +82,7 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 | 3   | 实例（IGGT 路线）             | `instseg_iggt.yaml`（变体：`instseg_iggt_infinigen_mv`）                                                | iggt（encoder-only）；SamProjector + PartHead                                                                      | manifest                 | —                            | disc                     |
 | 4   | 实例 + 物理分类               | `phys_iggt.yaml`                                                                                   | iggt（`phys_scheme: class`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsClassifier | manifest                 | `physics_parser: 3dovs_json` | phys                     |
 | 5   | 实例 + 物理量回归             | `phys_prop_iggt.yaml`                                                                              | iggt（`phys_scheme: property`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsPropertyReadout | manifest                 | `physics_parser: instascene_vlm` | phys_prop                |
-| 6   | SegVGGT 端到端实例（iter 1 推理 + iter 2 训练） | `segvggt_finetune_agnostic.yaml`（stage-1 class-agnostic 微调）；`segvggt_scannet.yaml`（论文全量训练）；`scripts/segvggt_infer.py`（推理）                                             | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead                          | manifest（instance_mask+相机+深度）  | —（class-agnostic 默认，可选 semantic） | segvggt（cls+BCE+Dice+FADA）, segvggt_geo（camera+depth） |
+| 6   | SegVGGT 端到端实例（iter 1 推理 / iter 2 训练 / iter 3 物理挂 query） | `segvggt_finetune_agnostic.yaml`（stage-1 class-agnostic 微调）；`segvggt_scannet.yaml`（论文全量训练）；`segvggt_physgm.yaml`（stage-2 per-query 物理）；`scripts/segvggt_infer.py`（推理，含物理导出）                                             | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead（+ 可选 `QueryPhysGMReadout`）                          | manifest（instance_mask+相机+深度；物理时 `physics_parser: instascene_vlm_physgm`）  | —（class-agnostic 默认，可选 semantic）；物理 = `PhysGMTarget` | segvggt（cls+BCE+Dice+FADA+物理）, segvggt_geo（camera+depth） |
 
 
 新增第 5 套算法时：新建 experiment yaml 组合三元组，并在本表加一行。
@@ -93,7 +93,7 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 
 - **vendored box**：`src/model/segvggt/`（改版 aggregator + CrossBlock/CrossAttention + SemanticHead + LoRA，忠实照搬官方，import 重写为 `src.model.segvggt.*`）。与现有 `src/model/vggt/` box 隔离，互不牵动。不搬 `dependency/`（VGGSfM tracker）与 `utils/geometry`。
 - **arch**：`src/model/arch/segvggt.py`（`EncoderSegVGGTCfg` / `EncoderSegVGGT` 持有 vendored `SegVGGT` 为 `self.model`，forward 重打包成 `EncoderOutput`；`SegVGGTModel.from_checkpoint` 给官方 `.pt` 键加 `encoder.model.` 前缀后 shape 对齐 strict=False）。已注册进 `MODELS` / `EncoderCfg` union / `get_model`。
-- **契约槽**：`EncoderOutput.segvggt_prediction`（`SegVGGTPrediction`：query_masks / query_class_logits / query_embed / feature_map / attn_frame_mean）。`query_embed`（per-object 嵌入）iter 1 暂不暴露（vendored forward 用完即弃），iter 3 需要时再接。
+- **契约槽**：`EncoderOutput.segvggt_prediction`（`SegVGGTPrediction`：query_masks / query_class_logits / query_embed / feature_map / attn_frame_mean / query_phys_mu / query_phys_var / property_names）。`query_embed` 已在 iter 3 接出（见下）。
 - **config**：`config/model/encoder/segvggt.yaml`（`enable_semantic: 20|200` 对应官方两套 ckpt；LoRA rank 32 必须与训练一致）。
 - **权重**：官方 HuggingFace `JinyuanQu/SegVGGT`（`checkpoint/segvggt_scannet{v2,200}.pt`，各约 6.6GB，含 DINO backbone，非 `hf:` 前缀走 from_checkpoint）。**官方无训练代码**，loss（Hungarian + BCE/Dice + FADA JS + teacher 蒸馏）需 iter 2 民间复现。
 - **验证到位（iter 1）**：本仓库构建的 state_dict 键集与官方 `SegVGGT`（同 eval 配置）**逐键一致（2606=2606，零差异）**→ 官方 ckpt 加载零 bad-missing/unexpected；随机权重 CPU 端到端小前向 shape 全部打通。真权重前向/掩码质量待集群跑（本机无 GPU、缺 gsplat/hydra，仅开发机）。
@@ -118,6 +118,28 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 - 因为没有任何随机初始化的新参数（是适配不是从头训），论文的 `2e-4` 太烫，改单一 `lr: 2e-5`。
 - 对照：论文全量配方 `segvggt_scannet.yaml` 冻结集只有 `[patch_embed]`，可训 **1148M**（AdamW ~9.2GB）。注意 LoRA 只冻住被包裹的 attention 基座（202M），frame/global block 的 MLP/norm（403M）仍全量可训——这是 vendored 官方代码的行为，不是我们加的。
 - 实测参数量核对（`paper_repo` env CPU 建模）：`patch_embed`→344 个/304M（DINO）、`instance_`→1011 个/454M、`semantic_head`→62 个/32.6M、`lora_`→192 个/9.44M（96 层 × qkv+proj）。yaml 里的 keyword 全部命中，无空组。
+
+#### 训练期可观测性（分割）
+
+训练只有 loss 曲线时，"loss 在 0.6 震荡"无法区分**还没收敛**和**目标压根没在被优化**。`src/evaluation/instance_metrics.py` 补上实例指标（`src/evaluation/metrics.py` 只有 PSNR/位姿/深度，没有实例这一类）：
+
+- **诊断量**：`matched_iou_mean`（IoU 最优 1-1 指派下的平均 IoU——正是 mask loss 在最大化的量，应从 ~0 爬到 >0.5，**最该盯的一个标量**）、`best_iou_per_gt_mean`（不做指派，每个 GT 取全体 query 最大 IoU；与前者的差距能区分"掩码有了但指派/分类不对"和"根本没学到"）、`n_gt`/`n_fired`/`fired_over_gt`（抓两种塌缩：全判 no-object、或全部 query 激活）、`mask_area_mean`（掩码膨胀）。
+- **基准量**：`ap25`/`ap50`/`ap`（ScanNet 惯例，按 score 排序贪心配对 + all-point 插值）。
+- **口径与训练完全一致**（否则数字不可比）：IoU 在摊平的 `S*h*w` 体上算；GT 用与 `LossSegVGGT._downsample_masks` 相同的 area+0.5 阈值降采样；`instance_valid_mask` 像素按 loss 的 `keep` 同样剔除；objectness 判据 `1-P(no-object)` 与推理侧一致。
+- 接线在 `SegVGGTWrapper.validation_step`：全部指标 `self.log("val/...")`，并把对比图从 `Context|Depth` 扩成 `Context|GT inst|Pred inst|Depth`。**注意预测图与 GT 图调色板互相独立**（query 下标与 instance id 无对应关系），看形状不要看颜色。
+- `SegVGGTModel.from_checkpoint` 现在也吃微调产出的 Lightning `.ckpt`（剥 `model.` 前缀，用 `model.encoder.` 存在性做门卫，官方 `.pt` 不受影响）——此前没有任何办法拿微调权重跑推理。
+
+#### iteration 3 = per-object 物理挂在 object query 上
+
+**关键前提：物理那套基础设施本仓库早就有**（`src/dataset/physics/` 解析器与三种 Target、`src/model/heads/physics/`、`loss_phys*.py`、5 个 IGGT experiment），属性固定为 `density / youngs_modulus / poisson_ratio`。iter 3 不是从零写，而是把 object query 接上去。
+
+- **与 IGGT 物理路线的本质区别**：`PhysGMReadout` 必须用 **GT instance mask** 做 masked average pooling 才能造出 per-object token，因此推理时没有 GT 就跑不了。SegVGGT 的 query 本身就是 per-object 向量，`QueryPhysGMReadout`（`src/model/heads/physics/query_physgm_readout.py`）直接在 `[B,Q,D]` 上解码出 `(mu, var)`——**无 mask、无池化、无聚类，推理时对未标注新场景可用**。解码器从 `physgm_readout._make_property_decoder` 复用，两条路线不会漂移。
+- **暴露 query**：vendored `src/model/segvggt/models/segvggt.py` 加一行 `predictions["instance_queries"] = instance_queries`（**加性改动**，只多一个 dict key）。给出的是**投影前的 1024 维**向量，不是 128 维的 `instance_queries_for_mask`——后者是为 mask 点积训出来的瓶颈，读出头自带 LayerNorm+Linear，喂全向量信息更全。
+- **loss 折进 `LossSegVGGT`（`lambda_phys`，默认 0）而不是新建 loss 文件**：物理项必须用**与掩码完全同一次匈牙利匹配**。独立 loss 只有两条路——重算匹配（两边 cost 权重一旦不一致就静默分配到不同 query），或依赖 loss 之间的执行顺序（本仓库任何地方都没有这种耦合）。而"共享匹配所以折在一起"在该文件里**已有先例**：FADA 就是这么处理的。
+- **`_build_targets` 现在返回第 4 项 `ids`**。`g_idx` 是**行号**不是 instance id，而 `PhysGMTarget.value_lut` 按**真实 instance id** 查表，必须走 `ids[g_idx]`。这是本迭代最容易写错的一处，已用非连续 id（3/11/40）+ 逐属性 MSE==0 的判定性测试锁死。
+- **stage-2 配方**（`config/experiment/segvggt_physgm.yaml`）：`pretrained_weights` 吃 stage-1 的 `.ckpt`；冻结集加 `semantic_head` 与 `instance_`（一个关键词覆盖 `instance_query_token`/`instance_cross_blocks`/`instance_queries_proj`/`instance_query_self_attn`），只训新头；`lambda_cls/mask/js` 归 0（对应模块已冻，算了梯度也无处可去），但**匹配仍然要算**——`lambda_phys` 依赖它。数据 = 与 `physgm_iggt.yaml` 同一批 scannet100（那批才有 InstaScene VLM 物理标注）。
+- **推理产出**：`scripts/segvggt_infer.py` 的 `decode_instances` 多返回 `query_idx`，据此把 `query_phys_mu/var` 对齐到存活实例，用数据集自己的 `physgm_denormalize` 反归一化成 SI，打表并写 `physics.npz`。这是整条路线的终点产物。
+- **验证到位（iter 3，CPU 合成张量）**：读出头形状/`var>0`/梯度；`lambda_phys>0` 时 loss 有限且梯度回到 mu/var；`ids[g_idx]` 判定性测试（非连续 id 下逐属性 MSE==0，错位对照 MSE>1）；`PhysGMTarget.valid` 正确剔除未标注实例；缺 target / 缺读出头时该项静默休眠不崩；**回归护栏：`lambda_phys=0` 时与改动前的 loss 逐位相同（diff=0.00e+00）**；三个 segvggt experiment 配置的 encoder/loss dacite union 全部 MATCH OK；推理侧 SI 反归一化与 `physgm_denormalize` 一致。真数据训练/收敛待集群。
 
 ## 3. 权重加载（按来源分流，权威在 arch）
 

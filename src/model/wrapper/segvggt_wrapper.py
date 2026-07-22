@@ -8,6 +8,10 @@ through ``depth_dict`` (the repo's established encoder-only convention):
     encoder.segvggt_prediction  -> depth_dict['segvggt_prediction']
     batch instance_mask/valid   -> depth_dict['instance_mask' / 'instance_valid_mask']
 
+  per-query physics (``LossSegVGGT``'s ``lambda_phys`` term, opt-in):
+    batch physgm_target         -> depth_dict['physgm_target']
+    (the predictions themselves ride along inside segvggt_prediction)
+
   geometry         (``LossSegVGGTGeo``):
     encoder.pred_pose_enc_list  -> depth_dict['pred_pose_enc_list']
     encoder depth               -> depth_dict['depth']
@@ -206,6 +210,12 @@ class SegVGGTWrapper(BaseModelWrapper):
             depth_dict_for_loss["instance_mask"] = instance_mask
         if valid_mask is not None:
             depth_dict_for_loss["instance_valid_mask"] = valid_mask
+
+        # ---- per-query physics supervision (LossSegVGGT's lambda_phys term) ----
+        # Per-scene instance-id -> property LUTs from the dataset physics parser;
+        # collate keeps them as a list of PhysGMTarget. Mirrors IGGTWrapper.
+        if "physgm_target" in batch:
+            depth_dict_for_loss["physgm_target"] = batch["physgm_target"]
 
         # ---- geometry supervision ----
         if encoder_output.pred_pose_enc_list is not None:

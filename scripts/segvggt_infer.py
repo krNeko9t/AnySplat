@@ -89,7 +89,11 @@ def decode_instances(
     score_thr: float = 0.25,
     class_agnostic: bool = False,
 ):
-    """Return (binary_masks [N, V*h*w], scores [N], labels [N])."""
+    """Return (binary_masks [N, V*h*w], scores [N], labels [N], query_idx [N]).
+
+    ``query_idx`` maps each surviving instance back to the object query that produced
+    it, so per-query readouts (e.g. physics mu/var) can be lined up with the masks.
+    """
     cls_logits = cls_logits.float().cpu()
     mask_logits = mask_logits.float().cpu()
 
@@ -121,11 +125,64 @@ def decode_instances(
 
     binary = m_sig > mask_thr
     keep = scores > score_thr
-    scores, binary, labels = scores[keep], binary[keep], labels[keep]
+    scores, binary, labels, idx = scores[keep], binary[keep], labels[keep], idx[keep]
     keep = binary.sum(1) > npoint_thr
-    scores, binary, labels = scores[keep], binary[keep], labels[keep]
+    scores, binary, labels, idx = scores[keep], binary[keep], labels[keep], idx[keep]
     order = scores.argsort(descending=True)
-    return binary[order], scores[order], labels[order]
+    return binary[order], scores[order], labels[order], idx[order]
+
+
+def report_physics(pred, query_idx: torch.Tensor, scores: torch.Tensor, out_dir: Path):
+    """Print / dump the per-object physics readout for the surviving instances.
+
+    This is the end product of the physics-on-queries route: because the properties
+    are decoded from the object queries rather than pooled with a GT mask, they are
+    available here at inference on a scene with no annotation at all.
+
+    Values are converted back to SI (density kg/m3, Young's modulus Pa, Poisson ratio)
+    with the dataset's own inverse transform, so nothing about the normalisation is
+    re-derived here. No-op when the encoder ran without ``phys_scheme``.
+    """
+    mu = getattr(pred, "query_phys_mu", None)
+    var = getattr(pred, "query_phys_var", None)
+    if mu is None or var is None:
+        logger.info("no physics readout in this checkpoint "
+                    "(encoder cfg phys_scheme is null) -- skipping")
+        return
+    if len(query_idx) == 0:
+        logger.info("no instances survived thresholding; nothing to report")
+        return
+
+    from src.dataset.physics.parsers import physgm_denormalize
+
+    names = getattr(pred, "property_names", None) or ("density", "youngs_modulus",
+                                                      "poisson_ratio")
+    mu_sel = mu[0].float().cpu()[query_idx]                 # [N, P] model space
+    var_sel = var[0].float().cpu()[query_idx]
+    si = physgm_denormalize(mu_sel)                          # [N, P] SI units
+
+    header = f"{'inst':>4} {'score':>7} " + " ".join(f"{n:>18}" for n in names)
+    lines = [header, "-" * len(header)]
+    for i in range(mu_sel.shape[0]):
+        cells = " ".join(
+            f"{float(si[i, p]):>10.4g}+-{float(var_sel[i, p]) ** 0.5:>5.2f}"
+            for p in range(mu_sel.shape[1])
+        )
+        lines.append(f"{i:>4} {float(scores[i]):>7.3f} {cells}")
+    body = "\n".join(lines)
+    logger.info("per-object physics (SI units, +- is the model-space std):\n%s", body)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        out_dir / "physics.npz",
+        query_idx=query_idx.cpu().numpy(),
+        scores=scores.cpu().numpy(),
+        mu_model_space=mu_sel.numpy(),
+        var_model_space=var_sel.numpy(),
+        value_si=si.numpy(),
+        property_names=np.array(names),
+    )
+    logger.info("wrote %s", out_dir / "physics.npz")
 
 
 def _palette(n: int) -> np.ndarray:
@@ -240,7 +297,7 @@ def main():
     Q, V, h, w = qm.shape
     logger.info("queries=%d views=%d mask=%dx%d classes=%d", Q, V, h, w, ql.shape[-1])
 
-    binary, scores, labels = decode_instances(
+    binary, scores, labels, query_idx = decode_instances(
         ql,
         qm.reshape(Q, -1),
         mask_thr=args.mask_thr,
@@ -262,6 +319,7 @@ def main():
             "label hist: %s",
             {int(u): int(c) for u, c in zip(uniq.tolist(), cnt.tolist())},
         )
+    report_physics(pred, query_idx, scores, Path(args.out_dir))
     visualize(
         images, binary, V, h, w, Path(args.out_dir), max_instances=args.max_instances
     )

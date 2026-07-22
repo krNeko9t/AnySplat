@@ -12,6 +12,16 @@ lambda_mask*(L_bce+L_dice) + lambda_js*L_js`` (the FADA term is folded in here
 because it shares the match).  The geometry terms (``L_camera``, ``L_depth``) live
 in :mod:`loss_segvggt_geo`.
 
+**Per-query physics** (``lambda_phys``, default 0 = off) is folded in for the same
+reason: it supervises the object queries through *the same* Hungarian assignment, so
+it cannot be a separate Loss without either recomputing the match (silently diverging
+the moment the two configs' cost weights disagree) or introducing an execution-order
+dependency between losses, which this repo has nowhere.  When enabled it applies
+PhysGM's per-property robust Gaussian NLL + MSE (formula reused verbatim from
+:mod:`loss_physgm`) to ``query_phys_mu`` / ``query_phys_var`` against the matched
+instance's row of a ``PhysGMTarget`` LUT.  Note the LUT is keyed by *instance id*,
+so the match's ``gt_idx`` must be mapped through ``ids`` -- see ``_build_targets``.
+
 GT construction (all derived from the multi-view ``instance_mask``, no extra parser):
   * per-instance binary masks, area-downsampled to the prediction resolution (h, w)
     and flattened to the ``N*h*w`` sequence the paper treats as a point-cloud mask;
@@ -33,6 +43,8 @@ Inputs (provided by :class:`SegVGGTWrapper` through ``depth_dict``):
       * query_masks        [B, Q, S, h, w]  (raw logits, pre-sigmoid)
       * query_class_logits [B, Q, C+1]      (last channel = no-object)
       * attn_frame_mean    [L, B, Q, S]     (per-frame attn mass; renormalised here)
+      * query_phys_mu/var  [B, Q, P]        (optional, lambda_phys > 0)
+  - depth_dict['physgm_target']:       list[PhysGMTarget] (optional, lambda_phys > 0)
   - depth_dict['instance_mask']:       Int64 [B, S, H, W]
   - depth_dict['instance_valid_mask']: Bool  [B, S, H, W]  (optional).  Invalid pixels
     are *ignored* by the mask loss, not turned into negatives -- see ``unlabeled_as_ignore``.
@@ -50,6 +62,7 @@ from torch import Tensor
 
 from src.dataset.types import BatchedExample
 from .loss import Loss
+from .loss_physgm import robust_gaussian_nll
 from .segvggt_matcher import (
     HungarianMatcher,
     MatcherWeights,
@@ -87,6 +100,13 @@ class LossSegVGGTCfg:
     # repo's manifest datasets, which carry instance ids but no semantic labels.
     class_agnostic: bool = True
     dice_eps: float = 1.0        # Laplace smoothing for Dice
+    # Per-query physics property regression (PhysGM formula), 0 = off.  Requires the
+    # encoder to run QueryPhysGMReadout (cfg `phys_scheme: query_physgm`) and the
+    # dataset to supply a PhysGMTarget.  Folded into this loss rather than living in
+    # its own module because it must consume *the same* Hungarian match as the masks --
+    # exactly the reason the FADA term is folded in here too (see module docstring).
+    lambda_phys: float = 0.0
+    phys_mse_weight: float = 1.0  # PhysGM: E = NLL + mse_weight * MSE, per property
 
 
 @dataclass
@@ -126,8 +146,14 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         inst_mask_b: Tensor,          # [S, H, W] int64
         semantic_b: Tensor | None,    # [S, H, W] int64 or None
         hw: tuple[int, int],
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Return (gt_classes [K], gt_masks [K, S, h, w], gt_visibility [K, S])."""
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Return (gt_classes [K], gt_masks [K, S, h, w], gt_visibility [K, S], ids [K]).
+
+        ``ids`` are the *actual* instance ids, in the same row order as the other three.
+        The matcher returns row indices into this ordering, so any supervision keyed by
+        instance id (e.g. the per-instance physics LUTs) needs ``ids[gt_idx]`` -- the
+        raw ``gt_idx`` is a row number, not an id.
+        """
         s, H, W = inst_mask_b.shape
         ids = torch.unique(inst_mask_b)
         ids = ids[ids != self.cfg.ignore_id]
@@ -138,6 +164,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
                 torch.zeros(0, dtype=torch.long, device=device),
                 torch.zeros(0, s, h, w, device=device),
                 torch.zeros(0, s, device=device),
+                ids,
             )
 
         masks_full = (inst_mask_b[None] == ids[:, None, None, None]).float()  # [K,S,H,W]
@@ -159,7 +186,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
                     gt_classes[i] = 0
                 else:
                     gt_classes[i] = torch.bincount(sem_vals).argmax()
-        return gt_classes, gt_masks, visibility
+        return gt_classes, gt_masks, visibility, ids
 
     # ------------------------------------------------------------------ #
     # Loss interface
@@ -227,6 +254,24 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         cls_weight = torch.ones(n_cls, device=device)
         cls_weight[no_obj] = self.cfg.no_object_weight
 
+        # ----- per-query physics (optional) -----
+        # Only active with a readout on the encoder *and* a PhysGMTarget from the
+        # dataset; otherwise this whole branch stays dormant and costs nothing.
+        phys_mu = getattr(pred, "query_phys_mu", None)
+        phys_var = getattr(pred, "query_phys_var", None)
+        phys_targets = depth_dict.get("physgm_target")
+        phys_on = (
+            self.cfg.lambda_phys > 0.0
+            and phys_mu is not None
+            and phys_var is not None
+            and phys_targets is not None
+        )
+        if phys_on and not isinstance(phys_targets, list):
+            phys_targets = [phys_targets]
+        phys_mu_chunks: list[Tensor] = []
+        phys_var_chunks: list[Tensor] = []
+        phys_gt_chunks: list[Tensor] = []
+
         total_cls = _zero()
         total_bce = _zero()
         total_dice = _zero()
@@ -234,7 +279,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         n_masks = 0  # matched pairs across the batch (mask/js normaliser)
 
         for b in range(B):
-            gt_classes, gt_masks, visibility = self._build_targets(
+            gt_classes, gt_masks, visibility, gt_ids = self._build_targets(
                 inst_mask[b], None if semantic is None else semantic[b], (h, w)
             )
             k = gt_classes.shape[0]
@@ -290,6 +335,24 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
                     js = js_divergence(p_gt[None], p_hat)          # [L, M]
                     total_js = total_js + (js.mean(dim=0) / S).sum()
 
+                # ----- per-query physics on the SAME matched pairs -----
+                # gt_idx are row numbers; gt_ids[g_idx] turns them into the instance
+                # ids the PhysGMTarget LUTs are indexed by.
+                if phys_on and b < len(phys_targets):
+                    tgt_b = phys_targets[b]
+                    value_lut = tgt_b.value_lut.to(device)
+                    valid_lut = tgt_b.valid.to(device)
+                    matched_ids = gt_ids[g_idx].long()
+                    in_range = matched_ids < valid_lut.shape[0]
+                    if bool(in_range.any()):
+                        ids_ok = matched_ids[in_range]
+                        labelled = valid_lut[ids_ok]
+                        if bool(labelled.any()):
+                            sel = q_idx[in_range][labelled]
+                            phys_mu_chunks.append(phys_mu[b][sel])
+                            phys_var_chunks.append(phys_var[b][sel])
+                            phys_gt_chunks.append(value_lut[ids_ok[labelled]])
+
                 n_masks += q_idx.numel()
 
             # ----- classification CE over all queries (matched + no-object) -----
@@ -304,23 +367,49 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         total_dice = total_dice / norm
         total_js = total_js / norm
 
+        # ----- physics: PhysGM formula over the matched, labelled instances -----
+        # Same per-property NLL + MSE on z-scored targets as LossPhysGM, so the numbers
+        # are directly comparable with the IGGT physgm route.
+        total_phys = _zero()
+        n_phys = 0
+        if phys_mu_chunks:
+            mu = torch.cat(phys_mu_chunks, dim=0).float()      # [M, P]
+            var = torch.cat(phys_var_chunks, dim=0).float()
+            gt = torch.cat(phys_gt_chunks, dim=0).float()
+            n_phys = mu.shape[0]
+            prop_names = (
+                getattr(pred, "property_names", None)
+                or tuple(f"prop_{i}" for i in range(mu.shape[1]))
+            )
+            for p_i, name in enumerate(prop_names):
+                nll = robust_gaussian_nll(mu[:, p_i], var[:, p_i], gt[:, p_i])
+                mse = F.mse_loss(mu[:, p_i], gt[:, p_i])
+                total_phys = total_phys + nll + self.cfg.phys_mse_weight * mse
+                self.extra_logs[f"segvggt_phys_{name}_nll"] = nll.detach()
+                self.extra_logs[f"segvggt_phys_{name}_mse"] = mse.detach()
+
         l_cls = self.cfg.lambda_cls * total_cls
         l_mask = self.cfg.lambda_mask * (total_bce + total_dice)
         l_js = self.cfg.lambda_js * total_js
-        loss = self.cfg.weight * (l_cls + l_mask + l_js)
+        l_phys = self.cfg.lambda_phys * total_phys
+        loss = self.cfg.weight * (l_cls + l_mask + l_js + l_phys)
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
-        self.extra_logs = {
+        self.extra_logs.update({
             "loss_segvggt_cls": total_cls.detach(),
             "loss_segvggt_bce": total_bce.detach(),
             "loss_segvggt_dice": total_dice.detach(),
             "loss_segvggt_js": total_js.detach(),
             "loss_segvggt_num_matched": torch.tensor(float(n_masks)),
-        }
+            "loss_segvggt_phys": total_phys.detach(),
+            "segvggt_phys_num": torch.tensor(float(n_phys)),
+        })
         if global_step % 100 == 0:
             logger.info(
-                "[LossSegVGGT step=%d] cls=%.4f bce=%.4f dice=%.4f js=%.4f matched=%d",
+                "[LossSegVGGT step=%d] cls=%.4f bce=%.4f dice=%.4f js=%.4f "
+                "phys=%.4f matched=%d phys_n=%d",
                 global_step, total_cls.item(), total_bce.item(),
-                total_dice.item(), total_js.item(), n_masks,
+                total_dice.item(), total_js.item(), total_phys.item(),
+                n_masks, n_phys,
             )
         return loss

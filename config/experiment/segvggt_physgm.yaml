@@ -1,0 +1,116 @@
+# @package _global_
+# Stage 2 (iteration 3): per-object PHYSICS on SegVGGT's object queries.
+# Usage: python src/main.py +experiment=segvggt_physgm \
+#          model.encoder.pretrained_weights=<stage-1 .ckpt or official .pt>
+#
+# The IGGT physics routes build a per-object token by masked-average-pooling backbone
+# patch tokens with the GT instance mask, so they cannot run without ground truth.
+# Here the object query *is* the per-object vector: QueryPhysGMReadout decodes
+# (mu, var) straight off it, which means physics also works at inference on an unseen
+# scene.  The query<->instance correspondence needed for *training* comes from the
+# Hungarian match LossSegVGGT already computes for the masks (lambda_phys term).
+#
+# Default recipe = physics only: everything that existed before is frozen and just the
+# fresh readout head trains.  Stage-1 (segvggt_finetune_agnostic) is expected to have
+# taught the queries to latch onto objects already; this stage only learns to read
+# properties off them.  To co-train segmentation instead, drop `instance_` /
+# `semantic_head` from freeze_keywords and raise the loss.segvggt lambda_cls/mask/js
+# back to their defaults (0.5 / 1.0 / 0.5).
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: segvggt
+  - override /loss: [segvggt, segvggt_geo]
+
+wandb:
+  name: segvggt_physgm
+  tags: [instseg, segvggt, physics, physgm, queries]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    # REQUIRED. Accepts either the official segvggt_scannetv2.pt or a fine-tuned
+    # Lightning .ckpt from stage 1 (its "model." key prefix is stripped automatically
+    # by SegVGGTModel.from_checkpoint). Prefer the stage-1 checkpoint.
+    pretrained_weights: ???
+    enable_semantic: 20
+    instance_query_num: 400
+    # Attach the per-query physics readout. Null (the default) leaves the branch
+    # absent entirely, so this file is the only thing that turns it on.
+    phys_scheme: query_physgm
+    physgm_hidden: 64
+  decoder: null
+
+optimizer:
+  # The readout head is randomly initialised (small-init last layer), unlike stage 1
+  # where nothing was -- so a hotter LR than stage 1's 2e-5 is appropriate.
+  lr: 1.0e-4
+  warm_up_steps: 200
+  backbone_lr_multiplier: 1.0
+  # Freeze everything pre-existing: DINO + frame/global blocks (incl. their LoRA),
+  # the geometry heads, the semantic head (which owns the instance classifier), and
+  # the whole object-query machinery. `instance_` covers instance_query_token,
+  # instance_cross_blocks, instance_queries_proj and instance_query_self_attn in one
+  # keyword, so this stays correct if a query submodule is toggled off in cfg.
+  # -> only encoder.query_physgm trains.
+  freeze_keywords:
+    - patch_embed
+    - frame_blocks
+    - global_blocks
+    - camera_head
+    - depth_head
+    - semantic_head
+    - instance_
+
+train:
+  segvggt_geo_supervision: gt
+
+trainer:
+  max_steps: 20000
+  val_check_interval: 250
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  limit_val_batches: 4
+
+checkpointing:
+  load: null
+  every_n_train_steps: 1000
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  segvggt:
+    weight: 1.0
+    class_agnostic: true
+    lambda_phys: 1.0
+    phys_mse_weight: 1.0
+    # Segmentation terms off: their modules are frozen, so they would only burn
+    # compute on a matcher whose gradients go nowhere. The match itself is still
+    # computed -- lambda_phys needs it.
+    lambda_cls: 0.0
+    lambda_mask: 0.0
+    lambda_js: 0.0
+  segvggt_geo:
+    weight: 0.0   # geometry frozen in this stage
+
+dataset:
+  manifest:
+    # Same scannet100 subset the IGGT physgm route uses -- these are the scenes that
+    # actually carry InstaScene VLM physics annotations.
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
+    # ScanNet++ iPhone frames are typically ~690x920; crop shim uses input_image_shape.
+    original_image_shape: [690, 920]
+    physics_parser: instascene_vlm_physgm
+    view_sampler:
+      num_context_views: 4
+      max_img_per_gpu: 8

@@ -16,3 +16,9 @@ segvggt:
   # ids but no semantic labels. false -> class-aware (requires instance_semantic).
   class_agnostic: true
   dice_eps: 1.0
+  # Per-query physics (PhysGM NLL + MSE) on the SAME Hungarian match as the masks.
+  # 0 = off, which is what every config except experiment=segvggt_physgm wants.
+  # Turning it on also needs encoder phys_scheme=query_physgm and a dataset
+  # physics_parser producing a PhysGMTarget.
+  lambda_phys: 0.0
+  phys_mse_weight: 1.0
