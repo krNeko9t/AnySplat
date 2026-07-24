@@ -53,8 +53,16 @@ optimizer:
   # Freeze every pre-existing module: DINO, the frame/global blocks (and the
   # pretrained LoRA adapters inside them), and the geometry heads.
   # -> 487M trainable, all in the instance branch + instance classifier.
-  freeze_keywords: [patch_embed, frame_blocks, global_blocks, camera_head, depth_head]
-
+  freeze_keywords: 
+    - patch_embed
+    - frame_blocks
+    - global_blocks
+    - camera_head
+    - depth_head
+    - semantic_head
+    - instance_
+    - camera_token
+    - register_token
 train:
   segvggt_geo_supervision: gt
 
