@@ -4,11 +4,13 @@ Unlike the IGGT route (contrastive instance features + inference-time clustering
 SegVGGT reasons about instances *inside* the geometry-grounded transformer: a set of
 learnable object queries cross-attend the image tokens after every global-attention
 layer, and each query directly predicts a per-view mask (query .dot. dense feature map)
-and a class distribution whose trailing channel is the *no-object* logit. Background /
-empty queries are dropped by argmax -- no post-processing, no GT-mask pooling.
+and a class distribution whose trailing channel is the *no-match* logit (DETR
+literature: no-object). Background / empty queries are dropped by argmax -- no
+post-processing, no GT-mask pooling.
 
 The whole modified transformer + heads live in the vendored box ``src/model/segvggt/``
-(kept faithful to the official release). This arch file only:
+(official architecture; class-count arithmetic corrected via
+``scannet_instance_taxonomy``). This arch file only:
   - builds the vendored ``SegVGGT`` model from a typed cfg,
   - repackages its prediction dict into the repo-wide ``EncoderOutput`` contract
     (``segvggt_prediction`` slot + geometry slots), and
@@ -58,7 +60,10 @@ class EncoderSegVGGTCfg:
     enable_depth: bool = True
     enable_point: bool = False
     enable_track: bool = False
-    enable_semantic: int = 20  # 20 (ScanNetv2) or 200 (ScanNet200)
+    # Instance-category count (= classifier foreground channels).  Official ScanNet
+    # ckpts: 18 (scannetv2.pt) or 198 (scannet200.pt).  Classifier dim = this + 1
+    # (no-match).  Do NOT write 20/200 here — that would re-hide a -2 for wall/floor.
+    num_instance_classes: int = 18
     return_feature_maps_down_ratio: int = 2
     # --- instance branch (object queries) ---
     enable_instance_seg: bool = True
@@ -101,7 +106,7 @@ def _build_segvggt(cfg: EncoderSegVGGTCfg) -> SegVGGT:
         enable_point=cfg.enable_point,
         enable_depth=cfg.enable_depth,
         enable_track=cfg.enable_track,
-        enable_semantic=cfg.enable_semantic,
+        num_instance_classes=cfg.num_instance_classes,
         return_feature_maps_down_ratio=cfg.return_feature_maps_down_ratio,
         enable_instance_seg=cfg.enable_instance_seg,
         instance_query_num=cfg.instance_query_num,

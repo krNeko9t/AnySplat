@@ -12,7 +12,7 @@ enable_camera: true
 enable_depth: true
 enable_point: false
 enable_track: false
-enable_semantic: 20  # 20 (ScanNetv2 ckpt) or 200 (ScanNet200 ckpt)
+num_instance_classes: 18  # 18 (ScanNetv2 ckpt / 18+1 head) or 198 (ScanNet200); NOT 20/200
 return_feature_maps_down_ratio: 2
 
 # instance branch (object queries)

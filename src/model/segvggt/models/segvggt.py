@@ -19,9 +19,13 @@ from src.model.segvggt.heads.camera_head import CameraHead
 from src.model.segvggt.heads.dpt_head import DPTHead
 from src.model.segvggt.heads.track_head import TrackHead
 from src.model.segvggt.heads.semantic_head import SemanticHead
+from src.model.segvggt.utils.scannet_instance_taxonomy import (
+    SUPPORTED_NUM_INSTANCE_CLASSES,
+    classifier_dim,
+)
 
 class SegVGGT(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, img_size=518, patch_size=14, embed_dim=1024, enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, enable_semantic=None, 
+    def __init__(self, img_size=518, patch_size=14, embed_dim=1024, enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, num_instance_classes=None, 
                  return_feature_maps_down_ratio=None, enable_instance_seg=False, instance_query_num=400, instance_query_dim=None, 
                  cross_block_layers=None, instance_cls_hidden_dim=32, cross_block_params=None, use_lora=False, lora_config=None, 
                  semantic_maps_down_ratio=1, query_self_attention=False, query_sa_layers=None, query_sa_params=None, 
@@ -42,17 +46,33 @@ class SegVGGT(nn.Module, PyTorchModelHubMixin):
 
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
 
-        if enable_semantic is not None:
-            assert enable_semantic in [20, 200], "Only support 20(ScanNetv2) or 200(ScanNet200) semantic classes."
-            self.semantic_head = SemanticHead(dim_in=2 * embed_dim, output_dim=enable_semantic + 1 + 1,
-                semantic_maps_down_ratio=semantic_maps_down_ratio, return_feature_maps_down_ratio=return_feature_maps_down_ratio, 
-                enable_instance_seg=enable_instance_seg, instance_cls_hidden_dim=instance_cls_hidden_dim, 
-                instance_cls_input_dim=128)
+        # ``num_instance_classes`` is the real head width knob (18 / 198).  Classifier
+        # out_features = num_instance_classes + 1 (no-match).  No hidden -2 from 20/200.
+        self.num_instance_classes = num_instance_classes
+        if num_instance_classes is not None:
+            assert num_instance_classes in SUPPORTED_NUM_INSTANCE_CLASSES, (
+                f"num_instance_classes must be one of {SUPPORTED_NUM_INSTANCE_CLASSES} "
+                f"(ScanNetv2 / ScanNet200 instance categories), got {num_instance_classes}."
+            )
+            self.semantic_head = SemanticHead(
+                dim_in=2 * embed_dim,
+                num_instance_classes=num_instance_classes,
+                semantic_maps_down_ratio=semantic_maps_down_ratio,
+                return_feature_maps_down_ratio=return_feature_maps_down_ratio,
+                enable_instance_seg=enable_instance_seg,
+                instance_cls_hidden_dim=instance_cls_hidden_dim,
+                instance_cls_input_dim=128,
+            )
+            self.instance_classifier_dim = classifier_dim(num_instance_classes)
         else:
             self.semantic_head = None
+            self.instance_classifier_dim = None
 
         if enable_instance_seg:
-            assert (enable_semantic is not None) and (return_feature_maps_down_ratio is not None), "To enable instance segmentation branch, semantic segmentation branch with return_feature_maps_down_ratio must be enabled."
+            assert (num_instance_classes is not None) and (return_feature_maps_down_ratio is not None), (
+                "To enable instance segmentation, num_instance_classes and "
+                "return_feature_maps_down_ratio must be set."
+            )
         self.use_lora = use_lora
 
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
@@ -142,7 +162,7 @@ class SegVGGT(nn.Module, PyTorchModelHubMixin):
                 )  # (B, instance_query_num, S, h, w)
                 predictions["instance_labels"] = self.semantic_head.scratch.output_instance(
                     instance_queries_for_mask
-                )  # (B, instance_query_num, num_instance_classes + 1)
+                )  # (B, instance_query_num, num_instance_classes + 1); last = no-match
                 # Repo-local, purely additive: expose the object queries themselves so
                 # downstream per-object readouts (physics) can hang off them. The
                 # official forward drops them here. Nothing existing is altered -- this

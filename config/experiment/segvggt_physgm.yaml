@@ -38,7 +38,7 @@ model:
     # Lightning .ckpt from stage 1 (its "model." key prefix is stripped automatically
     # by SegVGGTModel.from_checkpoint). Prefer the stage-1 checkpoint.
     pretrained_weights: ???
-    enable_semantic: 20
+    num_instance_classes: 18  # matches official scannetv2.pt (18+1 head)
     instance_query_num: 400
     # Attach the per-query physics readout. Null (the default) leaves the branch
     # absent entirely, so this file is the only thing that turns it on.

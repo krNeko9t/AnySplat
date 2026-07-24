@@ -9,9 +9,9 @@ segvggt:
   cost_cls: 0.5        # matching cost = loss weights (paper A.4)
   cost_mask: 1.0
   cost_js: 0.5         # set 0 to disable FADA cost term (Table 3 row 2)
-  no_object_weight: 0.1
+  no_object_weight: 0.1  # DETR name; down-weights the trailing no-match channel in CE
   ignore_id: 0
-  # true -> marginalise the classifier to objectness, P(object) = 1 - P(no-object);
+  # true -> marginalise the classifier to objectness, P(object) = 1 - P(no-match);
   # keeps the pretrained head intact. Needed because manifest datasets carry instance
   # ids but no semantic labels. false -> class-aware (requires instance_semantic).
   class_agnostic: true

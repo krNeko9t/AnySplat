@@ -19,7 +19,7 @@ Two families of numbers, deliberately separated:
   ``n_gt`` / ``n_fired``    GT instance count vs. queries with objectness above
                             ``score_threshold``.  ``fired_over_gt`` is their ratio --
                             it catches the two classic collapses (everything predicted
-                            no-object, or every query firing).
+                            no-match, or every query firing).
   ``mask_area_mean``        mean fraction of supervised pixels covered by a fired
                             query's mask.  Watches for mask over-growth.
 
@@ -33,7 +33,7 @@ Conventions, chosen to match training exactly so the numbers are comparable:
     ``LossSegVGGT._downsample_masks`` recipe.
   - ``instance_valid_mask`` pixels are dropped from both intersection and union, the
     same way the loss's ``keep`` drops them.
-  - objectness score is ``1 - P(no-object)``, matching both the inference decoder and
+  - objectness score is ``1 - P(no-match)``, matching both the inference decoder and
     the wrapper's ``val/queries_fired``.
 
 No learnable parameters, no repo dependencies beyond torch (+ scipy for the optimal
@@ -178,7 +178,7 @@ def compute_instance_metrics(
     Parameters
     ----------
     query_masks : [Q, S, h, w] raw mask logits (pre-sigmoid).
-    query_class_logits : [Q, C+1] class logits; the last channel is *no-object*.
+    query_class_logits : [Q, C+1] class logits; the last channel is *no-match*.
     instance_mask : [S, H, W] int64, multi-view-consistent instance ids.
     valid_mask : [S, H, W] bool (or [S, H, W, 1]); False pixels are ignored entirely.
     ignore_id : instance id that does not define an instance (0 by convention).

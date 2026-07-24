@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # Objectness cut-off shared by val metrics, the "queries fired" counter and the
 # visualisation, so all three tell the same story. Matches the inference decoder's
-# `1 - P(no-object)` criterion (scripts/segvggt_infer.py).
+# `1 - P(no-match)` criterion (scripts/segvggt_infer.py).
 VAL_SCORE_THRESHOLD = 0.5
 
 
@@ -252,7 +252,7 @@ class SegVGGTWrapper(BaseModelWrapper):
         depth_dict = encoder_output.depth_dict or {}
         pred = encoder_output.segvggt_prediction
 
-        # log a coarse "how many queries fired" signal (1 - P(no-object) > 0.5)
+        # log a coarse "how many queries fired" signal (1 - P(no-match) > 0.5)
         if pred is not None and pred.query_class_logits is not None:
             probs = pred.query_class_logits[0].float().softmax(-1)
             fired = int((1.0 - probs[:, -1] > VAL_SCORE_THRESHOLD).sum().item())

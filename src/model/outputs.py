@@ -74,8 +74,9 @@ class SegVGGTPrediction:
 
     End-to-end instance reasoning via object queries (no clustering post-process,
     no GT mask pooling): each of the ``Q`` learnable queries yields a per-view mask
-    and a class distribution whose last channel is the *no-object* logit, so
-    background / empty queries are dropped by argmax rather than a heuristic.
+    and a class distribution whose last channel is the *no-match* logit (DETR:
+    no-object), so background / empty queries are dropped by argmax rather than a
+    heuristic.
 
     ``query_embed`` (the object-query vectors) is the natural per-object instance
     embedding to hang downstream per-object physics readouts on -- and because the
@@ -85,7 +86,7 @@ class SegVGGTPrediction:
 
     # Per-query per-view mask logits (pre-sigmoid): [B, Q, V, h, w]
     query_masks: Float[Tensor, "batch query view h w"] | None = None
-    # Per-query class logits incl. trailing no-object channel: [B, Q, C_plus_1]
+    # Per-query class logits incl. trailing no-match channel: [B, Q, C_plus_1]
     query_class_logits: Float[Tensor, "batch query classes"] | None = None
     # Object-query embeddings, *pre*-projection (the aggregator's 1024-d vectors,
     # not the 128-d mask-space projection): [B, Q, D]

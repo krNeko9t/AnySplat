@@ -5,11 +5,11 @@
 # Usage: python src/main.py experiment=segvggt_finetune_agnostic
 #
 # Why this is cheap: the loss marginalises the pretrained classifier into
-# objectness, P(object) = 1 - P(no-object) -- no head surgery, no channel is
+# objectness, P(object) = 1 - P(no-match) -- no head surgery, no channel is
 # repurposed, the checkpoint's weights are used as they are.
 # This is NOT the same as the checkpoint already being class-agnostic at init:
 # ScanNet trained unannotated objects *as background*, so at init
-# `1 - P(no-object)` means "is this one of the 18 ScanNet instance classes", not
+# `1 - P(no-match)` means "is this one of the 18 ScanNet instance classes", not
 # "is this any object at all". Marginalising only gives fine-tuning a sane
 # starting point; teaching "any object" is exactly what this stage has to do, and
 # the initial loss is not expected to be low. Do not use it as an acceptance test.
@@ -40,7 +40,7 @@ model:
     # REQUIRED: local path to the official checkpoint (segvggt_scannetv2.pt).
     # use_lora must stay true -- the checkpoint carries trained LoRA weights.
     pretrained_weights: ???
-    enable_semantic: 20
+    num_instance_classes: 18  # matches official scannetv2.pt (18+1 head)
     instance_query_num: 400
   decoder: null
 

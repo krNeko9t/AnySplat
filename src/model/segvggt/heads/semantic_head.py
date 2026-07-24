@@ -28,7 +28,9 @@ class SemanticHead(nn.Module):
     Args:
         dim_in (int): Input dimension (channels).
         patch_size (int, optional): Patch size. Default is 14.
-        output_dim (int, optional): Number of output channels for the instance classification MLP.
+        num_instance_classes (int, optional): Number of instance categories (foreground
+            classifier channels).  The MLP outputs ``num_instance_classes + 1`` logits;
+            the trailing channel is *no-match* (unmatched / empty query slot).
         features (int, optional): Feature channels for intermediate representations. Default is 256.
         out_channels (List[int], optional): Output channels for each intermediate layer.
         intermediate_layer_idx (List[int], optional): Indices of layers from aggregated tokens used for Semantic Head.
@@ -43,7 +45,7 @@ class SemanticHead(nn.Module):
         self,
         dim_in: int,
         patch_size: int = 14,
-        output_dim: int = 22,
+        num_instance_classes: int = 18,
         features: int = 256,
         out_channels: List[int] = [256, 512, 1024, 1024],
         intermediate_layer_idx: List[int] = [4, 11, 17, 23],
@@ -104,10 +106,11 @@ class SemanticHead(nn.Module):
             )
         if enable_instance_seg:
             assert return_feature_maps_down_ratio is not None, "To enable instance segmentation branch, return_feature_maps_down_ratio must be specified."
+            # Trailing channel = no-match (DETR literature: no-object).
             self.scratch.output_instance = nn.Sequential(
                 nn.Linear(instance_cls_input_dim, instance_cls_hidden_dim),
                 nn.ReLU(inplace=True),
-                nn.Linear(instance_cls_hidden_dim, output_dim-3)
+                nn.Linear(instance_cls_hidden_dim, num_instance_classes + 1),
             )
 
     def forward(

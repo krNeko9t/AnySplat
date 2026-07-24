@@ -28,7 +28,7 @@ model:
     # Non-empty local path -> SegVGGTModel.from_checkpoint (official .pt key remap).
     # Leave "" to train the instance branch from the VGGT-initialised backbone.
     pretrained_weights: ""
-    enable_semantic: 20            # 20 (ScanNetv2) or 200 (ScanNet200)
+    num_instance_classes: 18       # 18 or 198; classifier = this + 1 no-match
     instance_query_num: 400
   decoder: null
 

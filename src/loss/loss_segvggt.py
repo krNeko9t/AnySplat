@@ -30,10 +30,10 @@ GT construction (all derived from the multi-view ``instance_mask``, no extra par
   * per-instance class label.  Defaults to **class-agnostic**: this repo's manifest
     datasets only carry multi-view-consistent instance ids, no semantic label.  In that
     mode the classification collapses to *objectness* by marginalising the class
-    distribution, ``P(object) = sum_c P(c) = 1 - P(no-object)``, i.e. a 2-way CE over
-    ``[logsumexp(foreground logits), no-object logit]``.  This keeps the pretrained
+    distribution, ``P(object) = sum_c P(c) = 1 - P(no-match)``, i.e. a 2-way CE over
+    ``[logsumexp(foreground logits), no-match logit]``.  This keeps the pretrained
     classifier intact (no head surgery, no channel is arbitrarily repurposed), matches
-    the ``1 - P(no-object)`` criterion used at inference, and leaves the foreground
+    the ``1 - P(no-match)`` criterion used at inference, and leaves the foreground
     channels' semantic structure available for later per-query readouts.
     If a per-pixel ``instance_semantic`` map is supplied via ``depth_dict`` *and*
     ``class_agnostic=False``, it is majority-voted per instance for class-aware targets.
@@ -41,7 +41,7 @@ GT construction (all derived from the multi-view ``instance_mask``, no extra par
 Inputs (provided by :class:`SegVGGTWrapper` through ``depth_dict``):
   - depth_dict['segvggt_prediction']: :class:`SegVGGTPrediction`
       * query_masks        [B, Q, S, h, w]  (raw logits, pre-sigmoid)
-      * query_class_logits [B, Q, C+1]      (last channel = no-object)
+      * query_class_logits [B, Q, C+1]      (last channel = no-match; DETR: no-object)
       * attn_frame_mean    [L, B, Q, S]     (per-frame attn mass; renormalised here)
       * query_phys_mu/var  [B, Q, P]        (optional, lambda_phys > 0)
   - depth_dict['physgm_target']:       list[PhysGMTarget] (optional, lambda_phys > 0)
@@ -84,7 +84,8 @@ class LossSegVGGTCfg:
     cost_cls: float = 0.5
     cost_mask: float = 1.0
     cost_js: float = 0.5
-    # DETR down-weights the no-object class in the classification CE
+    # DETR down-weights the no-match class in the classification CE
+    # (config field keeps the DETR name ``no_object_weight``).
     no_object_weight: float = 0.1
     ignore_id: int = 0          # instance id that does not define an instance
     # Drop id == ignore_id pixels from the *mask* BCE/Dice entirely (False = keep them).
@@ -92,7 +93,7 @@ class LossSegVGGTCfg:
     # target is (inst_mask == id_k): every id-0 pixel is a truthful negative ("not part
     # of instance k"), so the mask loss never lies even when id 0 hides an unannotated
     # object.  The harm from under-labelling is on the *classification* side instead -- a
-    # query that latched onto that object goes unmatched and is supervised as no-object.
+    # query that latched onto that object goes unmatched and is supervised as no-match.
     # Turning this on therefore deletes real negative signal (masks lose the pressure to
     # stay tight and grow), without addressing the actual issue.  No known case needs it.
     unlabeled_as_ignore: bool = False
@@ -222,8 +223,8 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         B, Q, S, h, w = query_masks.shape
 
         # Class-agnostic: marginalise the class distribution into a binary objectness
-        # one, [logsumexp(foreground), no-object].  Mathematically P(object) = 1 -
-        # P(no-object), so the pretrained classifier keeps its meaning as-is instead of
+        # one, [logsumexp(foreground), no-match].  Mathematically P(object) = 1 -
+        # P(no-match), so the pretrained classifier keeps its meaning as-is instead of
         # having channel 0 repurposed from a semantic class into "any object".
         if self.cfg.class_agnostic:
             query_cls = torch.stack(
@@ -250,7 +251,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
             keep_full = (1.0 - unlabeled) if keep_full is None else keep_full * (1.0 - unlabeled)
         semantic = depth_dict.get("instance_semantic")
 
-        # class-weight vector: down-weight no-object (DETR convention)
+        # class-weight vector: down-weight no-match (DETR convention / no_object_weight)
         cls_weight = torch.ones(n_cls, device=device)
         cls_weight[no_obj] = self.cfg.no_object_weight
 
@@ -298,7 +299,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
                 a = attn[:, b].float()                              # [L, Q, S]
                 pred_attn_b = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 
-            # ----- classification target (default = no-object) -----
+            # ----- classification target (default = no-match) -----
             tgt_classes = torch.full((Q,), no_obj, dtype=torch.long, device=device)
 
             if k > 0:
@@ -355,7 +356,7 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
 
                 n_masks += q_idx.numel()
 
-            # ----- classification CE over all queries (matched + no-object) -----
+            # ----- classification CE over all queries (matched + no-match) -----
             total_cls = total_cls + F.cross_entropy(
                 cls_logits_b, tgt_classes, weight=cls_weight, reduction="mean"
             )

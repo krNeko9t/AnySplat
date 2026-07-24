@@ -4,7 +4,8 @@ Loads the official SegVGGT checkpoint (HuggingFace ``JinyuanQu/SegVGGT``) into t
 repo's ``SegVGGTModel`` and runs the object-query instance branch on a folder of
 multi-view images, producing per-view instance overlays. No clustering, no GT masks:
 each learnable query directly yields a per-view mask + a class distribution whose last
-channel is *no-object*; queries surviving score / area thresholds become instances.
+channel is *no-match* (unmatched / empty slot; DETR: no-object); queries surviving
+score / area thresholds become instances.
 
 Preprocessing matches the official eval exactly (width -> 518, height rounded to a
 multiple of 14, portrait center-cropped square, pixels in [0, 1]).
@@ -15,12 +16,13 @@ old default of 0.0 nearly every query survives and ~300 overlapping masks look l
 noise.
 
 Examples:
-  # official ScanNetv2 weights, auto-download, run on the bundled example views
-  python scripts/segvggt_infer.py --hf --semantic 20 \
+  # official ScanNetv2 weights (18 instance classes), auto-download
+  python scripts/segvggt_infer.py --hf --num_instance_classes 18 \
       --image_dir examples/vrnerf/riverview --out_dir outputs/segvggt_demo
 
-  # local checkpoint, ScanNet200 head
-  python scripts/segvggt_infer.py --ckpt /path/segvggt_scannet200.pt --semantic 200 \
+  # local checkpoint, ScanNet200 head (198 instance classes)
+  python scripts/segvggt_infer.py --ckpt /path/segvggt_scannet200.pt \
+      --num_instance_classes 198 \
       --image_dir /data/scene/color --max_views 12 --out_dir outputs/seg
 """
 from __future__ import annotations
@@ -99,13 +101,13 @@ def decode_instances(
 
     if class_agnostic:
         probs = F.softmax(cls_logits, dim=-1)
-        scores = 1.0 - probs[:, -1]  # 1 - P(no-object)
+        scores = 1.0 - probs[:, -1]  # 1 - P(no-match)
         topk = min(topk, scores.shape[0])
         scores, idx = scores.topk(topk, sorted=False)
         m = mask_logits[idx]
         labels = torch.zeros_like(scores, dtype=torch.long)
     else:
-        # Per-(query, class) scores, excluding the trailing no-object channel.
+        # Per-(query, class) scores, excluding the trailing no-match channel.
         n_classes = cls_logits.shape[1] - 1
         scores = F.softmax(cls_logits, dim=-1)[:, :-1]
         labels = (
@@ -247,8 +249,14 @@ def main():
     )
     ap.add_argument("--hf", action="store_true",
                     help="download the checkpoint from JinyuanQu/SegVGGT")
-    ap.add_argument("--semantic", type=int, default=20, choices=[20, 200],
-                    help="20 = ScanNetv2 ckpt, 200 = ScanNet200 ckpt")
+    ap.add_argument(
+        "--num_instance_classes",
+        type=int,
+        default=18,
+        choices=[18, 198],
+        help="classifier foreground channels (18=scannetv2.pt, 198=scannet200.pt); "
+             "head width = this + 1 no-match",
+    )
     ap.add_argument("--max_views", type=int, default=8)
     ap.add_argument("--mask_thr", type=float, default=0.4)
     ap.add_argument(
@@ -262,7 +270,7 @@ def main():
     ap.add_argument(
         "--class_agnostic",
         action="store_true",
-        help="score by 1-P(no-object); default is official class-aware top-k",
+        help="score by 1-P(no-match); default is official class-aware top-k",
     )
     ap.add_argument("--max_instances", type=int, default=50,
                     help="max instances to draw in the overlay")
@@ -273,7 +281,10 @@ def main():
     ckpt = args.ckpt
     if args.hf and not ckpt:
         from huggingface_hub import hf_hub_download
-        fname = f"checkpoint/segvggt_scannet{'v2' if args.semantic == 20 else '200'}.pt"
+        fname = (
+            f"checkpoint/segvggt_scannet"
+            f"{'v2' if args.num_instance_classes == 18 else '200'}.pt"
+        )
         logger.info("downloading %s from JinyuanQu/SegVGGT ...", fname)
         ckpt = hf_hub_download("JinyuanQu/SegVGGT", fname)
     if not ckpt:
@@ -285,8 +296,11 @@ def main():
     logger.info("using %d views from %s", len(paths), args.image_dir)
     images = load_and_preprocess(paths).to(args.device)
 
-    cfg = EncoderSegVGGTCfg(name="segvggt", enable_semantic=args.semantic,
-                            pretrained_weights=ckpt)
+    cfg = EncoderSegVGGTCfg(
+        name="segvggt",
+        num_instance_classes=args.num_instance_classes,
+        pretrained_weights=ckpt,
+    )
     model = get_model(cfg).to(args.device).eval()
 
     with torch.no_grad():
