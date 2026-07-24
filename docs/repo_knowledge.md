@@ -92,10 +92,10 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 与 IGGT 不同：SegVGGT 把实例推理做进 transformer 内部——object queries 在每层 global attention 后 cross-attend 图像 token，每个 query 直接出「per-view mask + 类别分布（末通道 = no-match，未匹配空槽；DETR 文献常称 no-object）」，端到端、无聚类后处理、无 GT-mask 池化。这正是把 per-object 物理属性挂在 query 上的天然载体（iter 3 目标）。
 
 - **vendored box**：`src/model/segvggt/`（改版 aggregator + CrossBlock/CrossAttention + SemanticHead + LoRA；类别约定已矫正，见下）。与现有 `src/model/vggt/` box 隔离，互不牵动。不搬 `dependency/`（VGGSfM tracker）与 `utils/geometry`。
-- **类别约定（唯一收束点）**：`src/model/segvggt/utils/scannet_instance_taxonomy.py`。配置直接写 `num_instance_classes: 18|198`（模型实体）；头宽 = 该值 + 1（no-match）。**不要**再写 20/200 再隐含 −2。wall/floor 剔除只在读 ScanNet 标注时经 taxonomy 映射。叙述见仓库根 `docs/segvggt_scannet20_推理与类别数.md`。
+- **类别约定（唯一收束点）**：`src/model/segvggt/utils/scannet_instance_taxonomy.py`。配置写 `num_semantic_classes: 20|200` + `non_instance_classes: [wall, floor]`；头宽 = `(num_semantic - len(non_instance)) + 1`（no-match）。wall/floor 是 ScanNet 语义 stuff、实例无标、benchmark 不评——用显式列表表达，不是隐含 −2。叙述见仓库根 `docs/segvggt_scannet20_推理与类别数.md`。
 - **arch**：`src/model/arch/segvggt.py`（`EncoderSegVGGTCfg` / `EncoderSegVGGT` 持有 vendored `SegVGGT` 为 `self.model`，forward 重打包成 `EncoderOutput`；`SegVGGTModel.from_checkpoint` 给官方 `.pt` 键加 `encoder.model.` 前缀后 shape 对齐 strict=False）。已注册进 `MODELS` / `EncoderCfg` union / `get_model`。
 - **契约槽**：`EncoderOutput.segvggt_prediction`（`SegVGGTPrediction`：query_masks / query_class_logits / query_embed / feature_map / attn_frame_mean / query_phys_mu / query_phys_var / property_names）。`query_embed` 已在 iter 3 接出（见下）。
-- **config**：`config/model/encoder/segvggt.yaml`（`num_instance_classes: 18|198` 对齐官方两套 ckpt；LoRA rank 32 必须与训练一致）。
+- **config**：`config/model/encoder/segvggt.yaml`（`num_semantic_classes` + `non_instance_classes`；LoRA rank 32 必须与训练一致）。
 - **权重**：官方 HuggingFace `JinyuanQu/SegVGGT`（`checkpoint/segvggt_scannet{v2,200}.pt`，各约 6.6GB，含 DINO backbone，非 `hf:` 前缀走 from_checkpoint）。**官方无训练代码**，loss（Hungarian + BCE/Dice + FADA JS + teacher 蒸馏）需 iter 2 民间复现。
 - **验证到位（iter 1）**：本仓库构建的 state_dict 键集与官方 `SegVGGT`（同 eval 配置）**逐键一致（2606=2606，零差异）**→ 官方 ckpt 加载零 bad-missing/unexpected；随机权重 CPU 端到端小前向 shape 全部打通。真权重前向/掩码质量待集群跑（本机无 GPU、缺 gsplat/hydra，仅开发机）。
 

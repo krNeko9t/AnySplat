@@ -12,7 +12,12 @@ enable_camera: true
 enable_depth: true
 enable_point: false
 enable_track: false
-num_instance_classes: 18  # 18 (ScanNetv2 ckpt / 18+1 head) or 198 (ScanNet200); NOT 20/200
+num_semantic_classes: 20  # ScanNetv2=20 / ScanNet200=200
+# Semantic classes excluded from the instance head (ScanNet: wall/floor have no instance ids).
+# Empty list -> head is num_semantic_classes+1.  Head = (20 - len(this)) + 1 no-match.
+non_instance_classes:
+  - wall
+  - floor
 return_feature_maps_down_ratio: 2
 
 # instance branch (object queries)

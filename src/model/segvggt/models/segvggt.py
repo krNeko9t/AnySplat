@@ -20,12 +20,13 @@ from src.model.segvggt.heads.dpt_head import DPTHead
 from src.model.segvggt.heads.track_head import TrackHead
 from src.model.segvggt.heads.semantic_head import SemanticHead
 from src.model.segvggt.utils.scannet_instance_taxonomy import (
-    SUPPORTED_NUM_INSTANCE_CLASSES,
-    classifier_dim,
+    DEFAULT_NON_INSTANCE_CLASSES,
+    build_instance_taxonomy,
 )
 
 class SegVGGT(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, img_size=518, patch_size=14, embed_dim=1024, enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, num_instance_classes=None, 
+    def __init__(self, img_size=518, patch_size=14, embed_dim=1024, enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, num_semantic_classes=None,
+                 non_instance_classes=None,
                  return_feature_maps_down_ratio=None, enable_instance_seg=False, instance_query_num=400, instance_query_dim=None, 
                  cross_block_layers=None, instance_cls_hidden_dim=32, cross_block_params=None, use_lora=False, lora_config=None, 
                  semantic_maps_down_ratio=1, query_self_attention=False, query_sa_layers=None, query_sa_params=None, 
@@ -46,31 +47,35 @@ class SegVGGT(nn.Module, PyTorchModelHubMixin):
 
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
 
-        # ``num_instance_classes`` is the real head width knob (18 / 198).  Classifier
-        # out_features = num_instance_classes + 1 (no-match).  No hidden -2 from 20/200.
-        self.num_instance_classes = num_instance_classes
-        if num_instance_classes is not None:
-            assert num_instance_classes in SUPPORTED_NUM_INSTANCE_CLASSES, (
-                f"num_instance_classes must be one of {SUPPORTED_NUM_INSTANCE_CLASSES} "
-                f"(ScanNetv2 / ScanNet200 instance categories), got {num_instance_classes}."
+        # Config: num_semantic_classes + non_instance_classes (e.g. wall/floor).
+        # Head width = (num_semantic - len(non_instance)) + 1 no-match — explicit, no magic -2.
+        self.taxonomy = None
+        self.num_semantic_classes = num_semantic_classes
+        self.num_instance_classes = None
+        self.instance_classifier_dim = None
+        if num_semantic_classes is not None:
+            if non_instance_classes is None:
+                non_instance_classes = list(DEFAULT_NON_INSTANCE_CLASSES)
+            self.taxonomy = build_instance_taxonomy(
+                num_semantic_classes, non_instance_classes
             )
+            self.num_instance_classes = self.taxonomy.num_instance_classes
+            self.instance_classifier_dim = self.taxonomy.classifier_dim
             self.semantic_head = SemanticHead(
                 dim_in=2 * embed_dim,
-                num_instance_classes=num_instance_classes,
+                num_instance_classes=self.num_instance_classes,
                 semantic_maps_down_ratio=semantic_maps_down_ratio,
                 return_feature_maps_down_ratio=return_feature_maps_down_ratio,
                 enable_instance_seg=enable_instance_seg,
                 instance_cls_hidden_dim=instance_cls_hidden_dim,
                 instance_cls_input_dim=128,
             )
-            self.instance_classifier_dim = classifier_dim(num_instance_classes)
         else:
             self.semantic_head = None
-            self.instance_classifier_dim = None
 
         if enable_instance_seg:
-            assert (num_instance_classes is not None) and (return_feature_maps_down_ratio is not None), (
-                "To enable instance segmentation, num_instance_classes and "
+            assert (num_semantic_classes is not None) and (return_feature_maps_down_ratio is not None), (
+                "To enable instance segmentation, num_semantic_classes and "
                 "return_feature_maps_down_ratio must be set."
             )
         self.use_lora = use_lora

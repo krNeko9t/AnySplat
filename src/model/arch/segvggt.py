@@ -30,7 +30,7 @@ also works at inference on an unseen scene.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import torch
@@ -43,6 +43,7 @@ from src.model.heads.physics.query_physgm_readout import QueryPhysGMReadout
 from src.model.outputs import EncoderOutput, SegVGGTPrediction
 from src.model.segvggt.models.segvggt import SegVGGT
 from src.model.segvggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.segvggt.utils.scannet_instance_taxonomy import DEFAULT_NON_INSTANCE_CLASSES
 from .base import Encoder
 
 logger = logging.getLogger(__name__)
@@ -60,10 +61,14 @@ class EncoderSegVGGTCfg:
     enable_depth: bool = True
     enable_point: bool = False
     enable_track: bool = False
-    # Instance-category count (= classifier foreground channels).  Official ScanNet
-    # ckpts: 18 (scannetv2.pt) or 198 (scannet200.pt).  Classifier dim = this + 1
-    # (no-match).  Do NOT write 20/200 here — that would re-hide a -2 for wall/floor.
-    num_instance_classes: int = 18
+    # Semantic table size (ScanNetv2=20, ScanNet200=200) + which semantic classes
+    # are excluded from the instance head.  Head width =
+    # (num_semantic_classes - len(non_instance_classes)) + 1 no-match.
+    # ScanNet default excludes wall/floor (semantic stuff; no instance ids in GT).
+    num_semantic_classes: int = 20
+    non_instance_classes: list[str] = field(
+        default_factory=lambda: list(DEFAULT_NON_INSTANCE_CLASSES)
+    )
     return_feature_maps_down_ratio: int = 2
     # --- instance branch (object queries) ---
     enable_instance_seg: bool = True
@@ -106,7 +111,8 @@ def _build_segvggt(cfg: EncoderSegVGGTCfg) -> SegVGGT:
         enable_point=cfg.enable_point,
         enable_depth=cfg.enable_depth,
         enable_track=cfg.enable_track,
-        num_instance_classes=cfg.num_instance_classes,
+        num_semantic_classes=cfg.num_semantic_classes,
+        non_instance_classes=cfg.non_instance_classes,
         return_feature_maps_down_ratio=cfg.return_feature_maps_down_ratio,
         enable_instance_seg=cfg.enable_instance_seg,
         instance_query_num=cfg.instance_query_num,

@@ -16,13 +16,13 @@ old default of 0.0 nearly every query survives and ~300 overlapping masks look l
 noise.
 
 Examples:
-  # official ScanNetv2 weights (18 instance classes), auto-download
-  python scripts/segvggt_infer.py --hf --num_instance_classes 18 \
+  # official ScanNetv2 weights (20 semantic, exclude wall/floor -> 18+1 head)
+  python scripts/segvggt_infer.py --hf --num_semantic_classes 20 \
       --image_dir examples/vrnerf/riverview --out_dir outputs/segvggt_demo
 
-  # local checkpoint, ScanNet200 head (198 instance classes)
+  # local checkpoint, ScanNet200 head
   python scripts/segvggt_infer.py --ckpt /path/segvggt_scannet200.pt \
-      --num_instance_classes 198 \
+      --num_semantic_classes 200 \
       --image_dir /data/scene/color --max_views 12 --out_dir outputs/seg
 """
 from __future__ import annotations
@@ -250,12 +250,17 @@ def main():
     ap.add_argument("--hf", action="store_true",
                     help="download the checkpoint from JinyuanQu/SegVGGT")
     ap.add_argument(
-        "--num_instance_classes",
+        "--num_semantic_classes",
         type=int,
-        default=18,
-        choices=[18, 198],
-        help="classifier foreground channels (18=scannetv2.pt, 198=scannet200.pt); "
-             "head width = this + 1 no-match",
+        default=20,
+        choices=[20, 200],
+        help="ScanNet semantic table size (20=scannetv2.pt, 200=scannet200.pt)",
+    )
+    ap.add_argument(
+        "--non_instance_classes",
+        default="wall,floor",
+        help="comma-separated semantic class names excluded from the instance head "
+             "(default: wall,floor). Empty string = exclude none",
     )
     ap.add_argument("--max_views", type=int, default=8)
     ap.add_argument("--mask_thr", type=float, default=0.4)
@@ -283,7 +288,7 @@ def main():
         from huggingface_hub import hf_hub_download
         fname = (
             f"checkpoint/segvggt_scannet"
-            f"{'v2' if args.num_instance_classes == 18 else '200'}.pt"
+            f"{'v2' if args.num_semantic_classes == 20 else '200'}.pt"
         )
         logger.info("downloading %s from JinyuanQu/SegVGGT ...", fname)
         ckpt = hf_hub_download("JinyuanQu/SegVGGT", fname)
@@ -296,9 +301,11 @@ def main():
     logger.info("using %d views from %s", len(paths), args.image_dir)
     images = load_and_preprocess(paths).to(args.device)
 
+    non_inst = [s.strip() for s in args.non_instance_classes.split(",") if s.strip()]
     cfg = EncoderSegVGGTCfg(
         name="segvggt",
-        num_instance_classes=args.num_instance_classes,
+        num_semantic_classes=args.num_semantic_classes,
+        non_instance_classes=non_inst,
         pretrained_weights=ckpt,
     )
     model = get_model(cfg).to(args.device).eval()

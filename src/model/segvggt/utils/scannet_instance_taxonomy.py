@@ -1,47 +1,42 @@
 """ScanNet instance-category taxonomy for SegVGGT.
 
-The network itself only has one real classification entity — configs write that
-number directly, with no hidden subtraction:
+Config writes the semantic table size and an explicit exclusion list — no hidden -2:
 
-    num_instance_classes   (config / model)   e.g. 18 or 198
-    classifier_dim         = num_instance_classes + 1   # + no-match
+    num_semantic_classes: 20
+    non_instance_classes: [wall, floor]   # semantic classes that are NOT instance cats
+    num_instance_classes = 20 - len(non_instance_classes)   # = 18
+    classifier_dim       = num_instance_classes + 1         # + no-match
 
     each object query -> ``classifier_dim`` logits
-    trailing channel  -> *no-match* (unmatched / empty slot; DETR literature
-                         often calls this ``no-object``)
+    trailing channel  -> *no-match* (unmatched / empty slot; DETR: no-object)
 
-ScanNet *data* still uses a larger contiguous semantic label table that includes
-wall/floor at the front (and unlabeled at the end).  Mapping between that table
-and the classifier channels is the *only* place ``NUM_BENCHMARK_STUFF`` appears:
+ScanNet evidence (not a SegVGGT invention):
+  * semantic labels DO include wall/floor;
+  * instance annotations do NOT assign instance ids to wall/floor/ceiling;
+  * the instance benchmark ignores those classes at eval time.
 
-    semantic_id 0,1 (wall/floor)  -> not an instance class
-    semantic_id 2..N-1 (things)   -> logit index semantic_id - 2
-    semantic_id N (unlabeled)     -> not an instance class
+``non_instance_classes`` makes that exclusion configurable.  Empty list → head is
+``num_semantic_classes + 1`` (every semantic class is an instance category).
 
-Why the data table is wider: ScanNet instance-segmentation benchmarks (Mask3D,
-etc.) do not evaluate wall/floor.  That is a data/eval convention, not a model
-knob — configs must never write ``20`` and expect callers to mentally subtract 2.
-
-Unlabeled is a data-label bucket only.  It is never a classifier channel.
+``unlabeled`` (id == num_semantic_classes) is a separate data-label bucket for pixels
+without a valid semantic class.  It is never a classifier channel and is NOT the
+same thing as wall/floor.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Sequence, Union
 
 import numpy as np
 
-# ScanNet instance-seg convention: the first two contiguous semantic ids are
-# wall / floor (stuff), not instance categories.  Used ONLY when mapping
-# ScanNet semantic labels <-> classifier channels — never in config.
-NUM_BENCHMARK_STUFF = 2
+# Default ScanNet exclusion: wall & floor are semantic stuff, not instance categories.
+DEFAULT_NON_INSTANCE_CLASSES: tuple[str, ...] = ("wall", "floor")
 
-# What configs / the Linear head actually use.
-SUPPORTED_NUM_INSTANCE_CLASSES = (18, 198)
-
-# Contiguous semantic table sizes that pair with the instance-class counts above
-# (instance + wall/floor).  Data-load / NYU40 mapping only.
+# Known contiguous semantic table sizes (name tables + NYU40 / raw-id maps).
 SUPPORTED_NUM_SEMANTIC = (20, 200)
+
+ClassRef = Union[str, int]
 
 
 # Contiguous semantic class names.  Index 0..N-1 are the N semantic classes;
@@ -320,38 +315,9 @@ _SCANNET200_RAW_TO_CONTIGUOUS_VALID_IDS: tuple[int, ...] = (
 def _check_num_semantic(num_semantic: int) -> None:
     if num_semantic not in SUPPORTED_NUM_SEMANTIC:
         raise ValueError(
-            f"num_semantic must be one of {SUPPORTED_NUM_SEMANTIC}, got {num_semantic}"
+            f"num_semantic_classes must be one of {SUPPORTED_NUM_SEMANTIC} "
+            f"(known ScanNet name tables), got {num_semantic}"
         )
-
-
-def _check_num_instance_classes(num_instance_classes: int) -> None:
-    if num_instance_classes not in SUPPORTED_NUM_INSTANCE_CLASSES:
-        raise ValueError(
-            f"num_instance_classes must be one of {SUPPORTED_NUM_INSTANCE_CLASSES}, "
-            f"got {num_instance_classes}"
-        )
-
-
-def classifier_dim(num_instance_classes: int) -> int:
-    """``Linear`` out features = instance categories + 1 no-match.  Model-facing."""
-    _check_num_instance_classes(num_instance_classes)
-    return num_instance_classes + 1
-
-
-def num_semantic_classes(num_instance_classes: int) -> int:
-    """ScanNet contiguous semantic table size for *data* mapping only.
-
-    Adds wall/floor back onto the instance-class count.  Not a config knob —
-    configs write ``num_instance_classes`` directly.
-    """
-    _check_num_instance_classes(num_instance_classes)
-    return num_instance_classes + NUM_BENCHMARK_STUFF
-
-
-def num_instance_classes_from_semantic(num_semantic: int) -> int:
-    """Inverse of ``num_semantic_classes`` (data bridge; prefer config writing 18/198)."""
-    _check_num_semantic(num_semantic)
-    return num_semantic - NUM_BENCHMARK_STUFF
 
 
 def unlabeled_semantic_id(num_semantic: int) -> int:
@@ -368,83 +334,137 @@ def semantic_class_names(num_semantic: int) -> tuple[str, ...]:
     return SCANNET200_SEMANTIC_CLASS_NAMES
 
 
-def is_benchmark_stuff_semantic(semantic_id: int) -> bool:
-    """True iff ``semantic_id`` is wall/floor (benchmark non-instance stuff)."""
-    return 0 <= semantic_id < NUM_BENCHMARK_STUFF
+def resolve_non_instance_class_ids(
+    num_semantic_classes: int,
+    non_instance_classes: Sequence[ClassRef] = DEFAULT_NON_INSTANCE_CLASSES,
+) -> tuple[int, ...]:
+    """Resolve name/id refs to sorted unique semantic ids in ``[0, num_semantic)``."""
+    _check_num_semantic(num_semantic_classes)
+    names = semantic_class_names(num_semantic_classes)[:-1]  # drop unlabeled
+    name_to_id = {n: i for i, n in enumerate(names)}
+    ids: list[int] = []
+    for ref in non_instance_classes:
+        if isinstance(ref, bool):
+            raise TypeError(f"invalid non_instance class ref: {ref!r}")
+        if isinstance(ref, int):
+            sid = int(ref)
+        else:
+            key = str(ref)
+            if key not in name_to_id:
+                raise ValueError(
+                    f"unknown non_instance class {key!r}; "
+                    f"expected one of {list(name_to_id)} or an int id"
+                )
+            sid = name_to_id[key]
+        if not (0 <= sid < num_semantic_classes):
+            raise ValueError(
+                f"non_instance class id {sid} out of range for "
+                f"num_semantic_classes={num_semantic_classes}"
+            )
+        ids.append(sid)
+    return tuple(sorted(set(ids)))
 
 
-def is_non_instance_semantic(semantic_id: int, num_semantic: int) -> bool:
-    """True for pixels that must not supervise / evaluate as instances.
+@dataclass(frozen=True)
+class InstanceTaxonomy:
+    """Semantic table + which semantic classes are excluded from the instance head."""
 
-    = benchmark stuff (wall/floor) ∪ unlabeled.
-    """
-    _check_num_semantic(num_semantic)
-    return is_benchmark_stuff_semantic(semantic_id) or semantic_id == unlabeled_semantic_id(
-        num_semantic
-    )
+    num_semantic_classes: int
+    non_instance_class_ids: tuple[int, ...]
 
+    @property
+    def num_instance_classes(self) -> int:
+        return self.num_semantic_classes - len(self.non_instance_class_ids)
 
-def semantic_label_to_instance_logit_index(
-    semantic_id: int, num_semantic: int
-) -> Optional[int]:
-    """Map a contiguous ScanNet semantic id to a classifier foreground channel.
+    @property
+    def classifier_dim(self) -> int:
+        """Linear out features = instance categories + 1 no-match."""
+        return self.num_instance_classes + 1
 
-    Returns ``None`` for wall/floor and unlabeled (not instance categories).
-    Thing labels ``[NUM_BENCHMARK_STUFF, num_semantic)`` map to
-    ``[0, num_instance_classes)``.
-    """
-    _check_num_semantic(num_semantic)
-    if is_non_instance_semantic(semantic_id, num_semantic):
-        return None
-    if not (NUM_BENCHMARK_STUFF <= semantic_id < num_semantic):
-        return None
-    return semantic_id - NUM_BENCHMARK_STUFF
+    @property
+    def unlabeled_id(self) -> int:
+        return self.num_semantic_classes
 
+    @property
+    def instance_semantic_ids(self) -> tuple[int, ...]:
+        """Semantic ids that map onto classifier channels 0..C-1, in order."""
+        skip = set(self.non_instance_class_ids)
+        return tuple(i for i in range(self.num_semantic_classes) if i not in skip)
 
-def instance_logit_index_to_semantic_label(logit_index: int) -> int:
-    """Inverse of ``semantic_label_to_instance_logit_index`` for thing classes.
-
-    Classifier channel 0 (first instance category) <-> semantic id 2 (after wall/floor).
-    """
-    if logit_index < 0:
-        raise ValueError(f"logit_index must be >= 0, got {logit_index}")
-    return logit_index + NUM_BENCHMARK_STUFF
-
-
-def instance_logit_index_to_class_name(
-    logit_index: int, num_instance_classes: int
-) -> str:
-    """Class name for classifier foreground channel ``logit_index``."""
-    _check_num_instance_classes(num_instance_classes)
-    num_semantic = num_semantic_classes(num_instance_classes)
-    sem = instance_logit_index_to_semantic_label(logit_index)
-    names = semantic_class_names(num_semantic)
-    if not (0 <= logit_index < num_instance_classes):
-        raise ValueError(
-            f"logit_index {logit_index} out of range for "
-            f"num_instance_classes={num_instance_classes}"
+    def is_non_instance_semantic(self, semantic_id: int) -> bool:
+        """True for excluded stuff ∪ unlabeled."""
+        return (
+            semantic_id in self.non_instance_class_ids
+            or semantic_id == self.unlabeled_id
         )
-    return names[sem]
+
+    def semantic_label_to_instance_logit_index(self, semantic_id: int) -> Optional[int]:
+        """Map contiguous semantic id → classifier channel, or None if excluded."""
+        if self.is_non_instance_semantic(semantic_id):
+            return None
+        try:
+            return self.instance_semantic_ids.index(semantic_id)
+        except ValueError:
+            return None
+
+    def instance_logit_index_to_semantic_label(self, logit_index: int) -> int:
+        ids = self.instance_semantic_ids
+        if not (0 <= logit_index < len(ids)):
+            raise ValueError(
+                f"logit_index {logit_index} out of range for "
+                f"num_instance_classes={self.num_instance_classes}"
+            )
+        return ids[logit_index]
+
+    def instance_logit_index_to_class_name(self, logit_index: int) -> str:
+        sem = self.instance_logit_index_to_semantic_label(logit_index)
+        return semantic_class_names(self.num_semantic_classes)[sem]
+
+    def instance_eval_class_names(self) -> tuple[str, ...]:
+        names = semantic_class_names(self.num_semantic_classes)
+        return tuple(names[i] for i in self.instance_semantic_ids)
+
+    def instance_eval_valid_class_ids(self) -> tuple[int, ...]:
+        """Raw dataset category ids for evaluated instance categories."""
+        if self.num_semantic_classes == 20:
+            raw = _NYU40_TO_SCANNET20_VALID_IDS
+        else:
+            raw = _SCANNET200_RAW_TO_CONTIGUOUS_VALID_IDS
+        return tuple(raw[i] for i in self.instance_semantic_ids)
+
+    def mark_non_instance_pixels(
+        self,
+        instance_ids: np.ndarray,
+        semantic_ids: np.ndarray,
+        invalid_value: int = -1,
+    ) -> np.ndarray:
+        """Set instance ids to ``invalid_value`` on non-instance ∪ unlabeled pixels."""
+        out = np.array(instance_ids, copy=True)
+        skip = set(self.non_instance_class_ids) | {self.unlabeled_id}
+        invalid = np.isin(semantic_ids, list(skip))
+        out[invalid] = invalid_value
+        return out
 
 
-def instance_eval_class_names(num_instance_classes: int) -> tuple[str, ...]:
-    """Names used when reporting instance metrics (stuff + unlabeled stripped)."""
-    _check_num_instance_classes(num_instance_classes)
-    names = semantic_class_names(num_semantic_classes(num_instance_classes))
-    return names[NUM_BENCHMARK_STUFF:-1]
+def build_instance_taxonomy(
+    num_semantic_classes: int,
+    non_instance_classes: Sequence[ClassRef] = DEFAULT_NON_INSTANCE_CLASSES,
+) -> InstanceTaxonomy:
+    """Build taxonomy from config knobs ``num_semantic_classes`` + ``non_instance_classes``."""
+    ids = resolve_non_instance_class_ids(num_semantic_classes, non_instance_classes)
+    tax = InstanceTaxonomy(
+        num_semantic_classes=num_semantic_classes,
+        non_instance_class_ids=ids,
+    )
+    if tax.num_instance_classes < 0:
+        raise ValueError(
+            f"non_instance_classes ({ids}) longer than "
+            f"num_semantic_classes={num_semantic_classes}"
+        )
+    return tax
 
 
-def instance_eval_valid_class_ids(num_instance_classes: int) -> tuple[int, ...]:
-    """Raw dataset category ids for the evaluated instance categories.
-
-    For ScanNet20 these are NYU40 ids with wall/floor removed; for ScanNet200
-    the official raw id list with wall/floor removed.
-    """
-    _check_num_instance_classes(num_instance_classes)
-    num_semantic = num_semantic_classes(num_instance_classes)
-    if num_semantic == 20:
-        return _NYU40_TO_SCANNET20_VALID_IDS[NUM_BENCHMARK_STUFF:]
-    return _SCANNET200_RAW_TO_CONTIGUOUS_VALID_IDS[NUM_BENCHMARK_STUFF:]
+# --- NYU40 / ScanNet200 raw-id bridges (data load only) ---------------------
 
 
 def nyu40_id_to_scannet20_semantic_id(nyu40_id: int) -> int:
@@ -486,59 +506,18 @@ def scannet200_raw_to_semantic_lookup() -> np.ndarray:
     return table
 
 
-def mark_non_instance_pixels(
-    instance_ids: np.ndarray,
-    semantic_ids: np.ndarray,
-    num_semantic: int,
-    invalid_value: int = -1,
-) -> np.ndarray:
-    """Set instance ids to ``invalid_value`` on stuff ∪ unlabeled pixels.
-
-    Used when reading GT for instance training / eval.  Returns a copy.
-    """
-    _check_num_semantic(num_semantic)
-    out = np.array(instance_ids, copy=True)
-    unlabeled = unlabeled_semantic_id(num_semantic)
-    invalid = (semantic_ids < NUM_BENCHMARK_STUFF) | (semantic_ids == unlabeled)
-    out[invalid] = invalid_value
-    return out
-
-
-def assert_classifier_layout(
-    num_instance_classes: int, classifier_out_features: int
-) -> None:
-    """Sanity-check that a Linear layer matches the taxonomy."""
-    expected = classifier_dim(num_instance_classes)
-    if classifier_out_features != expected:
-        raise AssertionError(
-            f"classifier out_features={classifier_out_features}, expected "
-            f"{expected} (= {num_instance_classes} instance classes + 1 no-match)"
-        )
-
-
-# Re-export helpers useful for typed call sites.
 __all__ = [
-    "NUM_BENCHMARK_STUFF",
-    "SUPPORTED_NUM_INSTANCE_CLASSES",
+    "DEFAULT_NON_INSTANCE_CLASSES",
     "SUPPORTED_NUM_SEMANTIC",
     "SCANNET20_SEMANTIC_CLASS_NAMES",
     "SCANNET200_SEMANTIC_CLASS_NAMES",
-    "classifier_dim",
-    "num_semantic_classes",
-    "num_instance_classes_from_semantic",
+    "InstanceTaxonomy",
+    "build_instance_taxonomy",
+    "resolve_non_instance_class_ids",
     "unlabeled_semantic_id",
     "semantic_class_names",
-    "is_benchmark_stuff_semantic",
-    "is_non_instance_semantic",
-    "semantic_label_to_instance_logit_index",
-    "instance_logit_index_to_semantic_label",
-    "instance_logit_index_to_class_name",
-    "instance_eval_class_names",
-    "instance_eval_valid_class_ids",
     "nyu40_id_to_scannet20_semantic_id",
     "nyu40_to_scannet20_semantic_lookup",
     "scannet200_raw_id_to_semantic_id",
     "scannet200_raw_to_semantic_lookup",
-    "mark_non_instance_pixels",
-    "assert_classifier_layout",
 ]
