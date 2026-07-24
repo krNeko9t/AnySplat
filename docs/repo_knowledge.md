@@ -82,7 +82,7 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 | 3   | 实例（IGGT 路线）             | `instseg_iggt.yaml`（变体：`instseg_iggt_infinigen_mv`）                                                | iggt（encoder-only）；SamProjector + PartHead                                                                      | manifest                 | —                            | disc                     |
 | 4   | 实例 + 物理分类               | `phys_iggt.yaml`                                                                                   | iggt（`phys_scheme: class`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsClassifier | manifest                 | `physics_parser: 3dovs_json` | phys                     |
 | 5   | 实例 + 物理量回归             | `phys_prop_iggt.yaml`                                                                              | iggt（`phys_scheme: property`）；SamProjector + PartHead（冻结）+ PhysicsHead + PhysicsPropertyReadout | manifest                 | `physics_parser: instascene_vlm` | phys_prop                |
-| 6   | SegVGGT 端到端实例（iter 1 推理 / iter 2 训练 / iter 3 物理挂 query） | `segvggt_finetune_agnostic.yaml`（stage-1 class-agnostic 微调）；`segvggt_scannet.yaml`（论文全量训练）；`segvggt_physgm.yaml`（stage-2 per-query 物理）；`scripts/segvggt_infer.py`（推理，含物理导出）                                             | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead（+ 可选 `QueryPhysGMReadout`）                          | manifest（instance_mask+相机+深度；物理时 `physics_parser: instascene_vlm_physgm`）  | —（class-agnostic 默认，可选 semantic）；物理 = `PhysGMTarget` | segvggt（cls+BCE+Dice+FADA+物理）, segvggt_geo（camera+depth） |
+| 6   | SegVGGT 端到端实例（iter 1 推理 / iter 2 训练 / iter 3 物理挂 query） | `segvggt_finetune_agnostic.yaml`（stage-1 class-agnostic 微调）；`segvggt_scannet.yaml`（论文全量训练）；`segvggt_physgm.yaml`（stage-2 仅训物理 readout）；`segvggt_agnostic_phys_joint.yaml`（mask+objectness+phys **联合训**）；`scripts/segvggt_infer.py`（推理，含物理导出）                                             | segvggt（encoder-only，object queries）；vendored box `src/model/segvggt/` + SemanticHead（+ 可选 `QueryPhysGMReadout`）                          | manifest（instance_mask+相机+深度；物理时 `physics_parser: instascene_vlm_physgm`）  | —（class-agnostic 默认，可选 semantic）；物理 = `PhysGMTarget` | segvggt（cls+BCE+Dice+FADA+物理）, segvggt_geo（camera+depth） |
 
 
 新增第 5 套算法时：新建 experiment yaml 组合三元组，并在本表加一行。
@@ -115,10 +115,17 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 
 **stage-1 class-agnostic 微调**（`config/experiment/segvggt_finetune_agnostic.yaml`）——拿官方 ckpt 直接适配成 class-agnostic，用来体检训练实现：
 
-- 冻结集 `[patch_embed, frame_blocks, global_blocks, camera_head, depth_head]`，即整个 aggregator（含 ckpt 里已训好的 LoRA）+ 几何头全冻；只训 instance 分支 + 实例分类头 = **487M 可训**（AdamW 动量约 3.9GB）。几何不可能漂移，故 `segvggt_geo.weight: 0`。
+- 冻结集 `[patch_embed, frame_blocks, global_blocks, camera_head, depth_head, camera_token, register_token]`，即整个 aggregator（含 ckpt 里已训好的 LoRA）+ 几何头 + bare tokens 全冻；**只训** instance 分支 + 实例分类头（`semantic_head`）= **487M 可训**（AdamW 动量约 3.9GB）。几何不可能漂移，故 `segvggt_geo.weight: 0`。**切勿**把 `semantic_head` / `instance_` 写进 freeze——那会把本 stage 的可训主体关掉（曾误从 physgm 配方拷入，已修正）。
 - 因为没有任何随机初始化的新参数（是适配不是从头训），论文的 `2e-4` 太烫，改单一 `lr: 2e-5`。
 - 对照：论文全量配方 `segvggt_scannet.yaml` 冻结集只有 `[patch_embed]`，可训 **1148M**（AdamW ~9.2GB）。注意 LoRA 只冻住被包裹的 attention 基座（202M），frame/global block 的 MLP/norm（403M）仍全量可训——这是 vendored 官方代码的行为，不是我们加的。
 - 实测参数量核对（`paper_repo` env CPU 建模）：`patch_embed`→344 个/304M（DINO）、`instance_`→1011 个/454M、`semantic_head`→62 个/32.6M、`lora_`→192 个/9.44M（96 层 × qkv+proj）。yaml 里的 keyword 全部命中，无空组。
+
+**joint = class-agnostic 分割 + per-query 物理同训**（`config/experiment/segvggt_agnostic_phys_joint.yaml`）——Phase-1 主路径，替代「stage-1 再 stage-2」的串行冻结：
+
+- 同一 object query 上同时开 `λ_cls/mask/js/phys`（共用 Hungarian）；`phys_scheme: query_physgm`；分类侧仍边缘化 18+1（暂不做 2 路头手术）。
+- 冻结集同纠正后的 stage-1（aggregator + geo + camera/register tokens）；可训 = `instance_` + `semantic_head` + `query_physgm`。随机 init 的 readout 用 `param_groups` 提到 ~1e-4。
+- 数据 = phys scannet100（`instascene_vlm_physgm`）；无物理标注的样本上 `lambda_phys` 静默为 0。
+- 与 `segvggt_physgm` 的区别：后者冻死分割只训 ~0.2M readout；joint 让 mask/objectness/phys 一起塑造 query。
 
 #### 训练期可观测性（分割）
 

@@ -51,17 +51,16 @@ optimizer:
   lr: 2.0e-5
   warm_up_steps: 200
   backbone_lr_multiplier: 1.0
-  # Freeze every pre-existing module: DINO, the frame/global blocks (and the
-  # pretrained LoRA adapters inside them), and the geometry heads.
-  # -> 487M trainable, all in the instance branch + instance classifier.
-  freeze_keywords: 
+  # Freeze aggregator (DINO + frame/global incl. pretrained LoRA) + geometry
+  # heads + bare camera/register tokens. Do NOT freeze semantic_head / instance_:
+  # those are exactly what this stage adapts (~487M trainable). A prior draft
+  # wrongly copied physgm's freeze list and zeroed the instance branch.
+  freeze_keywords:
     - patch_embed
     - frame_blocks
     - global_blocks
     - camera_head
     - depth_head
-    - semantic_head
-    - instance_
     - camera_token
     - register_token
 train:

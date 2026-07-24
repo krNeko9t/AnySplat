@@ -1,0 +1,111 @@
+# @package _global_
+# Class-agnostic instance + per-query physics, JOINTLY trained on the same
+# object queries (shared Hungarian match). Phase-1 recipe: no classifier
+# surgery -- still uses the 18+1 head with loss-side marginalisation
+# (P(object)=1-P(no-match)); QueryPhysGMReadout is the only randomly-init module.
+#
+# Contrast with the two staged experiments:
+#   segvggt_finetune_agnostic -- segmentation only (no phys head)
+#   segvggt_physgm            -- physics-only readout on a frozen stage-1 ckpt
+# This file does both in one run so query space is shaped by mask+objectness+phys
+# together, instead of freezing one after the other.
+#
+# Usage:
+#   python src/main.py +experiment=segvggt_agnostic_phys_joint \
+#     model.encoder.pretrained_weights=<official segvggt_scannetv2.pt or stage-1 .ckpt>
+#
+# Weight loading: official .pt / Lightning .ckpt via SegVGGTModel.from_checkpoint
+# (strict=False). query_physgm keys are missing by design and stay random-init.
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: segvggt
+  - override /loss: [segvggt, segvggt_geo]
+
+wandb:
+  name: segvggt_agnostic_phys_joint
+  tags: [instseg, segvggt, class_agnostic, physics, physgm, joint]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    batch_size: 1
+
+model:
+  encoder:
+    # REQUIRED. Prefer official scannetv2.pt (or a corrected stage-1 .ckpt).
+    pretrained_weights: ???
+    num_semantic_classes: 20
+    non_instance_classes: [wall, floor]  # matches official scannetv2.pt (18+1 head)
+    instance_query_num: 400
+    phys_scheme: query_physgm
+    physgm_hidden: 64
+  decoder: null
+
+optimizer:
+  # Pretrained instance/semantic path stays cool (same as corrected stage-1);
+  # randomly-init query_physgm gets a hotter group (~1e-4).
+  lr: 2.0e-5
+  warm_up_steps: 200
+  backbone_lr_multiplier: 1.0
+  # Freeze aggregator + geometry (same spirit as stage-1): teach queries to be
+  # objects+physics without letting the geometry prior drift. camera_token /
+  # register_token are frozen for the same reason as in segvggt_physgm.
+  # Trainable: instance_ + semantic_head + query_physgm.
+  freeze_keywords:
+    - patch_embed
+    - frame_blocks
+    - global_blocks
+    - camera_head
+    - depth_head
+    - camera_token
+    - register_token
+  param_groups:
+    - keywords: [query_physgm]
+      lr_multiplier: 5.0   # 2e-5 * 5 = 1e-4
+
+train:
+  segvggt_geo_supervision: gt
+
+trainer:
+  max_steps: 20000
+  val_check_interval: 250
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  limit_val_batches: 4
+
+checkpointing:
+  load: null
+  every_n_train_steps: 1000
+  save_weights_only: false
+  save_top_k: 3
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  segvggt:
+    weight: 1.0
+    class_agnostic: true
+    # All segmentation terms ON, plus physics on the same match.
+    lambda_cls: 0.5
+    lambda_mask: 1.0
+    lambda_js: 0.5
+    lambda_phys: 1.0
+    phys_mse_weight: 1.0
+  segvggt_geo:
+    weight: 0.0   # geometry frozen; flip on only if unfreezing camera/depth
+
+dataset:
+  manifest:
+    # Same scannet100 subset as physgm / IGGT physgm -- scenes with InstaScene
+    # VLM physics annotations. Samples without phys labels leave lambda_phys idle.
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
+    original_image_shape: [690, 920]
+    physics_parser: instascene_vlm_physgm
+    view_sampler:
+      num_context_views: 4
+      max_img_per_gpu: 8
