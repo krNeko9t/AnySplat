@@ -206,3 +206,6 @@ deprecated_launch.json
 /trace_output*/
 /trace_render_*/
 /manifests/
+
+segvggt_finetune_agnostic*copy*
+/checks*

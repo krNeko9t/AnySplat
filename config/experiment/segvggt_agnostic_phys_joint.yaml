@@ -35,8 +35,8 @@ data_loader:
 model:
   encoder:
     # REQUIRED. Prefer official scannetv2.pt (or a corrected stage-1 .ckpt).
-    pretrained_weights: ???
-    num_semantic_classes: 20
+    pretrained_weights: /mnt/storage_pool/liaoyuanjun/hf_home/hub/models--JinyuanQu--SegVGGT/snapshots/5a7818348c1f4978db4a8be904f180575fc2322a/checkpoint/segvggt_scannet200.pt
+    num_semantic_classes: 200
     non_instance_classes: [wall, floor]  # matches official scannetv2.pt (18+1 head)
     instance_query_num: 400
     phys_scheme: query_physgm
@@ -46,8 +46,8 @@ model:
 optimizer:
   # Pretrained instance/semantic path stays cool (same as corrected stage-1);
   # randomly-init query_physgm gets a hotter group (~1e-4).
-  lr: 2.0e-5
-  warm_up_steps: 200
+  lr: 1.0e-4
+  warm_up_steps: 1000
   backbone_lr_multiplier: 1.0
   # Freeze aggregator + geometry (same spirit as stage-1): teach queries to be
   # objects+physics without letting the geometry prior drift. camera_token /
@@ -70,16 +70,16 @@ train:
 
 trainer:
   max_steps: 20000
-  val_check_interval: 250
+  val_check_interval: 500
   precision: bf16-mixed
   gradient_clip_val: 1.0
-  limit_val_batches: 4
+  limit_val_batches: 1
 
 checkpointing:
   load: null
   every_n_train_steps: 1000
   save_weights_only: false
-  save_top_k: 3
+  save_top_k: 1
 
 hydra:
   run:
@@ -105,6 +105,7 @@ dataset:
     root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
     manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
     original_image_shape: [690, 920]
+    input_image_shape: [252, 448]
     physics_parser: instascene_vlm_physgm
     view_sampler:
       num_context_views: 4
