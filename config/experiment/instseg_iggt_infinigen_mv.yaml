@@ -18,6 +18,8 @@ dataset:
   manifest:
     root: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted
     manifest_path: /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/dataset/InsScene-15K/processed_infinigen_extracted/manifest.jsonl
+    view_sampler:
+      num_target_views: 0   # IGGT: all supervised frames in context only
 
 data_loader:
   train:

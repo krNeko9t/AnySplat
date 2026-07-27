@@ -59,4 +59,6 @@ loss:
     ignore_id: 0
 
 dataset:
-  manifest: {}
+  manifest:
+    view_sampler:
+      num_target_views: 0   # IGGT: all supervised frames in context only

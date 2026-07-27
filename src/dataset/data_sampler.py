@@ -113,6 +113,11 @@ class DynamicBatchSampler(Sampler):
     """
     A custom batch sampler that dynamically adjusts batch size, aspect ratio, and image number
     for each sample. Batches within a sample share the same aspect ratio and image number.
+
+    Note: when this sampler is active, ``data_loader.train.batch_size`` is ignored;
+    effective batch size is ``floor(max_img_per_gpu / image_num)``.
+    ``image_num`` is the number of encoder frames per sample (context views for
+    SegVGGT/IGGT with ``num_target_views=0``).
     """
     def __init__(self,
                  sampler,
@@ -177,13 +182,20 @@ class DynamicBatchSampler(Sampler):
 
         while True:
             try:
-                # Sample random image number and patch height.
+                # Sample random image number and patch height via self.rng so every
+                # DDP rank (same epoch seed) draws the same (image_num, ps_h) sequence.
                 # h_range is input_image_shape [H, W]; height is sampled between the
                 # shorter and longer side so portrait (H>W) and landscape (H<=W) both work.
-                random_image_num = int(np.random.choice(self.possible_nums, p=self.normalized_weights))
+                random_image_num = int(
+                    self.rng.choices(
+                        self.possible_nums.tolist(),
+                        weights=self.normalized_weights.tolist(),
+                        k=1,
+                    )[0]
+                )
                 ps_h_lo = min(self.h_range[0], self.h_range[1]) // 14
                 ps_h_hi = max(self.h_range[0], self.h_range[1]) // 14
-                random_ps_h = np.random.randint(low=ps_h_lo, high=ps_h_hi + 1)
+                random_ps_h = self.rng.randint(ps_h_lo, ps_h_hi)
 
                 # Update sampler parameters
                 self.sampler.update_parameters(
@@ -191,7 +203,8 @@ class DynamicBatchSampler(Sampler):
                     ps_h=random_ps_h
                 )
                 
-                # Calculate batch size based on max images per GPU and current image number
+                # Budget = encoder frames per sample (= context when num_target_views=0).
+                # data_loader.train.batch_size is unused on this path.
                 batch_size = self.max_img_per_gpu / random_image_num
                 batch_size = np.floor(batch_size).astype(int)
                 batch_size = max(1, batch_size)  # Ensure batch size is at least 1

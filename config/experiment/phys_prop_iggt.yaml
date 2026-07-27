@@ -74,4 +74,5 @@ dataset:
     physics_parser: instascene_vlm
     view_sampler:
       num_context_views: 4
+      num_target_views: 0   # IGGT: all supervised frames in context only
       max_img_per_gpu: 8

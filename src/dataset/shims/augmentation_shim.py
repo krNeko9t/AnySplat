@@ -51,11 +51,13 @@ def apply_augmentation_shim(
     if torch.rand(tuple(), generator=generator) < 0.5:
         return example
     
-    return {
+    out = {
         **example,
         "context": reflect_views(example["context"]),
-        "target": reflect_views(example["target"]),
     }
+    if "target" in example:
+        out["target"] = reflect_views(example["target"])
+    return out
 
 def rotate_90_degrees(
     image: torch.Tensor, depth_map: torch.Tensor | None, extri_opencv: torch.Tensor, intri_opencv: torch.Tensor, clockwise=True

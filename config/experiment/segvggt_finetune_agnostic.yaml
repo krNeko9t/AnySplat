@@ -91,4 +91,6 @@ loss:
     weight: 0.0   # geometry is frozen in this stage; flip on only if unfreezing
 
 dataset:
-  manifest: {}
+  manifest:
+    view_sampler:
+      num_target_views: 0   # SegVGGT: all supervised frames in context only

@@ -72,4 +72,6 @@ loss:
     weight: 1.0
 
 dataset:
-  manifest: {}
+  manifest:
+    view_sampler:
+      num_target_views: 0   # SegVGGT: all supervised frames in context only

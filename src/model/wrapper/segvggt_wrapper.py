@@ -1,8 +1,8 @@
 """SegVGGTWrapper -- encoder-only training / validation for SegVGGT.
 
-Mirrors :class:`IGGTWrapper` (no decoder / rendering).  It runs the SegVGGT encoder
-once over the concatenated context+target views and routes supervision to the losses
-through ``depth_dict`` (the repo's established encoder-only convention):
+Mirrors :class:`IGGTWrapper` (no decoder / rendering).  All supervised frames live
+in ``batch["context"]`` only (no NVS ``target``).  Supervision is routed to the
+losses through ``depth_dict`` (the repo's established encoder-only convention):
 
   instance / FADA  (``LossSegVGGT``):
     encoder.segvggt_prediction  -> depth_dict['segvggt_prediction']
@@ -105,15 +105,24 @@ def _colorize_pred_instances(
     return [_labels_to_rgb(labels_np[v], lut, device) for v in range(labels_np.shape[0])]
 
 
-def _cat_ctx_tgt(batch: BatchedExample, key: str):
-    """Concatenate context/target view tensors along the view dim when both exist."""
+def _ctx_views(batch: BatchedExample, key: str):
+    """Read a per-view tensor from context only (SegVGGT has no NVS target)."""
     ctx = batch.get("context", {})
-    tgt = batch.get("target", {})
-    if key in ctx and key in tgt:
-        return torch.cat([ctx[key], tgt[key]], dim=1)
-    if key in ctx:
-        return ctx[key]
-    return None
+    return ctx.get(key)
+
+
+def _assert_no_nvs_target(batch: BatchedExample) -> None:
+    """SegVGGT/IGGT must not receive a non-empty NVS target (prevents fake-target regressions)."""
+    tgt = batch.get("target")
+    if tgt is None:
+        return
+    img = tgt.get("image") if isinstance(tgt, dict) else None
+    if img is not None and img.shape[1] > 0:
+        raise RuntimeError(
+            "SegVGGT/IGGT received non-empty batch['target'] "
+            f"(S={img.shape[1]}). Set view_sampler.num_target_views: 0 so all "
+            "supervised frames live in context only."
+        )
 
 
 class SegVGGTWrapper(BaseModelWrapper):
@@ -139,16 +148,16 @@ class SegVGGTWrapper(BaseModelWrapper):
     # ------------------------------------------------------------------ #
     def _geo_target_from_gt(self, batch: BatchedExample) -> dict | None:
         """Build the geometry target from clean manifest GT (camera + depth)."""
-        extr = _cat_ctx_tgt(batch, "extrinsics")   # [B, S, 4, 4] c2w
-        intr = _cat_ctx_tgt(batch, "intrinsics")   # [B, S, 3, 3] normalised
+        extr = _ctx_views(batch, "extrinsics")   # [B, S, 4, 4] c2w
+        intr = _ctx_views(batch, "intrinsics")   # [B, S, 3, 3] normalised
         if extr is None or intr is None:
             return None
         w2c = torch.linalg.inv(extr.float())        # camera-from-world
         image_hw = batch["context"]["image"].shape[-2:]
         pose_enc = extri_intri_to_pose_encoding(w2c[:, :, :3, :4], intr.float(), image_hw)
 
-        depth = _cat_ctx_tgt(batch, "depth")        # [B, S, H, W] or [B,S,H,W,1]
-        valid = _cat_ctx_tgt(batch, "valid_mask")
+        depth = _ctx_views(batch, "depth")        # [B, S, H, W] or [B,S,H,W,1]
+        valid = _ctx_views(batch, "valid_mask")
         if depth is not None and depth.dim() == 5:
             depth = depth.squeeze(-1)
         return {"pose_enc": pose_enc, "depth": depth, "valid": valid}
@@ -183,16 +192,11 @@ class SegVGGTWrapper(BaseModelWrapper):
     def training_step(self, batch, batch_idx):
         batch = self.combine_batches(batch)
         batch: BatchedExample = self.data_shim(batch)
+        _assert_no_nvs_target(batch)
 
-        context_image = (batch["context"]["image"] + 1) / 2
-        if "target" in batch and "image" in batch["target"]:
-            target_image = (batch["target"]["image"] + 1) / 2
-            input_image = torch.cat([context_image, target_image], dim=1)
-        else:
-            input_image = context_image
-
-        instance_mask = _cat_ctx_tgt(batch, "instance_mask")
-        valid_mask = _cat_ctx_tgt(batch, "valid_mask")
+        input_image = (batch["context"]["image"] + 1) / 2
+        instance_mask = _ctx_views(batch, "instance_mask")
+        valid_mask = _ctx_views(batch, "valid_mask")
 
         encoder_output, _ = self.model(
             input_image,
@@ -237,6 +241,7 @@ class SegVGGTWrapper(BaseModelWrapper):
     # ------------------------------------------------------------------ #
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         batch: BatchedExample = self.data_shim(batch)
+        _assert_no_nvs_target(batch)
         b, v, _, h, w = batch["context"]["image"].shape
         assert b == 1
 
@@ -327,6 +332,7 @@ class SegVGGTWrapper(BaseModelWrapper):
     # ------------------------------------------------------------------ #
     def test_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
+        _assert_no_nvs_target(batch)
         b, v, _, h, w = batch["context"]["image"].shape
         assert b == 1
         if self.global_rank == 0 and batch_idx % 100 == 0:

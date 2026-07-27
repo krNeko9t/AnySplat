@@ -264,8 +264,10 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], intr_aug: 
 
 def apply_crop_shim(example: AnyExample, shape: tuple[int, int], intr_aug: bool = False) -> AnyExample:
     """Crop images in the example."""
-    return {
+    out = {
         **example,
         "context": apply_crop_shim_to_views(example["context"], shape, intr_aug),
-        "target": apply_crop_shim_to_views(example["target"], shape, intr_aug),
     }
+    if "target" in example:
+        out["target"] = apply_crop_shim_to_views(example["target"], shape, intr_aug)
+    return out

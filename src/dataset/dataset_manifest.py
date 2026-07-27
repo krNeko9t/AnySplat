@@ -264,7 +264,6 @@ class DatasetManifest(Dataset):
 
         t_io0 = time.monotonic()
         context_images, context_depths, context_inst, context_K, context_valid = load_stack(context_indices)
-        target_images, target_depths, target_inst, target_K, target_valid = load_stack(target_indices)
         t_io = time.monotonic() - t_io0
 
         example = {
@@ -280,7 +279,13 @@ class DatasetManifest(Dataset):
                 "index": context_indices,
                 "overlap": overlap,
             },
-            "target": {
+            "scene": f"Manifest {scene_id}",
+        }
+        # SegVGGT/IGGT use context-only (num_target_views=0): omit target entirely.
+        # NVS paths keep a non-empty target for render GT.
+        if len(target_indices) > 0:
+            target_images, target_depths, target_inst, target_K, target_valid = load_stack(target_indices)
+            example["target"] = {
                 "extrinsics": extrinsics[target_indices],
                 "intrinsics": target_K,
                 "image": target_images,
@@ -291,9 +296,7 @@ class DatasetManifest(Dataset):
                 "far": repeat(torch.tensor(self.cfg.far, dtype=torch.float32), " -> v", v=len(target_indices)),
                 "index": target_indices,
                 "overlap": overlap,
-            },
-            "scene": f"Manifest {scene_id}",
-        }
+            }
 
         if self.physics_parser is not None:
             phys_target = self.physics_parser.parse(scene, self.root)
