@@ -272,10 +272,16 @@ class BaseModelWrapper(LightningModule):
     # ---- Epoch / batch callbacks ----
 
     def on_train_epoch_start(self) -> None:
-        if hasattr(self.trainer.datamodule.train_loader.dataset, "set_epoch"):
-            self.trainer.datamodule.train_loader.dataset.set_epoch(self.current_epoch)
-        if hasattr(self.trainer.datamodule.train_loader.sampler, "set_epoch"):
-            self.trainer.datamodule.train_loader.sampler.set_epoch(self.current_epoch)
+        loader = self.trainer.datamodule.train_loader
+        if hasattr(loader.dataset, "set_epoch"):
+            loader.dataset.set_epoch(self.current_epoch)
+        # train uses batch_sampler=MixedBatchSampler; loader.sampler is a dummy
+        # SequentialSampler without set_epoch — must hit batch_sampler.
+        batch_sampler = getattr(loader, "batch_sampler", None)
+        if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
+            batch_sampler.set_epoch(self.current_epoch)
+        elif hasattr(loader.sampler, "set_epoch"):
+            loader.sampler.set_epoch(self.current_epoch)
 
     def on_train_batch_start(self, batch, batch_idx: int, dataloader_idx: int = 0) -> None:
         try:

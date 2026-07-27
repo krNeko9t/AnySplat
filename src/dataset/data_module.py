@@ -148,15 +148,18 @@ class DataModule(LightningDataModule):
             collate_fn=collate_examples,
             persistent_workers=self.get_persistent(self.data_loader_cfg.train),
         )
-        # breakpoint()
-        # Set epoch for train and validation loaders (if applicable)
-        if hasattr(self.train_loader, "dataset") and hasattr(self.train_loader.dataset, "set_epoch"):
+        # Set epoch on dataset / batch_sampler (not loader.sampler: with
+        # batch_sampler=MixedBatchSampler that attribute is a dummy SequentialSampler).
+        if hasattr(self.train_loader.dataset, "set_epoch"):
             logger.debug("Training: Set Epoch in DataModule")
             self.train_loader.dataset.set_epoch(0)
-        if hasattr(self.train_loader, "sampler") and hasattr(self.train_loader.sampler, "set_epoch"):
-            logger.debug("Training: Set Epoch in DataModule")
+        batch_sampler = getattr(self.train_loader, "batch_sampler", None)
+        if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
+            logger.debug("Training: Set Epoch on batch_sampler")
+            batch_sampler.set_epoch(0)
+        elif hasattr(self.train_loader.sampler, "set_epoch"):
             self.train_loader.sampler.set_epoch(0)
-        
+
         return self.train_loader
 
     def val_dataloader(self):
