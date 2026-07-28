@@ -102,7 +102,20 @@ class DataModule(LightningDataModule):
         generator.manual_seed(loader_cfg.seed + self.global_rank)
         self.generator = generator
         return self.generator
-        
+
+    def get_batch_sampler_generator(self, loader_cfg: DataLoaderStageCfg) -> torch.Generator | None:
+        """RNG for MixedBatchSampler dataset picks — same seed on every rank.
+
+        Must NOT use ``seed + global_rank``: multinomial chooses which source
+        dataset (and thus image_num / batch shape) each step; ranks must agree.
+        DataLoader worker seeding still uses ``get_generator`` (rank-offset).
+        """
+        if loader_cfg.seed is None:
+            return None
+        generator = Generator()
+        generator.manual_seed(loader_cfg.seed)
+        return generator
+
     def train_dataloader(self):
         dataset, datasets_ls = get_dataset(self.dataset_cfgs, "train", self.step_tracker, self.dataset_shim)
         world_size = get_world_size()
@@ -128,14 +141,15 @@ class DataModule(LightningDataModule):
             dataset_key = next(iter(get_cfg()["dataset"]))
             dataset_cfg = get_cfg()["dataset"][dataset_key]
             context_num_views = dataset_cfg['view_sampler']['num_context_views']
-            
+
+        loader_generator = self.get_generator(self.data_loader_cfg.train)
         sampler = MixedBatchSampler(datasets_ls, 
                                     batch_size=self.data_loader_cfg.train.batch_size, # Not used here!
                                     num_context_views=context_num_views, 
                                     world_size=world_size, 
                                     rank=rank,
                                     prob=prob,
-                                    generator=self.get_generator(self.data_loader_cfg.train))
+                                    generator=self.get_batch_sampler_generator(self.data_loader_cfg.train))
         sampler.set_epoch(0)
         self.train_loader = DataLoader(
             dataset,
@@ -143,7 +157,7 @@ class DataModule(LightningDataModule):
             # shuffle=not isinstance(dataset, IterableDataset),
             batch_sampler=sampler,
             num_workers=self.data_loader_cfg.train.num_workers,
-            generator=self.generator,
+            generator=loader_generator,
             worker_init_fn=worker_init_fn,
             collate_fn=collate_examples,
             persistent_workers=self.get_persistent(self.data_loader_cfg.train),

@@ -337,19 +337,18 @@ class MixedBatchSampler(BatchSampler):
         print("Setting epoch for all underlying BatchedRandomSamplers")
         # for sampler in self.src_batch_samplers:
         #     sampler.set_epoch(0)
+        self._auto_prob = prob is None
         self.raw_batches = [
             list(bs) for bs in self.src_batch_samplers
         ]  # index in original dataset
         self.n_batches = [len(b) for b in self.raw_batches]
         self.n_total_batch = sum(self.n_batches)
-        # print("Total batch num is ", self.n_total_batch)
-        # sampling probability
-        if prob is None:
-            # if not given, decide by dataset length
-            self.prob = torch.tensor(self.n_batches) / self.n_total_batch
+        if self._auto_prob:
+            # Weight by per-dataset batch counts from this materialization.
+            self.prob = torch.tensor(self.n_batches, dtype=torch.double) / max(self.n_total_batch, 1)
         else:
-            self.prob = torch.as_tensor(prob)
-    
+            self.prob = torch.as_tensor(prob, dtype=torch.double)
+
     def __iter__(self):
         """Yields batches of indices in the format of (sample_idx, feat_idx) tuples,
         where indices correspond to ConcatDataset of src_dataset_ls
@@ -358,10 +357,12 @@ class MixedBatchSampler(BatchSampler):
             idx_ds = torch.multinomial(
                 self.prob, 1, replacement=True, generator=self.generator
             ).item()
-            
+
             if 0 == len(self.raw_batches[idx_ds]):
+                # Multi-dataset multinomial can oversample one source and empty its
+                # pool early; refill from the same epoch seed sequence.
                 self.raw_batches[idx_ds] = list(self.src_batch_samplers[idx_ds])
-            
+
             # get a batch from list - this is already in (sample_idx, feat_idx) format
             batch_raw = self.raw_batches[idx_ds].pop()
 
@@ -374,13 +375,16 @@ class MixedBatchSampler(BatchSampler):
                 processed_item = (item[0] + shift, item[1], item[2])
                 processed_batch.append(processed_item)
             yield processed_batch
-        
+
     def set_epoch(self, epoch):
-        """Set epoch for all underlying BatchedRandomSamplers"""
+        """Reseed children and rebuild this epoch's batch lists + length."""
         for sampler in self.src_batch_samplers:
             sampler.set_epoch(epoch)
-        # Reset raw_batches after setting new epoch
         self.raw_batches = [list(bs) for bs in self.src_batch_samplers]
+        self.n_batches = [len(b) for b in self.raw_batches]
+        self.n_total_batch = sum(self.n_batches)
+        if self._auto_prob:
+            self.prob = torch.tensor(self.n_batches, dtype=torch.double) / max(self.n_total_batch, 1)
 
     def __len__(self):
         return self.n_total_batch
