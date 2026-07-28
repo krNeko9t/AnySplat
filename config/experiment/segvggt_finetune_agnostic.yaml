@@ -2,7 +2,7 @@
 # Stage 1: adapt the official SegVGGT checkpoint to CLASS-AGNOSTIC instance
 # segmentation on this repo's manifest datasets (multi-view-consistent instance
 # ids, no semantic labels).  "IGGT end-to-end, minus the background."
-# Usage: python src/main.py experiment=segvggt_finetune_agnostic
+# Usage: python src/main.py +experiment=segvggt_finetune_agnostic
 #
 # Why this is cheap: the loss marginalises the pretrained classifier into
 # objectness, P(object) = 1 - P(no-match) -- no head surgery, no channel is
@@ -37,11 +37,18 @@ data_loader:
 
 model:
   encoder:
-    # REQUIRED: local path to the official checkpoint (segvggt_scannetv2.pt).
     # use_lora must stay true -- the checkpoint carries trained LoRA weights.
-    pretrained_weights: ???
-    num_semantic_classes: 20
-    non_instance_classes: [wall, floor]  # matches official scannetv2.pt (18+1 head)
+    #
+    # num_semantic_classes MUST match the checkpoint's head: width =
+    # (num_semantic_classes - len(non_instance_classes)) + 1.  `_align_state_dict`
+    # drops shape-mismatched tensors with only a warning (strict=False; the sole
+    # hard assert covers query_physgm), so a wrong count here silently leaves the
+    # objectness classifier at random init -- which is exactly the weight this
+    # stage's `class_agnostic` marginalisation is built to reuse.  Checkpoint and
+    # count are pinned together in this file so they cannot drift apart.
+    pretrained_weights: /mnt/storage_pool/liaoyuanjun/hf_home/hub/models--JinyuanQu--SegVGGT/snapshots/5a7818348c1f4978db4a8be904f180575fc2322a/checkpoint/segvggt_scannet200.pt
+    num_semantic_classes: 200
+    non_instance_classes: [wall, floor]  # 200 - 2 + 1 = 199-wide instance head
     instance_query_num: 400
   decoder: null
 
@@ -52,9 +59,8 @@ optimizer:
   warm_up_steps: 200
   backbone_lr_multiplier: 1.0
   # Freeze aggregator (DINO + frame/global incl. pretrained LoRA) + geometry
-  # heads + bare camera/register tokens. Do NOT freeze semantic_head / instance_:
-  # those are exactly what this stage adapts (~487M trainable). A prior draft
-  # wrongly copied physgm's freeze list and zeroed the instance branch.
+  # heads + bare camera/register tokens. semantic_head / instance_ must stay OUT
+  # of this list: they are exactly what this stage adapts (~487M trainable).
   freeze_keywords:
     - patch_embed
     - frame_blocks
@@ -92,5 +98,16 @@ loss:
 
 dataset:
   manifest:
+    # Spelled out in full rather than inherited: config/dataset/manifest.yaml
+    # defaults to an infinigen scene at 288x512 with bounded_fixed's 12 context
+    # views, none of which this stage wants, and every one of those falls back
+    # silently.  Same scannet100 subset as stage 2 (segvggt_physgm) so the two
+    # stages see the same scenes.  physics_parser stays null -- segmentation only.
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
+    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
+    original_image_shape: [690, 920]
+    input_image_shape: [252, 448]
     view_sampler:
+      num_context_views: 4
       num_target_views: 0   # SegVGGT: all supervised frames in context only
+      max_img_per_gpu: 8
