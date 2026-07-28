@@ -222,14 +222,43 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         def _zero():
             return torch.tensor(0.0, device=device, dtype=torch.float32)
 
+        def _zero_with_graph(pred=None) -> Tensor:
+            """Scalar 0 that stays on the autograd graph when predictions exist.
+
+            Bare ``torch.tensor(0.)`` has no grad_fn; with ``lambda_phys`` as the
+            sole live term (``segvggt_physgm``: seg λ=0, only ``query_physgm``
+            trains), an empty-phys-supervision step would then crash on backward.
+            Prefer hanging on ``query_phys_mu/var``; fall back to mask/cls tensors
+            or a requires_grad leaf (same pattern as ``LossPhysGM._zero``).
+            """
+            terms: list[Tensor] = []
+            if pred is not None:
+                mu = getattr(pred, "query_phys_mu", None)
+                var = getattr(pred, "query_phys_var", None)
+                if mu is not None:
+                    terms.append(mu.float().sum())
+                if var is not None:
+                    terms.append(var.float().sum())
+                if not terms:
+                    if getattr(pred, "query_masks", None) is not None:
+                        terms.append(pred.query_masks.float().sum())
+                    if getattr(pred, "query_class_logits", None) is not None:
+                        terms.append(pred.query_class_logits.float().sum())
+            if terms:
+                acc = terms[0]
+                for t in terms[1:]:
+                    acc = acc + t
+                return acc * 0.0
+            return torch.zeros((), device=device, dtype=torch.float32, requires_grad=True)
+
         if depth_dict is None:
-            return _zero()
+            return _zero_with_graph()
         pred = depth_dict.get("segvggt_prediction")
         inst_mask = depth_dict.get("instance_mask")
         if pred is None or inst_mask is None:
-            return _zero()
+            return _zero_with_graph(pred)
         if pred.query_masks is None or pred.query_class_logits is None:
-            return _zero()
+            return _zero_with_graph(pred)
 
         query_masks = pred.query_masks                    # [B, Q, S, h, w]
         query_cls = pred.query_class_logits               # [B, Q, C+1]
@@ -387,7 +416,8 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         # ----- physics: PhysGM formula over the matched, labelled instances -----
         # Same per-property NLL + MSE on z-scored targets as LossPhysGM, so the numbers
         # are directly comparable with the IGGT physgm route.
-        total_phys = _zero()
+        # Start on-graph so an empty-chunk step still backward under physgm-only recipes.
+        total_phys = _zero_with_graph(pred)
         n_phys = 0
         if phys_mu_chunks:
             mu = torch.cat(phys_mu_chunks, dim=0).float()      # [M, P]
