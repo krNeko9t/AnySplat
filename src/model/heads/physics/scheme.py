@@ -41,6 +41,7 @@ class PhysicsSchemeInputs:
     # Point-head intermediate DPT features (class / property cross-attn).
     point_feature: list[Tensor] | None
     instance_mask: Tensor | None  # [B, S, H, W]
+    # Instance-quality mask only (optional). Never pass depth valid_mask here.
     valid_mask: Tensor | None  # [B, S, H, W] (or [..., 1])
 
 

@@ -6,7 +6,8 @@ losses through ``depth_dict`` (the repo's established encoder-only convention):
 
   instance / FADA  (``LossSegVGGT``):
     encoder.segvggt_prediction  -> depth_dict['segvggt_prediction']
-    batch instance_mask/valid   -> depth_dict['instance_mask' / 'instance_valid_mask']
+    batch instance_mask         -> depth_dict['instance_mask']
+    (do NOT reuse depth valid_mask as instance_valid_mask; depth holes ≠ bad labels)
 
   per-query physics (``LossSegVGGT``'s ``lambda_phys`` term, opt-in):
     batch physgm_target         -> depth_dict['physgm_target']
@@ -196,13 +197,10 @@ class SegVGGTWrapper(BaseModelWrapper):
 
         input_image = (batch["context"]["image"] + 1) / 2
         instance_mask = _ctx_views(batch, "instance_mask")
-        valid_mask = _ctx_views(batch, "valid_mask")
 
         encoder_output, _ = self.model(
             input_image,
             self.global_step,
-            instance_mask=instance_mask,
-            valid_mask=valid_mask,
         )
         depth_dict = encoder_output.depth_dict or {}
         depth_dict_for_loss = dict(depth_dict)
@@ -212,8 +210,8 @@ class SegVGGTWrapper(BaseModelWrapper):
             depth_dict_for_loss["segvggt_prediction"] = encoder_output.segvggt_prediction
         if instance_mask is not None:
             depth_dict_for_loss["instance_mask"] = instance_mask
-        if valid_mask is not None:
-            depth_dict_for_loss["instance_valid_mask"] = valid_mask
+        # Do not set instance_valid_mask from depth valid_mask (I1). Depth valid
+        # only belongs in segvggt_geo_target via _geo_target_from_gt.
 
         # ---- per-query physics supervision (LossSegVGGT's lambda_phys term) ----
         # Per-scene instance-id -> property LUTs from the dataset physics parser;
@@ -246,13 +244,10 @@ class SegVGGTWrapper(BaseModelWrapper):
         assert b == 1
 
         inst_mask = batch["context"].get("instance_mask")
-        valid_mask = batch["context"].get("valid_mask")
 
         encoder_output, _ = self.model(
             (batch["context"]["image"] + 1) / 2,
             self.global_step,
-            instance_mask=inst_mask,
-            valid_mask=valid_mask,
         )
         depth_dict = encoder_output.depth_dict or {}
         pred = encoder_output.segvggt_prediction
@@ -280,7 +275,7 @@ class SegVGGTWrapper(BaseModelWrapper):
                 pred.query_masks,
                 pred.query_class_logits,
                 inst_mask,
-                valid_mask,
+                None,  # do not crop instance GT with depth valid_mask
                 score_threshold=VAL_SCORE_THRESHOLD,
             )
             for key, value in metrics.items():

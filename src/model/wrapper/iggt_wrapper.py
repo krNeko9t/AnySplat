@@ -90,13 +90,11 @@ class IGGTWrapper(BaseModelWrapper):
 
         input_image = (batch["context"]["image"] + 1) / 2
         instance_mask = _ctx_views(batch, "instance_mask")
-        valid_mask = _ctx_views(batch, "valid_mask")
 
         encoder_output, _ = self.model(
             input_image,
             self.global_step,
             instance_mask=instance_mask,
-            valid_mask=valid_mask,
         )
         depth_dict = encoder_output.depth_dict or {}
         infos = encoder_output.infos or {}
@@ -109,8 +107,7 @@ class IGGTWrapper(BaseModelWrapper):
             depth_dict_for_loss["instance_feat_map"] = encoder_output.instance_feat_map
         if instance_mask is not None:
             depth_dict_for_loss["instance_mask"] = instance_mask
-        if valid_mask is not None:
-            depth_dict_for_loss["instance_valid_mask"] = valid_mask
+        # Do not set instance_valid_mask from depth valid_mask (I1).
 
         if encoder_output.physics_prediction is not None:
             depth_dict_for_loss["physics_prediction"] = encoder_output.physics_prediction
@@ -145,13 +142,11 @@ class IGGTWrapper(BaseModelWrapper):
         assert b == 1
 
         inst_mask = batch["context"].get("instance_mask")
-        valid_mask = batch["context"].get("valid_mask")
 
         encoder_output, _ = self.model(
             (batch["context"]["image"] + 1) / 2,
             self.global_step,
             instance_mask=inst_mask,
-            valid_mask=valid_mask,
         )
         depth_dict = encoder_output.depth_dict or {}
 

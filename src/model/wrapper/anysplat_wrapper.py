@@ -175,10 +175,8 @@ class AnySplatWrapper(BaseModelWrapper):
             )
             if "instance_feat_map" in depth_dict_ctx:
                 assert depth_dict_ctx["instance_feat_map"].shape[1] == depth_dict_ctx["instance_mask"].shape[1]
-        if "context" in batch and "valid_mask" in batch["context"] and "target" in batch and "valid_mask" in batch["target"]:
-            depth_dict_ctx["instance_valid_mask"] = torch.cat(
-                [batch["context"]["valid_mask"], batch["target"]["valid_mask"]], dim=1,
-            )
+        # Depth valid_mask is not instance_valid_mask (I1): leave instance_valid_mask
+        # unset unless a true instance-quality mask is provided upstream.
 
         with torch.amp.autocast("cuda", enabled=False):
             total_loss, loss_values = self.compute_and_log_losses(

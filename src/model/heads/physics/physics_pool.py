@@ -18,7 +18,9 @@ def pool_instance_features(
     ----------
     feat_map : [B, V, C, H, W]
     instance_mask : [B, V, H, W]
-    valid_mask : optional [B, V, H, W] (or [B, V, H, W, 1])
+    valid_mask : optional instance-*quality* mask [B, V, H, W] (or [..., 1]).
+        False pixels are dropped from pooling.  Must NOT be depth ``valid_mask``
+        (depth holes ≠ untrustworthy instance labels).
     ignore_id : instance id to exclude (default 0)
 
     Returns

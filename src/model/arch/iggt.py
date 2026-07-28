@@ -109,7 +109,6 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
         global_step: int = 0,
         visualization_dump: Optional[dict] = None,
         instance_mask: Tensor | None = None,
-        valid_mask: Tensor | None = None,
     ) -> EncoderOutput:
         device = image.device
         b, v, _, h, w = image.shape
@@ -162,6 +161,8 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
         physics_property_prediction = None
         physgm_prediction = None
         if self.physics_scheme is not None:
+            # valid_mask=None: depth holes ≠ bad instance labels. Pooling is over
+            # RGB/token features; only a true instance-quality mask belongs here.
             slots = self.physics_scheme(
                 PhysicsSchemeInputs(
                     adaptor_features=list(adaptor_out.values()),
@@ -171,7 +172,7 @@ class EncoderIGGT(Encoder["EncoderIGGTCfg"]):
                     patch_size=self._patch_size,
                     point_feature=point_feat_list,
                     instance_mask=instance_mask,
-                    valid_mask=valid_mask,
+                    valid_mask=None,
                 )
             )
             physics_prediction = slots.physics_prediction
@@ -305,7 +306,6 @@ class IGGTModel(nn.Module):
         global_step: int = 0,
         visualization_dump: Optional[dict] = None,
         instance_mask: torch.Tensor | None = None,
-        valid_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[EncoderOutput, None]:
         encoder_output = self.encoder(
@@ -313,7 +313,6 @@ class IGGTModel(nn.Module):
             global_step,
             visualization_dump=visualization_dump,
             instance_mask=instance_mask,
-            valid_mask=valid_mask,
         )
         return encoder_output, None
 
