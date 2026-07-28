@@ -154,13 +154,16 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         The matcher returns row indices into this ordering, so any supervision keyed by
         instance id (e.g. the per-instance physics LUTs) needs ``ids[gt_idx]`` -- the
         raw ``gt_idx`` is a row number, not an id.
+
+        Instances that vanish under ``_downsample_masks`` (area + 0.5) are dropped so
+        Hungarian never sees an empty positive mask paired with an object class target.
         """
         s, H, W = inst_mask_b.shape
         ids = torch.unique(inst_mask_b)
         ids = ids[ids != self.cfg.ignore_id]
         device = inst_mask_b.device
+        h, w = hw
         if ids.numel() == 0:
-            h, w = hw
             return (
                 torch.zeros(0, dtype=torch.long, device=device),
                 torch.zeros(0, s, h, w, device=device),
@@ -169,11 +172,24 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
             )
 
         masks_full = (inst_mask_b[None] == ids[:, None, None, None]).float()  # [K,S,H,W]
+        gt_masks = self._downsample_masks(masks_full, hw)        # [K, S, h, w]
+        # Pred-resolution emptiness: full-res unique can still yield all-zero masks
+        # after area+0.5 (tiny / thin instances). Drop them before matching.
+        keep = gt_masks.reshape(ids.numel(), -1).sum(dim=1) > 0
+        ids = ids[keep]
+        masks_full = masks_full[keep]
+        gt_masks = gt_masks[keep]
+        if ids.numel() == 0:
+            return (
+                torch.zeros(0, dtype=torch.long, device=device),
+                torch.zeros(0, s, h, w, device=device),
+                torch.zeros(0, s, device=device),
+                ids,
+            )
+
         # frame-visibility distribution p_k^gt (area-proportional over S frames)
         per_frame = masks_full.sum(dim=(-1, -2))                 # [K, S]
         visibility = per_frame / per_frame.sum(dim=1, keepdim=True).clamp_min(1e-6)
-
-        gt_masks = self._downsample_masks(masks_full, hw)        # [K, S, h, w]
 
         if self.cfg.class_agnostic or semantic_b is None:
             # class 0 = the "object" column of the marginalised objectness distribution

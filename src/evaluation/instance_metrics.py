@@ -203,6 +203,13 @@ def compute_instance_metrics(
 
     masks_full = (instance_mask[None] == ids[:, None, None, None]).float()  # [K,S,H,W]
     gt = _downsample_binary(masks_full, (h, w)).reshape(k, s * h * w)
+    # Same contract as LossSegVGGT._build_targets: drop instances that are empty at
+    # prediction resolution so AP/IoU are not scored against blank GT masks.
+    nonempty = gt.sum(dim=1) > 0
+    gt = gt[nonempty]
+    k = int(gt.shape[0])
+    if k == 0:
+        return dict(_EMPTY_METRICS)
 
     keep = None
     if valid_mask is not None:
