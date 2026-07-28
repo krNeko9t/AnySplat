@@ -440,7 +440,13 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
         l_js = self.cfg.lambda_js * total_js
         l_phys = self.cfg.lambda_phys * total_phys
         loss = self.cfg.weight * (l_cls + l_mask + l_js + l_phys)
-        loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"[LossSegVGGT step={global_step}] non-finite loss={loss.item()}: "
+                f"cls={total_cls.item()} bce={total_bce.item()} "
+                f"dice={total_dice.item()} js={total_js.item()} "
+                f"phys={total_phys.item()} matched={n_masks} phys_n={n_phys}"
+            )
 
         self.extra_logs.update({
             "loss_segvggt_cls": total_cls.detach(),

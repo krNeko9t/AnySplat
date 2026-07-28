@@ -185,7 +185,9 @@ class HungarianMatcher:
                 pred_frame_attn, gt_visibility
             )
 
-        cost = torch.nan_to_num(cost, nan=0.0, posinf=1e4, neginf=-1e4)
+        # Hungarian minimizes cost: non-finite / ±Inf must be expensive, never 0
+        # (nan→0 would prefer broken query–GT pairs over real positive costs).
+        cost = torch.nan_to_num(cost, nan=1e4, posinf=1e4, neginf=1e4)
         cost_cpu = cost.detach().cpu()
 
         if _HAS_SCIPY:

@@ -74,9 +74,9 @@ class LossSegVGGTGeo(Loss[LossSegVGGTGeoCfg, LossSegVGGTGeoCfgWrapper]):
             lT = huber_loss(cur[..., :3], gt_pose_enc[..., :3])
             lR = huber_loss(cur[..., 3:7], gt_pose_enc[..., 3:7])
             lfl = huber_loss(cur[..., 7:], gt_pose_enc[..., 7:])
-            lT = torch.nan_to_num(lT).clamp(-100, 100).mean()
-            lR = torch.nan_to_num(lR).clamp(-100, 100).mean()
-            lfl = torch.nan_to_num(lfl).clamp(-100, 100).mean()
+            lT = lT.clamp(-100, 100).mean()
+            lR = lR.clamp(-100, 100).mean()
+            lfl = lfl.clamp(-100, 100).mean()
             loss_T = loss_T + w * lT
             loss_R = loss_R + w * lR
             loss_fl = loss_fl + w * lfl
@@ -173,7 +173,11 @@ class LossSegVGGTGeo(Loss[LossSegVGGTGeoCfg, LossSegVGGTGeoCfgWrapper]):
         loss = self.cfg.weight * (
             self.cfg.lambda_camera * l_cam + self.cfg.lambda_depth * l_depth
         )
-        loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"[LossSegVGGTGeo step={global_step}] non-finite loss={loss.item()}: "
+                f"camera={float(l_cam.detach())} depth={float(l_depth.detach())}"
+            )
 
         self.extra_logs = {
             "loss_segvggt_camera": l_cam.detach(),

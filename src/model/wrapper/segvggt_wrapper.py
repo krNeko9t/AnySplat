@@ -34,6 +34,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from src.coord import se3_inv
 from src.dataset.types import BatchedExample
 from src.evaluation.instance_metrics import compute_instance_metrics_batch
 from src.loss import Loss
@@ -158,12 +159,17 @@ class SegVGGTWrapper(BaseModelWrapper):
         intr = _ctx_views(batch, "intrinsics")   # [B, S, 3, 3] normalised
         if extr is None or intr is None:
             return None
-        extr = extr.float()
-        # First-camera canonicalization: view 0 -> identity.
-        extr = torch.linalg.inv(extr[:, :1]) @ extr
-        w2c = torch.linalg.inv(extr)            # camera-from-world
+        # Pose algebra must stay fp32: under bf16-mixed, matmul/@ is autocast
+        # back to BF16 and linalg.inv / pose_enc would break or lose precision.
         image_hw = batch["context"]["image"].shape[-2:]
-        pose_enc = extri_intri_to_pose_encoding(w2c[:, :, :3, :4], intr.float(), image_hw)
+        with torch.autocast(device_type=extr.device.type, enabled=False):
+            extr = extr.float()
+            # First-camera canonicalization: view 0 -> identity.
+            extr = se3_inv(extr[:, :1]) @ extr
+            w2c = se3_inv(extr)  # camera-from-world
+            pose_enc = extri_intri_to_pose_encoding(
+                w2c[:, :, :3, :4], intr.float(), image_hw
+            )
 
         depth = _ctx_views(batch, "depth")        # [B, S, H, W] or [B,S,H,W,1]
         valid = _ctx_views(batch, "valid_mask")
