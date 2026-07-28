@@ -242,12 +242,19 @@ def _strip_lightning_prefix(
 def _remap_segvggt_checkpoint_keys(
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """Prefix official SegVGGT keys (``aggregator.*``) to match ``encoder.model.*``."""
+    """Prefix official SegVGGT bare keys to match ``encoder.model.*``.
+
+    Official ``.pt`` keys look like ``aggregator.*`` / ``camera_head.*``.  Lightning
+    checkpoints (after ``_strip_lightning_prefix``) already use ``encoder.model.*``
+    for the vendored trunk and ``encoder.query_physgm.*`` for sibling modules hung
+    on ``EncoderSegVGGT``.  Only bare keys (no ``encoder.`` prefix) need the
+    ``encoder.model.`` wrap; already-correct ``encoder.*`` keys must stay put.
+    """
     remapped: dict[str, torch.Tensor] = {}
     n_prefix = 0
     for k, v in state_dict.items():
         new_k = k
-        if not new_k.startswith("encoder.model."):
+        if not new_k.startswith("encoder."):
             new_k = "encoder.model." + new_k
             n_prefix += 1
         remapped[new_k] = v
@@ -285,6 +292,33 @@ def _align_state_dicts(
         matched, mismatched, not_in_ckpt, unused,
     )
     return aligned
+
+
+def _assert_query_physgm_coverage(
+    model_sd: dict[str, torch.Tensor],
+    ckpt_sd: dict[str, torch.Tensor],
+    aligned: dict[str, torch.Tensor],
+) -> None:
+    """If the ckpt carries ``query_physgm`` weights, they must all load.
+
+    Catches remap / shape bugs that ``strict=False`` would otherwise swallow
+    (phys head silently stays at random init while backbone looks fully loaded).
+    """
+    ckpt_has_phys = any("query_physgm" in k for k in ckpt_sd)
+    if not ckpt_has_phys:
+        return
+    model_phys = [k for k in model_sd if "query_physgm" in k]
+    if not model_phys:
+        raise RuntimeError(
+            "Checkpoint contains query_physgm weights but the model was built "
+            "without phys_scheme='query_physgm'. Set encoder.phys_scheme=query_physgm."
+        )
+    missing = [k for k in model_phys if k not in aligned]
+    if missing:
+        raise RuntimeError(
+            f"Checkpoint has query_physgm weights but {len(missing)}/{len(model_phys)} "
+            f"failed to load (remap/shape). e.g. {missing[:3]}"
+        )
 
 
 class SegVGGTModel(nn.Module):
@@ -331,11 +365,13 @@ class SegVGGTModel(nn.Module):
         raw_sd = _strip_lightning_prefix(raw_sd)
 
         remapped = _remap_segvggt_checkpoint_keys(raw_sd)
-        aligned = _align_state_dicts(model.state_dict(), remapped)
+        model_sd = model.state_dict()
+        aligned = _align_state_dicts(model_sd, remapped)
+        _assert_query_physgm_coverage(model_sd, remapped, aligned)
 
         missing, unexpected = model.load_state_dict(aligned, strict=False)
         logger.info(
             "[SegVGGTModel.from_checkpoint] loaded %d/%d params (missing=%d, unexpected=%d)",
-            len(aligned), len(model.state_dict()), len(missing), len(unexpected),
+            len(aligned), len(model_sd), len(missing), len(unexpected),
         )
         return model
