@@ -148,12 +148,20 @@ class SegVGGTWrapper(BaseModelWrapper):
     # geometry target
     # ------------------------------------------------------------------ #
     def _geo_target_from_gt(self, batch: BatchedExample) -> dict | None:
-        """Build the geometry target from clean manifest GT (camera + depth)."""
+        """Build the geometry target from clean manifest GT (camera + depth).
+
+        Cameras are expressed in the frame of context view 0
+        (``c2w' = inv(c2w_0) @ c2w``) so pose supervision is relative, matching
+        VGGT / multi-view gauge. Per-view depth is unchanged (camera-local).
+        """
         extr = _ctx_views(batch, "extrinsics")   # [B, S, 4, 4] c2w
         intr = _ctx_views(batch, "intrinsics")   # [B, S, 3, 3] normalised
         if extr is None or intr is None:
             return None
-        w2c = torch.linalg.inv(extr.float())        # camera-from-world
+        extr = extr.float()
+        # First-camera canonicalization: view 0 -> identity.
+        extr = torch.linalg.inv(extr[:, :1]) @ extr
+        w2c = torch.linalg.inv(extr)            # camera-from-world
         image_hw = batch["context"]["image"].shape[-2:]
         pose_enc = extri_intri_to_pose_encoding(w2c[:, :, :3, :4], intr.float(), image_hw)
 
