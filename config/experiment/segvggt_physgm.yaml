@@ -42,7 +42,7 @@ model:
     # num_semantic_classes MUST match whatever produced that checkpoint: head width =
     # (num_semantic_classes - len(non_instance_classes)) + 1, and _align_state_dict
     # drops shape-mismatched tensors with only a warning. 200 == stage 1's setting.
-    pretrained_weights: ???
+    pretrained_weights: output/exp_segvggt_finetune_agnostic/2026-07-28_21-42-50/checkpoints/last.ckpt
     num_semantic_classes: 200
     non_instance_classes: [wall, floor]  # 200 - 2 + 1 = 199-wide instance head
     instance_query_num: 400
@@ -56,7 +56,7 @@ optimizer:
   # The readout head is randomly initialised (small-init last layer), unlike stage 1
   # where nothing was -- so a hotter LR than stage 1's 2e-5 is appropriate.
   lr: 1.0e-4
-  warm_up_steps: 200
+  warm_up_steps: 2000
   backbone_lr_multiplier: 1.0
   # Freeze everything pre-existing: DINO + frame/global blocks (incl. their LoRA),
   # the geometry heads, the semantic head (which owns the instance classifier), and
@@ -86,7 +86,7 @@ train:
   segvggt_geo_supervision: gt
 
 trainer:
-  max_steps: 20000
+  max_steps: 60000
   val_check_interval: 250
   precision: bf16-mixed
   gradient_clip_val: 1.0
@@ -96,7 +96,7 @@ checkpointing:
   load: null
   every_n_train_steps: 1000
   save_weights_only: false
-  save_top_k: 3
+  save_top_k: 1
 
 hydra:
   run:
