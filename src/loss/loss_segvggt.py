@@ -448,14 +448,15 @@ class LossSegVGGT(Loss[LossSegVGGTCfg, LossSegVGGTCfgWrapper]):
                 f"phys={total_phys.item()} matched={n_masks} phys_n={n_phys}"
             )
 
+        device = total_cls.device
         self.extra_logs.update({
             "loss_segvggt_cls": total_cls.detach(),
             "loss_segvggt_bce": total_bce.detach(),
             "loss_segvggt_dice": total_dice.detach(),
             "loss_segvggt_js": total_js.detach(),
-            "loss_segvggt_num_matched": torch.tensor(float(n_masks)),
+            "loss_segvggt_num_matched": torch.tensor(float(n_masks), device=device),
             "loss_segvggt_phys": total_phys.detach(),
-            "segvggt_phys_num": torch.tensor(float(n_phys)),
+            "segvggt_phys_num": torch.tensor(float(n_phys), device=device),
         })
         if global_step % 100 == 0:
             logger.info(

@@ -190,7 +190,7 @@ class AnySplatWrapper(BaseModelWrapper):
                     depth_dict_ctx["depth_map"], depth_dict_ctx["depth_conf"],
                     batch, cxt_depth_weight=self.train_cfg.cxt_depth_weight,
                 )
-                self.log("loss/ctx_depth", loss_depth)
+                self.log("loss/ctx_depth", loss_depth, sync_dist=True)
                 try:
                     loss_values["ctx_depth"] = float(loss_depth.detach().item())
                 except Exception:
@@ -199,10 +199,10 @@ class AnySplatWrapper(BaseModelWrapper):
 
             if distill_infos_ctx is not None and len(distill_infos_ctx) > 0:
                 loss_distill_list = self.loss_distill(distill_infos_ctx, pred_pose_enc_list, output, batch)
-                self.log("loss/distill", loss_distill_list["loss_distill"])
-                self.log("loss/distill_pose", loss_distill_list["loss_pose"])
-                self.log("loss/distill_depth", loss_distill_list["loss_depth"])
-                self.log("loss/distill_normal", loss_distill_list["loss_normal"])
+                self.log("loss/distill", loss_distill_list["loss_distill"], sync_dist=True)
+                self.log("loss/distill_pose", loss_distill_list["loss_pose"], sync_dist=True)
+                self.log("loss/distill_depth", loss_distill_list["loss_depth"], sync_dist=True)
+                self.log("loss/distill_normal", loss_distill_list["loss_normal"], sync_dist=True)
                 for k, v in loss_distill_list.items():
                     if torch.is_tensor(v):
                         try:

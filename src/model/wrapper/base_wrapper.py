@@ -369,7 +369,7 @@ class BaseModelWrapper(LightningModule):
 
         for loss_fn in losses:
             loss = loss_fn.forward(prediction, batch, gaussians, depth_dict, global_step)
-            self.log(f"loss/{loss_fn.name}", loss)
+            self.log(f"loss/{loss_fn.name}", loss, sync_dist=True)
             try:
                 loss_values[loss_fn.name] = float(loss.detach().item())
             except Exception:
@@ -379,7 +379,7 @@ class BaseModelWrapper(LightningModule):
             if isinstance(extra_logs, dict):
                 for k, v in extra_logs.items():
                     if torch.is_tensor(v):
-                        self.log(f"loss/{k}", v)
+                        self.log(f"loss/{k}", v, sync_dist=True)
                         try:
                             loss_values[k] = float(v.detach().item())
                         except Exception:
@@ -395,7 +395,7 @@ class BaseModelWrapper(LightningModule):
         batch: dict,
     ) -> Tensor:
         """Shared end-of-training-step: logging, nan/inf guard, step tracker, GC."""
-        self.log("loss/total", total_loss)
+        self.log("loss/total", total_loss, sync_dist=True)
 
         if (
             self.global_rank == 0
