@@ -209,3 +209,8 @@ deprecated_launch.json
 
 segvggt_finetune_agnostic*copy*
 /checks*
+
+/.agents
+/.claude
+/.codebuddy
+/ref_knowledge
