@@ -53,12 +53,15 @@
 
 <!-- 一行一张已关票：- [票名](tickets/xxx.md)：答案一句话 -->
 
-（空）
+- [实例 margin 的取值](tickets/R1-margin-取值.md)：δ_pull=0.1 / δ_push=1.0 / δ_cross=0.05（球面几何 + IGGT 同组 M=1.0 先例 + 本仓 mvc 先例的有据外推，非论文原值）
+- [跨视角 instance id 是否真的对齐](tickets/R2-跨视角id是否对齐.md)：scannetpp_v2 全局一致、re10k 部分一致（未验证）→ L_cross 按数据源 gating，re10k 只参与 pull/push；实测脚本见 T11
+- [40G 显存装不装得下](tickets/R3-40G显存预算.md)：每卡 1 场景 × 8 视角 @448 可行（峰值 ~28–32GB），必改 `max_img_per_gpu: 24→8`；checkpointing 已硬编码，OOM 砍序 = 视角→6 → 分辨率→384 → voxel_size→0.004
 
 ## Not yet specified
 
 - **训练不收敛时的应对**：等 T9 smoke run 的曲线出来才知道要不要动 warmup / margin / λ_ins。
-- **显存不够时的退路**：gradient checkpointing？FSDP？降视角数上限？取决于 R3 的结论。
+- **显存不够时的退路**：砍序已定（视角→6、分辨率→384、voxel_size→0.004，见 R3）；是否真需要，
+  等 T9 smoke run 的实际占用。
 - **`voxel_size` 要不要调**：现在是 AnySplat 默认 `0.002`，论文没给这个数。体素粒度直接决定
   实例特征的空间分辨率（太粗会糊掉小物体的实例边界），但要有渲染结果才能判断。
 - **8 视角下高斯数量与渲染显存的关系**：`voxelize` 后的高斯数随视角数增长，两路渲染
