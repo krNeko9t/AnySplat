@@ -104,6 +104,25 @@ class EncoderAnySplatCfg:
     voxelize: bool = False
     # N: instance embedding dimension. If 0, instance head is disabled.
     instance_feat_dim: int = 0
+    # Storage dtype of the aggregator's *parameters* (not the autocast compute
+    # dtype, which `trainer.precision` controls independently).
+    #
+    # "bfloat16" is the upstream AnySplat behaviour and stays the default so
+    # existing experiments are bit-identical. It is only safe when the
+    # aggregator is frozen: bf16 has an 8-bit mantissa, so a parameter of
+    # magnitude |w| has ULP ~= |w| * 2**-8, and an AdamW step whose size is
+    # ~lr rounds to a no-op once |w| > lr * 2**8. At the fine-tuning lr this
+    # repo uses for pretrained params (base_lr * backbone_lr_multiplier =
+    # 2e-5), that kills every weight with |w| > ~5e-3 -- ~70% of a ViT-L
+    # weight distribution -- while smaller weights keep updating, so the
+    # backbone is silently and *selectively* frozen with no signal in the
+    # loss curve. Lightning's "bf16-mixed" does not rescue this: it is
+    # autocast only and keeps no fp32 master weights.
+    #
+    # Set "float32" whenever the aggregator is trainable. Costs ~7.3 GB of
+    # extra static memory (params + grads + AdamW moments); pair it with
+    # optimizer sharding. See .scratch/instancesplat/tickets/T11.
+    aggregator_param_dtype: Literal["bfloat16", "float32"] = "bfloat16"
 
 
 def rearrange_head(feat, patch_size, H, W):
@@ -121,7 +140,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         super().__init__(cfg)
         model_full = VGGT.from_pretrained("facebook/VGGT-1B")
         # model_full = VGGT()
-        self.aggregator = model_full.aggregator.to(torch.bfloat16)
+        self.aggregator = model_full.aggregator.to(
+            getattr(torch, cfg.aggregator_param_dtype)
+        )
         self.freeze_backbone = cfg.freeze_backbone
         self.distill = cfg.distill
         self.pred_pose = cfg.pred_pose

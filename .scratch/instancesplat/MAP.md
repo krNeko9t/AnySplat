@@ -61,6 +61,14 @@
   **被证伪**（是 SAM2 track id，构造上全局），`src/dataset/` 全链路零重映射，票里担心的
   「最隐蔽的坑」不存在。但 re10k 的 **id 碰撞残余率无人量化** → $L_{cross}$ 只在
   `scannetpp_v2` 上开，用 `spp_`/`re10k_` 场景名前缀在 loss 层内部逐样本门控。
+- [修复 aggregator bf16 强制转换](tickets/T11-修复aggregator-bf16强制转换.md)：**已修**。
+  `aggregator.to(torch.bfloat16)` 改由新增可选字段 `aggregator_param_dtype`
+  （`Literal["bfloat16","float32"]`，**默认 `bfloat16` = 现状**）驱动，两个既有 yaml 一字未改。
+  实测确认 bug 真实存在，且是「按权重量级**选择性**冻结」而非全冻结：`lr=2e-5` 下真实 909M
+  aggregator 有 **68.5%（≈623M）参数从不更新**，fp32 下 0%。票面「上游是冻结场景所以无害」
+  的假设**被证伪**——上游 AnySplat 自己四个 config 全是 `freeze_backbone: false`，同样中招；
+  救了本仓库的是 `instseg_anysplat.yaml` 自带的 `freeze_backbone: true`。
+  **硬依赖：T7 开 `float32` 之前必须先落 T12 的 ZeRO-1**（静态项 +7.27 GB）。
 - [40G 显存装不装得下](tickets/R3-40G显存预算.md)：**可行，但不是现在这份代码**。8 视角 @448
   全量微调峰值 47–52 GB，缺口 9–14 GB；**给四个 DPT 栈加梯度检查点**（现仅 aggregator 与
   DINOv2 开了）后降到 22–26 GB。步时 2.0–3.5 s，10k steps ≈ 5–8 小时。
@@ -88,3 +96,7 @@
 - **`processed_infinigen` 子集**：论文没用（合成域），引入会让「效果变差」无法归因。
 - **SegVGGT 路线**（算法 #6）：集合预测范式，原型对比学习在它上面无处安放。
 - **改动既有实例路线**：`instseg_anysplat.yaml` / `loss_disc.py` / `loss_mvc.py` 保持原样。
+- **修 `src/model/arch/iggt.py:80` 的同款 bf16 cast**（与 T11 修的是同一个 bug）：
+  地图的载体 arch 锁定 `anysplat`，IGGT 不在本 effort 的路线上，改了没有验证途径。
+  修法照抄 [T11](tickets/T11-修复aggregator-bf16强制转换.md) 即可——谁要训 IGGT 的
+  backbone，先回去看那张票。

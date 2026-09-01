@@ -35,6 +35,14 @@ R3 的结论：8 视角 @448 全量微调峰值 **47–52 GB**，40G 卡缺口 9
    再决定是复用 depth_head 的中间特征还是保留一个精简的 point_head。别为了省显存改坏 PartHead 的输入。
 3. 汇总 R3 findings 里其余的省显存开关，逐项判断本票做不做、还是留给 T7 配置层：
    ZeRO-1、`gradient_as_bucket_view=True`、DPT/LPIPS 走 bf16。
+
+   > **T11 追加的硬依赖：ZeRO-1 在本票里不再是「可选项」，是必做项。**
+   > T11 已把 `aggregator` 的参数 dtype 改成可配（`aggregator_param_dtype`，默认仍 `bfloat16`）。
+   > 但地图的配方要求 backbone 解冻，而 bf16 参数下实测 **68.5%（≈623M）的 backbone 参数
+   > 在 `lr=2e-5` 下永远不更新**——所以 T7 的新 experiment yaml **必然**要开 `float32`。
+   > 开了就是**静态项 +7.27 GB**。R3 算过：配上 ZeRO-1 后静态项 = 11.25 GB，
+   > 反而低于现状的 12.7 GB；**不配 ZeRO-1 就直接开 fp32 会把 R3 的 ✅ 结论推翻**。
+   > 详见 [T11](T11-修复aggregator-bf16强制转换.md) 的「五、留给别的票的两条」。
 4. **澄清并记录**：`frames_chunk_size` 在训练时**完全不省显存**（每块激活都要留给 backward），
    它只对推理有效。这条要写进 `## 解决`，免得后面有人拿它当省显存手段。
 
