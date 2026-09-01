@@ -45,7 +45,7 @@
 | 算力 scaling | 8×A100 40G，有效 batch 4×、lr `2e-4`、iters `10k`、warmup `1k`、cosine | sqrt scaling，偏离已知且可归因 |
 | 监督视角 | `num_target_views: 0`，2–8 个 context view 全部既输入又监督 | 论文 Eq.11 求和上标为输入视角数 |
 | 分辨率 | 长边 448，宽高比五档离散 {0.5, 0.625, 0.75, 0.875, 1.0} | 论文 4.1 是连续采样；离散化是为 40G 显存可预测性，属**有意偏离** |
-| 数据 | InsScene-15K 的 `processed_scannetpp_v2` + `processed_re10k` | 论文 4.1 |
+| 数据 | InsScene-15K 的 `processed_scannetpp_v2` + `processed_re10k`（**re10k 当前加载不了，见 T13**） | 论文 4.1 |
 | loss 权重 | λ_ins=0.01, λ_bd=0.02, λ_p=0.05, (λ_pull,λ_push,λ_cross)=(2,1,2) | 论文 4.1 |
 | $b_i$ 梯度 | **detach** | 论文 3.3「detached in their respective coupling paths」；不 detach 存在抹平 $S_i$ 的作弊通道 |
 
@@ -53,16 +53,28 @@
 
 <!-- 一行一张已关票：- [票名](tickets/xxx.md)：答案一句话 -->
 
-（空）
+- [实例 margin 的取值](tickets/R1-margin-取值.md)：δ_pull=0.2 / δ_push=1.0 / δ_cross=0.3
+  （ℓ2 归一化后的欧氏弦长）。δ_push=1.0 **不是新超参**——`config/loss/mvc.yaml` 已在用，
+  且 IGGT 在同样归一化的 8 维实例特征上用 M=1.0、λ 也是 (2,1)。δ_pull / δ_cross 无任何
+  论文或代码来源，是约束区间内的取点（建议区间 [0.1,0.25] 与 [0.2,0.4]），**待 T9 实测校准**。
+- [跨视角 instance id 是否真的对齐](tickets/R2-跨视角id是否对齐.md)：「re10k 逐帧独立」的猜测
+  **被证伪**（是 SAM2 track id，构造上全局），`src/dataset/` 全链路零重映射，票里担心的
+  「最隐蔽的坑」不存在。但 re10k 的 **id 碰撞残余率无人量化** → $L_{cross}$ 只在
+  `scannetpp_v2` 上开，用 `spp_`/`re10k_` 场景名前缀在 loss 层内部逐样本门控。
+- [40G 显存装不装得下](tickets/R3-40G显存预算.md)：**可行，但不是现在这份代码**。8 视角 @448
+  全量微调峰值 47–52 GB，缺口 9–14 GB；**给四个 DPT 栈加梯度检查点**（现仅 aggregator 与
+  DINOv2 开了）后降到 22–26 GB。步时 2.0–3.5 s，10k steps ≈ 5–8 小时。
 
 ## Not yet specified
 
 - **训练不收敛时的应对**：等 T9 smoke run 的曲线出来才知道要不要动 warmup / margin / λ_ins。
-- **显存不够时的退路**：gradient checkpointing？FSDP？降视角数上限？取决于 R3 的结论。
+  R1 已把 margin 的**可调方向**说清（δ_pull/δ_cross 是区间内取点，δ_push 有独立佐证不要先动），
+  但「该不该调」仍要曲线才能判。
 - **`voxel_size` 要不要调**：现在是 AnySplat 默认 `0.002`，论文没给这个数。体素粒度直接决定
   实例特征的空间分辨率（太粗会糊掉小物体的实例边界），但要有渲染结果才能判断。
-- **8 视角下高斯数量与渲染显存的关系**：`voxelize` 后的高斯数随视角数增长，两路渲染
-  （RGB + 8 维特征）的峰值显存曲线未知。
+  R3 补了一条参考：`0.002` 在 VGGT canonical 尺度下 ≈ 5–6 mm，与 448px 的像素足迹同量级。
+- **T12 做完后是否还需要降视角数**：R3 给的是估算区间，`voxelize_ratio` 是其中不确定度最大
+  的一项。T8 会带回真实锚点、T9 会给训练峰值——**在那之前不预先决定**砍视角数还是砍分辨率。
 
 ## Out of scope
 
