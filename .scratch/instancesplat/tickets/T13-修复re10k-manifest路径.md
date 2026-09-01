@@ -54,3 +54,13 @@ blocked-by: []
 
 在这张票关掉之前，**地图的数据配比事实上是「只有 scannetpp_v2」**。T7 写配置、T9 smoke run、
 T10 全量训练如果在此之前动手，都要按单子集处理，并在各自的 `## 解决` 里写明。
+
+## T8 关闭后追加的现场情报（2026-09-01）
+
+T8 在集群（`/mnt/storage_pool/liaoyuanjun/data/InsScene-15K`）实测：
+`manifest_instancesplat_spp_re10k.jsonl` 里 re10k 的 **5138 条场景路径全部带
+`processed_re10k/` 前缀且文件存在**，val manifest（`manifest_val_instancesplat.jsonl`）
+的 re10k 条目同样正确并可加载。→ **本机现有 manifest 产物已经是修复后的版本**，
+票面描述的路径 bug 在数据侧不复存在。本票剩余工作收缩为：修 `make_manifest_inscene_re10k.py`
+脚本本身（让下次重新生成不再出错）+ stem 配对排查 + 复验，不再需要「重新生成 manifest」
+这一步（除非脚本核查发现现有产物另有问题）。

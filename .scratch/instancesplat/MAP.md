@@ -31,8 +31,11 @@
   `config/model/encoder/anysplat.yaml` 的既有字段语义、SegVGGT 整条线——**一律不动**。
   新能力 = 新 loss 文件 + 新 experiment yaml + `EncoderOutput` / `DecoderOutput` 上默认
   `None` 的新可选字段。
-- **本机无 GPU、无数据集**（`/mnt/shared-storage-gpfs2/...` 未挂载）。所有代码票的验证
-  = CPU 合成张量；所有跑数票（T8/T9/T10）是 HITL，要人在集群上执行。
+- **算力现状（2026-09-01 起更新）**：工作机即集群机——8×A100 40G、conda env `anysplat`、
+  InsScene-15K 在 `/mnt/storage_pool/liaoyuanjun/data/InsScene-15K/`、HF 缓存完整
+  （`lhjiang/anysplat` + `facebook/VGGT-1B` + LPIPS vgg16）。跑数票不再必然 HITL，
+  agent 可直接在本机执行；代码票的验证仍以 CPU 合成张量为准（快、可复现）。
+  网络需走代理 `http://127.0.0.1:51390`。
 - **不要引入论文没有的超参**。凡是偏离论文的取值，必须在票的 `## 解决` 里写明**为什么偏离**。
 
 ### 已锁定的配方（charting session 的共识，不再重开）
@@ -72,6 +75,12 @@
 - [40G 显存装不装得下](tickets/R3-40G显存预算.md)：**可行，但不是现在这份代码**。8 视角 @448
   全量微调峰值 47–52 GB，缺口 9–14 GB；**给四个 DPT 栈加梯度检查点**（现仅 aggregator 与
   DINOv2 开了）后降到 22–26 GB。步时 2.0–3.5 s，10k steps ≈ 5–8 小时。
+- [AnySplat 零样本基线](tickets/T8-AnySplat零样本基线.md)：**已测**（50 val 场景，协议锁定在
+  `scripts/zeroshot_baseline_anysplat.py`）。纯重建 PSNR = 30.29 / 27.98 / 27.03 dB
+  @N=2/4/8（224 对照 31.43 / 28.49 / 27.52）；视角越多越**差**（pose-free 对齐误差累积，
+  非 OOD）。探针：**voxelize_ratio=1.000 处处零合并**——R3 的 [0.16,0.6] 压缩假设被证伪，
+  GS 数线性于视角数；推理峰值显存 3.77 / 4.50 / 6.11 GiB @N=2/4/8。
+  ⚠️ **50 个 val 场景全部在训练 manifest 里**，T7 必须剔除，否则 T10 对照被泄漏污染。
 
 ## Not yet specified
 
@@ -81,8 +90,12 @@
 - **`voxel_size` 要不要调**：现在是 AnySplat 默认 `0.002`，论文没给这个数。体素粒度直接决定
   实例特征的空间分辨率（太粗会糊掉小物体的实例边界），但要有渲染结果才能判断。
   R3 补了一条参考：`0.002` 在 VGGT canonical 尺度下 ≈ 5–6 mm，与 448px 的像素足迹同量级。
+  **T8 实测锚点**：`0.002` 下 voxelize_ratio 恒为 1.000（零合并）——体素化目前是 no-op，
+  「调优压缩比」这个选项不存在了；要么接受无合并，要么显著调大（代价：糊实例边界）。
 - **T12 做完后是否还需要降视角数**：R3 给的是估算区间，`voxelize_ratio` 是其中不确定度最大
-  的一项。T8 会带回真实锚点、T9 会给训练峰值——**在那之前不预先决定**砍视角数还是砍分辨率。
+  的一项。**T8 已带回真实锚点**：该 ratio 实测恒为 1.0（无压缩），且零样本推理峰值
+  3.77/4.50/6.11 GiB @N=2/4/8（b=1、冻结下界）——T12 之后的估算不再依赖 ratio 假设，
+  但训练峰值仍待 T9 实测。
 
 ## Out of scope
 
