@@ -54,8 +54,10 @@ blocked-by: []
 
 在集群（8×A100，conda env `anysplat`）上完成。产物：
 - **脚本（协议载体，T10 复评必须原样复用）**：`scripts/zeroshot_baseline_anysplat.py`
-- 主表：`.scratch/instancesplat/t8_zeroshot/`（`results.json` 逐场景逐指标含 context_indices / `summary.md` / `run.log`）
-- 224×448 对照：`.scratch/instancesplat/t8_zeroshot_224/`（运行日志在 `.scratch/instancesplat/t8_zeroshot_224.log`）
+- 主表：`.scratch/instancesplat/t8_zeroshot_vox/`（`results.json` 逐场景逐指标含
+  context_indices / `summary.md`；日志 `.scratch/instancesplat/t8_zeroshot_vox.log`）
+- 224×448 对照：`.scratch/instancesplat/t8_zeroshot_224_vox/`
+  （日志 `.scratch/instancesplat/t8_zeroshot_224_vox.log`）
 
 ### 1. val 划分（写死）
 
@@ -78,41 +80,56 @@ blocked-by: []
 - 分辨率：长边 448，高按宽高比五档 bin {0.5, 0.625, 0.75, 0.875, 1.0} snap
   （spp 690×920 → 336×448；re10k 360×640 → 280×448）——与地图锁定配方一致
 - 模型：`hf:lhjiang/anysplat`，`instance_feat_dim=0`，`pred_head_type=depth`、
-  `anchor_feat_dim=128`（**对齐 HF 发布 config.json**；repo yaml 默认 point/83 与发布
-  权重不符——脚本内 override，未改任何 yaml），`voxel_size=0.002`
+  `anchor_feat_dim=128`、`voxelize=true`、`voxel_size=0.002`
+  ——**全部对齐 HF 发布 config.json**（repo yaml 默认 point/83 与发布权重不符——
+  脚本内 override，未改任何 yaml）
 - 前向 bf16 autocast（与 trainer `bf16-mixed` 一致），指标 fp32
+- ⚠️ **`voxelize` 必须在脚本里显式设 `True`**：`EncoderAnySplatCfg.voxelize` 默认 `False`
+  （`anysplat.py:104`），且**只有** `config/experiment/*.yaml` 会设 `true`，而本脚本只加载
+  `config/model/encoder/anysplat.yaml`。漏设会走 `anysplat.py:568` 的 `else` 分支
+  （叠加 `render_conf=False` 的全 True mask），使 `voxelize_ratio`
+  退化成 `(h·w·v)/(h·w·v) = 1.000` 的**恒等式而非测量值**——
+  「比值在十几组配置下精确等于 1.000」就是这个错误的指纹。
 
 ### 3. 结果表（bin 分辨率，主表）
 
 | 视角数 | 子集 | PSNR↑ | SSIM↑ | LPIPS↓ | voxelize_ratio | 峰值显存(GiB) |
 |---|---|---|---|---|---|---|
-| 2 | all | 30.29 | 0.9370 | 0.0730 | 1.000 | 3.77 |
-| 2 | spp | 29.31 | 0.9415 | 0.0764 | 1.000 | |
-| 2 | re10k | 31.27 | 0.9325 | 0.0696 | 1.000 | |
-| 4 | all | 27.98 | 0.9091 | 0.1067 | 1.000 | 4.50 |
-| 4 | spp | 25.66 | 0.8926 | 0.1342 | 1.000 | |
-| 4 | re10k | 30.30 | 0.9256 | 0.0793 | 1.000 | |
-| 8 | all | 27.03 | 0.8935 | 0.1168 | 1.000 | 6.11 |
-| 8 | spp | 24.44 | 0.8709 | 0.1487 | 1.000 | |
-| 8 | re10k | 29.62 | 0.9161 | 0.0849 | 1.000 | |
+| 2 | all | 30.41 | 0.9394 | 0.0730 | 0.906 | 3.77 |
+| 2 | spp | 29.37 | 0.9437 | 0.0773 | 0.902 | |
+| 2 | re10k | 31.45 | 0.9350 | 0.0687 | 0.910 | |
+| 4 | all | 28.27 | 0.9140 | 0.1060 | 0.840 | 4.49 |
+| 4 | spp | 25.83 | 0.8971 | 0.1340 | 0.849 | |
+| 4 | re10k | 30.71 | 0.9310 | 0.0779 | 0.830 | |
+| 8 | all | 27.45 | 0.9009 | 0.1157 | 0.769 | 6.08 |
+| 8 | spp | 24.55 | 0.8744 | 0.1500 | 0.815 | |
+| 8 | re10k | 30.35 | 0.9274 | 0.0814 | 0.724 | |
 
-224×448（零样本模型原生训练分辨率）对照：all = 31.43 / 28.49 / 27.52 dB（N=2/4/8）。
+224×448（零样本模型原生训练分辨率）对照：all = 31.53 / 28.70 / 27.89 dB（N=2/4/8），
+ratio = 0.915 / 0.855 / 0.794，峰值显存 3.47 / 3.96 / 4.99 GiB。
 
 ### 4. 两个探针（R3 回填）
 
-- **`voxelize_ratio` = 1.000，处处成立**（三档视角 × 两子集 × 两分辨率，零合并）。
-  R3 估算区间 [0.16, 0.6] **被证伪**：`voxel_size=0.002` 在 VGGT canonical 尺度下
-  小到体素化实际是 no-op，GS 数 = h·w·v **线性于视角数**（8 视角 @336×448 → 1.20M）。
-  显存预算不能指望体素化压缩；「要不要调 voxel_size」从优化项变成了「要么接受 no-op、
-  要么显著调大才可能真的合并」。
-- **峰值显存**（推理、b=1、backbone 冻结的下界）：bin 分辨率 3.77 / 4.50 / 6.11 GiB
-  @N=2/4/8；224 分辨率 3.47 / 3.96 / 5.01 GiB。前向步时 N=8 约 0.3 s（warm）。
+- **`voxelize_ratio` ≈ 0.72–0.92，随视角数单调下降**（all：0.906 / 0.840 / 0.769
+  @N=2/4/8；224 同趋势 0.915 / 0.855 / 0.794）。逐场景分布（bin 分辨率，50 场景）：
+  N=2 中位 0.925（0.622–0.994）、N=4 中位 0.850（0.569–0.960）、N=8 中位 0.799（0.504–0.934）。
+  **体素化不是 no-op，但也不是救命稻草——只省 8–28% 的 GS。**
+  N=2 时的合并上限是 2:1（ratio ≥ 0.5），实测 N=2 中位 0.925
+  ⇒ 压缩**几乎全部来自视角间重叠**，单视角内基本不压。
+  显存预算里「靠体素化压缩」这一项要按真实系数算，且**不能指望它扛住主要压力**。
+- **`scene_scale` 中位 0.98（0.69–2.09）**，即 VGGT canonical 尺度下场景半径 ~1。
+  `voxel_size=0.002` 对应 ~500–1000 格/轴的栅格，相对点密度**不算细到 no-op**。
+- **峰值显存**（推理、b=1、backbone 冻结的下界）：bin 分辨率 3.77 / 4.49 / 6.08 GiB
+  @N=2/4/8；224 分辨率 3.47 / 3.96 / 4.99 GiB。
+  开不开体素化峰值几乎不变——多出的 `torch.unique` + `scatter_add` 没有抬高峰值，
+  所以 R3 分项表里「静态 + 激活」基数这个锚点**仍然有效**。
+  前向步时 N=8 约 0.3–0.5 s（warm）。
 
 ### 5. 现象与判读要点（给 T10）
 
-- **PSNR 随视角数单调下降**（30.29→27.98→27.03）。224 对照同样下降（31.43→28.49→27.52），
+- **PSNR 随视角数单调下降**（30.41→28.27→27.45）。224 对照同样下降（31.53→28.70→27.89），
   说明这是 pose-free 多视角对齐误差随视角累积的真实效应，不是分辨率 OOD
-  （分辨率 OOD 只贡献 ~0.5–1 dB，spp @2 视角最明显：32.02→29.31，-2.7 dB）。
+  （分辨率 OOD 只贡献 ~0.5–1 dB，spp @2 视角最明显：32.12→29.37，-2.75 dB）。
   与论文 Table 1 的 NVS 趋势（视角越多越好）方向相反——协议不同（那边评 held-out
   新视角），不矛盾。
 - 论文 Table 1 AnySplat 的 20.76/20.73/21.14/21.53 是 ScanNet held-out **NVS** 数字，
