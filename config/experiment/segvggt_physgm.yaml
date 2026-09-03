@@ -108,9 +108,14 @@ loss:
     class_agnostic: true
     lambda_phys: 1.0
     phys_mse_weight: 1.0
-    # Segmentation terms off: their modules are frozen, so they would only burn
-    # compute on a matcher whose gradients go nowhere. The match itself is still
-    # computed -- lambda_phys needs it.
+    # Segmentation terms off: their modules are frozen, so a nonzero lambda would
+    # only add gradient traffic that no optimizer step can consume.
+    # NOTE: lambda=0 does NOT skip the forward work. LossSegVGGT.forward builds
+    # BCE/Dice/JS unconditionally (loss_segvggt.py:361-382) and scales by lambda
+    # only at the final sum (:438-442), so this blocks the backward contribution,
+    # not the compute. The Hungarian match (:352) stays live regardless -- it is
+    # what lambda_phys consumes (:391-400), and short-circuiting it would silently
+    # zero the physics term (no error raised, loss just stays flat).
     lambda_cls: 0.0
     lambda_mask: 0.0
     lambda_js: 0.0
