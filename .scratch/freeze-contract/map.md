@@ -60,7 +60,15 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 <!-- 一行一个已关闭的票 -->
 
-（暂无）
+- [01 — 实测当前每份 config 的真实可训集合](issues/01-measure-current-trainable-sets.md)：
+  九份配方的事实基线已落地（[读数](notes/trainable_sets.md) + [逐参数原始记录](notes/raw/)，
+  后者即 03 号票要设计的指纹的样本数据）。七份与 `repo_knowledge.md` 一致；两处不一致：
+  **`segvggt_agnostic_phys_joint` 的实际 lr 比注释高 5 倍**（可训集合完全正确，
+  现有两道护栏抓不到纯数值型偏差 ⇒ 03 号票「指纹要不要带 lr」的实物论据），
+  **`repo_knowledge.md:222` 关于 `freeze_module` 生效条件的一句是错的**（⇒ 02 号票）。
+  另：**bf16 静默冻结在这九份里零次发生**（IGGT 五份都把 bf16 的 aggregator 冻了），
+  06 号票的 dtype 判据是前瞻护栏而非现存 bug；`phys_iggt` 物理阶段仍训几何头 ⇒ 05 号票；
+  stage 链集合关系已算出且今天自洽 ⇒ 05 号票。
 
 ## Not yet specified
 
