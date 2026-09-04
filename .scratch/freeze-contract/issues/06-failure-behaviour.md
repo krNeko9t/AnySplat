@@ -38,7 +38,7 @@ Assignee: krNeko9t
 
 **04 号票的收窄（2026-09-04）**：
 
-- 硬错档**追加一条**：`config/experiment/<X>.freeze.lock` **文件缺失**（22 份全覆盖强制，04 D2）。
+- 硬错档**追加一条**：`config/experiment/locks/<X>.lock` **文件缺失**（路径于 2026-09-04 修订，见 04 D1）（22 份全覆盖强制，04 D2）。
 - **上面第 1 问（逃生门）已被 04 D3 消掉大半**：生成端定成独立 CPU 脚本
   `scripts/freeze_lock.py +experiment=<X>` ⇒ 逃生门天然就是「重生成 lock 并提交」，
   `skip_freeze_check: true` 那种会被滥用成永久开着的 config 开关**不必再考虑**。

@@ -33,8 +33,9 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
    它只占冻结三判据的第三条，机制在另一层（永久 cast ⇒ AdamW 状态也是 bf16），有自己的开关
    与自己的票（07）。管它叫「静默冻结」是比喻，比喻把它偷渡进了本图。dtype 那一列保住的是
    **可见性**：真发生时哈希撞一次，人被迫看一眼。
-3. **`freeze_keywords` 现有两道护栏保留**：零命中 `raise`（`base_wrapper.py:523-525`）、
-   只冻不解冻（`:515-521`）。要补的是第三道：**声明的可训集合 vs 实际的可训集合**。
+3. **`freeze_keywords` 现有两道护栏保留**：零命中 `raise`（`base_wrapper.py:526-527`）、
+   只冻不解冻（`:515-521`）。第三道**已于 2026-09-04 由 09 号票补上**（`setup():533-546`）：
+   声明的可训集合 vs 实际的可训集合。
 4. **冻结入口必须唯一**（2026-09-04 由 [02 号票](issues/02-reconcile-six-schemes.md) 收窄，
    原文是「官方实现一律保留」）。**冻结入口 = config 能拨动的冻结开关**，只有 `freeze_keywords`
    一个。vendored 模型内部的**构造期冻结不变量**（LoRA 冻基座、`mask_token`）不是入口——config
@@ -47,15 +48,15 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 - `docs/repo_knowledge.md:118 / :126 / :148 / :222` — 各 stage 冻结集的**意图**与实测参数量
 
 关键事实：
-- 唯一通用入口 `BaseWrapper.setup()`（`src/model/wrapper/base_wrapper.py:501-528`），
-  匹配是裸子串 `kw in name`（`:512`）。
+- 唯一通用入口 `BaseWrapper.apply_freeze()`（`src/model/wrapper/base_wrapper.py:503-531`，
+  09 号票从 `setup()` 拆出），匹配是裸子串 `kw in name`（`:515`）。
 - `camera_token` = 1×2×1×1024 = **2048**，`register_token` = 1×2×4×1024 = **8192**，共
   **10240**（`aggregator.py:176-177`），`:486` 拼进每帧 token 序列喂给所有输出头。
 - 全仓**只有一个**冻结入口 `freeze_keywords`；三个 arch 文件里 `grep requires_grad` 的全部命中
   都是构造期不变量（AnySplat 侧只有 `aggregator.patch_embed.mask_token` 一个参数 + distill 块）。
 - `cbe93f9`（bf16 dtype 修复）**不在 `fix` 分支上**；`anysplat.py:124`、`iggt.py:80`
   仍是无条件 `.to(torch.bfloat16)`。`arch/segvggt.py` 干净（只用 autocast）。
-- 冻结相关 config 注释共 14 行；告警型长注释集中在 `base_wrapper.py:502-518` +
+- 冻结相关 config 注释共 14 行；告警型长注释集中在 `base_wrapper.py:503-531`（09 号票后的位置）+
   `repo_knowledge.md` 四段。
 - 历史上 freeze 相关修复 commit 共 4 次：`12aaec6`（改为增量式）、`5f1eff7`
   （补 camera_token/register_token）、`7e196e9`（stage-1 误冻 instance 主体）、
@@ -64,6 +65,22 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 ## Decisions so far
 
 <!-- 一行一个已关闭的票 -->
+
+- [09 — 落地指纹 + lock 层](issues/09-implement-lock-layer.md)：
+  **校验层已落地并提交（`b53f7dd`），22 份 lock 全覆盖，四条完成判据逐条实测通过。**
+  `src/freeze_contract.py`（唯一 capture 函数）+ `scripts/freeze_lock.py`（纯 CPU 生成端）+
+  `BaseWrapper.setup()` 末尾校验。22/22 生成成功——**本票列为已知风险的 13 份未验配方无一失手**；
+  再跑一次 diff 为空；**15 份有历史实测的配方逐参数零偏差**（01 的九份 + 08 的六份）；
+  反做 `5f1eff7` 启动硬错且正文 diff 恰好两行；缺 lock 硬错；`stage="test"` 放行；成功不落文件。
+  **三处偏离设计且更好**：(1) 校验比 lock **正文逐行**而非 lock 自己声明的哈希——否则手改正文
+  不改哈希行完全放行，「人签字的文本」与「被执法的文本」可以不是同一个，那是 02/03 反复警告的
+  「守自己的影子」跑进了 lock 文件内部；(2) 冻结实现拆出 `apply_freeze()`，否则生成一份 lock
+  需要先有那份 lock；(3) 免权重从「打三个补丁」收成「config 层清空 `pretrained_weights`」——
+  现场撞到第三条读权重路径（`from_checkpoint` 读集群本地 ckpt），三条路径共用同一个字段。
+  **两条现场事实**：单份生成峰值 **RSS 7.3G**（这就是崩机机制：一个进程内连建多份，62G+7G swap
+  撑不到 22 份，swap 抖死而非 OOM kill ⇒ `--all` 是串行子进程）；`base_wrapper.py:73` 的注释
+  「all others unfrozen」与 02 号票的结论直接相反，已改。
+  **对下游**：→ 10 解除阻塞，且它不能只搬不读——长注释里至少有一条是内容错误。
 
 - [08 — 彻底清除 `freeze_backbone` / `freeze_module`](issues/08-erase-freeze-module.md)：
   **已删净，六份 anysplat 配方逐参数等价实测通过**（[报告](notes/anysplat_migration.md)）。
@@ -100,7 +117,8 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   失败路径与异常正文四要素；→ 10 无新增术语。
 
 - [04 — 契约存哪、怎么写、谁维护](issues/04-where-the-contract-lives.md)：
-  **lock 落 `config/experiment/<X>.freeze.lock`（`<X>` = hydra 的 experiment choice，即 yaml 文件名），
+  **lock 落 `config/experiment/locks/<X>.lock`（`<X>` = hydra 的 experiment choice，即 yaml 文件名；
+  路径 2026-09-04 由 09 号票 session 修订，原为同目录同名的 `<X>.freeze.lock`），
   22 份配方全覆盖、缺 lock = 启动硬错，生成端是独立 CPU 脚本且与校验端共用同一个 capture 函数。**
   身份键不用 `wandb.name`——实测 22 份里 4 份与文件名不等、**两组重名**，重名 = 两份配方共用一份 lock。
   选「全覆盖 + 缺 lock 硬错」而非「有就校验」，因为 02 号票删掉 `freeze_module` 的前提正是「lock 是强制的」，
@@ -154,7 +172,7 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
      「新 arch 怎么被强制纳入」已被 04 D2 直接回答 ⇒ 自动覆盖，新 arch 总以新 experiment config
      的形式到来，而缺 lock 是硬错，它跑不起来直到有人生成并看过一份 lock。 -->
 
-（暂无：本图的雾已散尽，剩余全是已成票的活。）
+（暂无：本图的雾已散尽，剩余只剩 [10 号票](issues/10-converge-docs-and-comments.md) 一张已成票的活。）
 
 ## Out of scope
 

@@ -33,9 +33,18 @@ Assignee: krNeko9t
 
 ### D1 · 身份键 = hydra 的 experiment choice，一份 experiment 恰好一份 lock
 
-lock 落 **`config/experiment/<X>.freeze.lock`**，`<X>` 就是 `+experiment=<X>` 里的那个名字
-（= yaml 文件名）。与配方同目录同名 ⇒ 改配方与改 lock 落在同一次 `git diff` 里并排，正是
-03 号票把 `freeze_keywords` 原文写进 lock 头部时想要的那个并排。
+lock 落 **`config/experiment/locks/<X>.lock`**（**路径于 2026-09-04 修订，见本节末**），
+`<X>` 就是 `+experiment=<X>` 里的那个名字（= yaml 文件名）。改配方与改 lock 落在同一次
+`git diff` 里并排，正是 03 号票把 `freeze_keywords` 原文写进 lock 头部时想要的那个并排。
+
+> **路径修订（2026-09-04，09 号票 session）**：原定 `config/experiment/<X>.freeze.lock`，
+> 即与 yaml **同目录同名**。用户提出该目录会从 22 个条目涨到 44 个、且 `<X>.lock` 与
+> `<X>.yaml` 交错排列，找 yaml 的实际成本翻倍——属实。改落同目录下的 `locks/` 子目录。
+> **本修订不动 D1 的任何一条实质决策**：身份键仍是 experiment yaml 的文件名（`wandb.name`
+> 仍被实测证伪）、仍一份配方一份 lock、仍不按结构维度分岔；变的只有路径公式。
+> 现场实测确认 hydra 对 config group 目录里只含非 yaml 文件的子目录无感（`locks/a.lock`
+> 存在时 `+experiment=a` 正常 compose），所以子目录方案没有 hydra 层面的代价。
+> 扩展名同时从 `.freeze.lock` 简化为 `.lock`——目录名已经说了它是什么。
 
 **`wandb.name` 被实测证伪，不可作身份键**（本票现场核对 22 份）：4 份与文件名不等
 （`multi-dataset`→`multidataset-16gpu`、`scannetpp`→`vggt-mdataset-new-scannetpp-dynamic_batchsampler`、
