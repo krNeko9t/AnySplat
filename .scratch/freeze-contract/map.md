@@ -66,6 +66,20 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 <!-- 一行一个已关闭的票 -->
 
+- [04 — 契约存哪、怎么写、谁维护](issues/04-where-the-contract-lives.md)：
+  **lock 落 `config/experiment/<X>.freeze.lock`（`<X>` = hydra 的 experiment choice，即 yaml 文件名），
+  22 份配方全覆盖、缺 lock = 启动硬错，生成端是独立 CPU 脚本且与校验端共用同一个 capture 函数。**
+  身份键不用 `wandb.name`——实测 22 份里 4 份与文件名不等、**两组重名**，重名 = 两份配方共用一份 lock。
+  选「全覆盖 + 缺 lock 硬错」而非「有就校验」，因为 02 号票删掉 `freeze_module` 的前提正是「lock 是强制的」，
+  且它把第三种故障形态（**忘了写 `freeze_keywords`**）也纳入——与 03 选全量参数同一条理由：
+  **不能让「没有」和「被冻了」同形**。生成端不走 `src/main.py`，因为那要起一遍 Trainer 才到 `setup()`，
+  把纯 CPU 的事绑死在 GPU 节点上。
+  **文档三分**：术语（冻结三判据 / 冻结入口 vs 构造期不变量 / 指纹 / lock / bf16 死参数不是冻结）
+  进**新建的根 `CONTEXT.md`**，机制现状并进 `docs/repo_knowledge.md`，`freeze_research.md` 整份删。
+  术语单列是因为 02 与 03 是**同一个错误跑在代码层和概念层**，术语表是防它的常驻器官。
+  **对下游的约束**：→ 06 硬错档追加「lock 缺失」，逃生门收缩为「重生成并提交」（`skip_freeze_check`
+  出局）；→ [09 号票](issues/09-implement-lock-layer.md) 实现；→ [10 号票](issues/10-converge-docs-and-comments.md) 文档与长注释。
+
 - [03 — 可训参数指纹里放什么](issues/03-what-goes-in-the-fingerprint.md)：
   **一个捕获点（`setup()` 末尾）、覆盖全量参数、一行一参数按 name 排序的定宽文本、顶部一个哈希、
   零个 if。** 字段 = `requires_grad` + `dtype` + `numel` + `name`；头部 = experiment / arch /
@@ -102,10 +116,12 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 ## Not yet specified
 
-- **长注释怎么收敛**：哪些告警注释在指纹层落地后变成冗余可删、哪些必须留。指纹的**形态**
-  已由 03 定死（结构哈希一档硬错，别无断言），但注释的去处取决于**契约文档存哪、有没有术语一节**
-  ⇒ 现在等的是 04，不再是 03。
-- **新 arch 怎么被强制纳入**：将来加第四个 arch 时，指纹层是自动覆盖还是要手工接线。
+<!-- 04 号票（2026-09-04）清掉了原有的两条：
+     「长注释怎么收敛」已可精确表述 ⇒ 毕业为 [10 号票](issues/10-converge-docs-and-comments.md)；
+     「新 arch 怎么被强制纳入」已被 04 D2 直接回答 ⇒ 自动覆盖，新 arch 总以新 experiment config
+     的形式到来，而缺 lock 是硬错，它跑不起来直到有人生成并看过一份 lock。 -->
+
+（暂无：本图的雾已散尽，剩余全是已成票的活。）
 
 ## Out of scope
 
