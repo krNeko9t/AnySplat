@@ -27,9 +27,12 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
    （`src/model/segvggt/models/aggregator.py:182-234`），SegVGGT 路线因此**无法用一个
    `aggregator` handle 冻底座**，被迫逐子模块枚举——换任何声明式语法照样要枚举。
    会咬人的是"枚举漏了没人发现"，那是校验问题。
-2. **指纹必须超出 `requires_grad`**。只查 `requires_grad` 是假的安全感：`cbe93f9`
-   记录的 bf16 永久 cast 让 68.5%（≈623M）参数 50 步后从不更新，`requires_grad=True`
-   全程为真，loss 曲线看不出来。dtype 是第二真相源。
+2. **指纹超出 `requires_grad`，但只作记录**（2026-09-04 由 [03 号票](issues/03-what-goes-in-the-fingerprint.md) 收窄，
+   原文是「dtype 是第二真相源」）。`dtype` 进指纹、进哈希，**不设任何断言**——bf16 死参数
+   （`cbe93f9`：68.5%≈623M 参数 50 步后从不更新，`requires_grad=True` 全程为真）**不是冻结**，
+   它只占冻结三判据的第三条，机制在另一层（永久 cast ⇒ AdamW 状态也是 bf16），有自己的开关
+   与自己的票（07）。管它叫「静默冻结」是比喻，比喻把它偷渡进了本图。dtype 那一列保住的是
+   **可见性**：真发生时哈希撞一次，人被迫看一眼。
 3. **`freeze_keywords` 现有两道护栏保留**：零命中 `raise`（`base_wrapper.py:523-525`）、
    只冻不解冻（`:515-521`）。要补的是第三道：**声明的可训集合 vs 实际的可训集合**。
 4. **冻结入口必须唯一**（2026-09-04 由 [02 号票](issues/02-reconcile-six-schemes.md) 收窄，
@@ -63,6 +66,19 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 <!-- 一行一个已关闭的票 -->
 
+- [03 — 可训参数指纹里放什么](issues/03-what-goes-in-the-fingerprint.md)：
+  **一个捕获点（`setup()` 末尾）、覆盖全量参数、一行一参数按 name 排序的定宽文本、顶部一个哈希、
+  零个 if。** 字段 = `requires_grad` + `dtype` + `numel` + `name`；头部 = experiment / arch /
+  `freeze_keywords` 原文 / `base_lr` / 哈希（不记 git commit）。选全量而非可训子集，是因为
+  **可训子集分不清「被冻了」和「不存在了」**。选定宽文本而非 JSON，是因为 lock 唯一的读者场景是
+  `git diff`——`5f1eff7` 那类故障在 diff 里就该是**一行**。
+  **砍掉两样**：(1) **`lr`/分组判等整个出图**（它要两点捕获 + 双哈希 + 四元组，是 round 2 全部
+  结构性复杂度的来源，且 `lr` 不占冻结三判据的任何一条 ⇒ Out of scope；`base_lr` 只记进头部、
+  不判等，留可见性扔执法）；(2) **dtype 的专门断言整条撤销**（06 号票那条判据自己就要一个
+  「只算进了优化器的」分支 if，是在为另一层的机制擦屁股）。据此收窄 Notes 第 2 条（见上）。
+  **对下游的约束**：→ 04 正文形态与字段已定，04 只决定存放位置/生成流程/是否强制；
+  → 06 dtype 判据整条删除，失败行为只剩「结构哈希不符 = 硬错」一档；→ 07 与本图脱钩。
+
 - [02 — 六种冻结实现：哪些留、哪些记录、哪些删](issues/02-reconcile-six-schemes.md)：
   **`freeze_backbone`/`freeze_module` 判定彻底清除**（→ [08 号票](issues/08-erase-freeze-module.md)）。
   它确是 AnySplat 官方上游代码（`8d6180e`，逐字未改，用它的 4 份 config 同出该 commit），但也确是
@@ -86,11 +102,18 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 ## Not yet specified
 
-- **长注释怎么收敛**：哪些告警注释在指纹层落地后变成冗余可删、哪些必须留。等指纹层的
-  实际形态出来才判断得了。
+- **长注释怎么收敛**：哪些告警注释在指纹层落地后变成冗余可删、哪些必须留。指纹的**形态**
+  已由 03 定死（结构哈希一档硬错，别无断言），但注释的去处取决于**契约文档存哪、有没有术语一节**
+  ⇒ 现在等的是 04，不再是 03。
 - **新 arch 怎么被强制纳入**：将来加第四个 arch 时，指纹层是自动覆盖还是要手工接线。
 
 ## Out of scope
+
+- **`lr` / `param_groups` 的判等**（2026-09-04 由 [03 号票](issues/03-what-goes-in-the-fingerprint.md) 划出）：
+  冻结的三条判据是不建计算图、不进优化器、权重不变；`lr` 一条都不占。把它纳入判等要付两点捕获
+  （分组的真相源在 wrap **之后**的 `configure_optimizers`）+ 双哈希 + lr 四元组的代价。
+  F1（`segvggt_agnostic_phys_joint` 实际 lr 比注释高 5 倍）的真身是「注释里的 base lr 过期了」，
+  属配方审查，不由冻结层持枪站岗。`base_lr` 仍记进 lock 头部（不参与哈希、不判等）保留可见性。
 
 - **把 `instance_*` 搬出 `Aggregator`**：物理上能让 backbone 变成可整体冻的干净模块，
   但要改 vendored 结构 + 全量 ckpt 键 remap + 与上游彻底分叉。距 ICLR 截止 22 天，纯风险。
