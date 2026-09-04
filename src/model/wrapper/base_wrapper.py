@@ -27,6 +27,7 @@ from torch import Tensor, nn
 
 from src.dataset.data_module import get_data_shim
 from src.dataset.types import BatchedExample
+from src import freeze_contract
 from src.global_cfg import get_cfg
 from src.loss import Loss
 from src.misc.benchmarker import Benchmarker
@@ -69,8 +70,9 @@ class OptimizerCfg:
     new_param_keywords: list[str] = field(
         default_factory=lambda: ["gaussian_param_head", "interm"]
     )
-    # Single source of truth for freezing when non-empty: params matching any
-    # keyword are frozen, all others unfrozen. Applied in BaseWrapper.setup().
+    # The only config-driven freezing entry point. Params whose name contains any
+    # keyword are frozen; nothing is ever unfrozen, so construction-time freezing
+    # invariants (LoRA base weights, mask_token) survive. Applied in apply_freeze().
     freeze_keywords: list[str] = field(default_factory=list)
     # Declarative LR groups. First match wins. Unmatched params use backbone_lr_multiplier.
     # When non-empty, overrides new_param_keywords logic.
@@ -498,14 +500,15 @@ class BaseModelWrapper(LightningModule):
 
     # ---- Optimizer ----
 
-    def setup(self, stage: str) -> None:
-        # requires_grad must reach its final state here: setup() runs before the
-        # strategy wraps the module, while configure_optimizers runs after. The
-        # DDP reducer only registers params that require grad at wrap time, so a
-        # flip after wrapping either breaks or silently skips grad sync.
+    def apply_freeze(self) -> None:
+        """Apply ``freeze_keywords``. The only place ``requires_grad`` reaches its
+        final state, and the only mutation ``setup()`` performs.
+
+        Split out from ``setup()`` so ``scripts/freeze_lock.py`` can reach the same
+        final state without tripping the check it is generating the lock for. One
+        freeze implementation, two callers.
+        """
         freeze_kw = list(self.optimizer_cfg.freeze_keywords or [])
-        if not freeze_kw:
-            return
         hit_counts = dict.fromkeys(freeze_kw, 0)
         n_frozen = 0
         for name, param in self.named_parameters():
@@ -526,6 +529,26 @@ class BaseModelWrapper(LightningModule):
             for kw, n in hit_counts.items():
                 logger.info("[setup] freeze keyword %r -> %d params", kw, n)
             logger.info("[setup] frozen %d params total", n_frozen)
+
+    def setup(self, stage: str) -> None:
+        # setup() runs before the strategy wraps the module, while
+        # configure_optimizers runs after. The DDP reducer only registers params
+        # that require grad at wrap time, so a flip after wrapping either breaks
+        # or silently skips grad sync -- both the freeze and its check belong here.
+        self.apply_freeze()
+
+        # Trainable-parameter fingerprint check. This is requires_grad's final
+        # state and the last moment before the strategy wraps the module.
+        # The only gate is stage == "fit": all three freezing criteria (no graph,
+        # no optimizer entry, weights unchanged) are training-time notions, and
+        # under "test" there is no optimizer for the guard to protect. fast_dev_run
+        # and the sanity check get no exemption.
+        if stage == "fit":
+            freeze_contract.verify(
+                self,
+                experiment=freeze_contract.experiment_name(),
+                output_path=self.train_cfg.output_path,
+            )
 
     def configure_optimizers(self):
         cfg = self.optimizer_cfg
