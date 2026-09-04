@@ -66,6 +66,23 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 <!-- 一行一个已关闭的票 -->
 
+- [06 — 校验失败时做什么](issues/06-failure-behaviour.md)：
+  **硬错三条（哈希不符 / lock 缺失 / 零命中）、只记录一条（`base_lr` 与 dtype 列）、无 warn 档；
+  逃生门不设确认仪式；只在 `stage == "fit"` 校验，`fast_dev_run` 与 sanity check 零豁免。**
+  开场划掉候选清单里的「跨 stage 约束被违反」——05 出图后这条判据不存在。逃生门选静默覆盖 + 无条件
+  打印差异，因为 04 D4 已把签字定位在 **git diff**（可 review、可回溯），终端 `--yes` 是在信息量
+  更少的地方再签一次，且拦不住「人本来就想改」，还会让批量重生成在无 TTY 下卡死。
+  打印位置选 rank 0 logger、不进 TB text（错在 step 0 之前 raise，永远没有曲线），成功时不落文件
+  （lock 已在 git 里）；但**失败时**把实测指纹全文写进 run 目录并在报错里点名——mismatch 常在远程
+  节点上，若差异来自环境，本地重跑复现不出来，那份全文是唯一证据。报错正文必须点名
+  experiment / lock 路径 / 重生成命令 / 头几行差异。
+  只守 fit 是因为**冻结三判据全是训练期概念**：`mode == "test"` 下没有优化器，护栏守的是空气，
+  而拦住「拿老 ckpt 复现一个数字」会逼人去找真的逃生门——D2 靠「跑不起来」立威，前提是每次都拦对。
+  **现场发现**：`base_wrapper.py:507-508` 的 `if not freeze_kw: return` 必须删，否则 13 份不设
+  `freeze_keywords` 的配方走不到校验点，04 D2 当场失效。
+  **对下游的约束**：→ [09 号票](issues/09-implement-lock-layer.md) 得到校验端挂点、门条件、
+  失败路径与异常正文四要素；→ 10 无新增术语。
+
 - [04 — 契约存哪、怎么写、谁维护](issues/04-where-the-contract-lives.md)：
   **lock 落 `config/experiment/<X>.freeze.lock`（`<X>` = hydra 的 experiment choice，即 yaml 文件名），
   22 份配方全覆盖、缺 lock = 启动硬错，生成端是独立 CPU 脚本且与校验端共用同一个 capture 函数。**

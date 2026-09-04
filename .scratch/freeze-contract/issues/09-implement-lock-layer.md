@@ -42,3 +42,15 @@ Blocked by: 06
 跨 stage 校验已整票划出 scope。**本票不需要为它预留任何接口**：03 定的指纹正文已经是
 逐参数名，两份 lock 求交本就够用。将来真要建，它是一个**读两份 lock 的独立脚本**，
 不回改指纹格式、不改本票的 capture 函数。
+
+---
+
+## 06 号票的收窄（2026-09-04）
+
+- **校验端的门**：唯一条件是 `stage == "fit"`（06 D4）。`fast_dev_run` / sanity check 不豁免（06 D3）。
+- **必须删掉 `base_wrapper.py:507-508` 的 `if not freeze_kw: return`**——否则 13 份不设
+  `freeze_keywords` 的配方走不到校验点，04 D2 的「22 份全覆盖」当场失效。
+- **硬错三条**：结构哈希与 lock 不符 / lock 文件缺失 / `freeze_keywords` 零命中（已有）。无 warn 档。
+- **失败路径**：把实测到的指纹全文写进 run 目录（`cfg.train.output_path`，`src/main.py:66`），
+  异常正文点名四样——experiment 名 / lock 路径 / 重生成命令原文 / 头几行差异。成功时不落任何文件。
+- **生成端**：不设 `--yes`、不做交互确认，但无条件把新旧差异打到 stdout（06 D1）。

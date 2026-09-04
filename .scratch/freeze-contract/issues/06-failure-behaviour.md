@@ -1,8 +1,9 @@
 # 06 — 校验失败时做什么
 
 Type: grilling
-Status: open
+Status: closed
 Blocked by: 03, 04 (both closed)
+Assignee: krNeko9t
 
 ## Question
 
@@ -43,3 +44,64 @@ Blocked by: 03, 04 (both closed)
   `skip_freeze_check: true` 那种会被滥用成永久开着的 config 开关**不必再考虑**。
   剩下要决的只是：重生成时要不要**强制人确认**（如打印 diff 并要求 `--yes`），还是静默覆盖靠 git diff 兜。
 - ⇒ 本票实际待决面 = 逃生门的确认仪式 + 打印位置（第 2 问）+ `fast_dev_run`（第 3 问）。
+
+---
+
+## 解决（2026-09-04）
+
+一轮定完。开场先修掉候选清单里两处过期：
+
+- **硬错档删掉「跨 stage 约束被违反」**——05 号票整票出图，本图不存在这条判据。
+- **硬错档实际只剩三条**：结构哈希与 lock 不符 / lock 文件缺失（04 D2）/ `freeze_keywords`
+  零命中（`base_wrapper.py:523-525` 已有）。**只记录档一条**：`base_lr` 与 dtype 列（进 lock
+  但不参与判等）。分档到此封口。
+
+### D1 · 逃生门无确认仪式：静默覆盖，脚本无条件打印差异
+
+`scripts/freeze_lock.py` 重生成时**不设 `--yes`、不做交互确认**，但无条件把新旧差异打到 stdout。
+
+04 D4 第 4 步已经把「签字」定位在 **git diff** 上——那是信息量最大、可 review、可回溯的地方。
+终端里的 `--yes` 是在信息量更少的地方再签一次，且拦不住真正的失败模式：人本来就想改，敲 `y`
+是肌肉记忆。附带代价是实的——交互式确认会让批量重生成 22 份在 CI / 无 TTY 下卡死。
+打印差异保留全部收益（人当场看见），不付那个代价。
+
+### D2 · 打印位置：rank 0 logger 一条；**失败时**把实测指纹全文落进 run 目录
+
+- **不进 TensorBoard text**：TB text 的读者是事后看曲线的人，而本错在 step 0 之前 raise，
+  永远不会有曲线。
+- **成功时不落任何文件**：lock 已在 git 里，run 目录再存一份副本没有读者。
+- **失败时落盘，且在报错里点名该路径**：mismatch 常发生在远程 GPU 节点，人手里只有仓库那份
+  lock；若差异来自环境（如 torch 版本改了参数名），本地重跑 CPU 脚本复现不出来，**那份实测
+  全文是唯一证据**。
+
+**报错正文必须点名四样**（不接受只说 "hash mismatch"）：experiment 名 / lock 路径 /
+重生成命令原文 / 头几行差异。
+
+### D3 · `fast_dev_run` / sanity check：一律跑，零豁免
+
+一次 `named_parameters()` 遍历加一个 sha256，毫秒级，省不出东西。而任何豁免都是逃生门的马甲：
+`fast_dev_run=1` 会当场变成「绕过冻结检查」的标准姿势——正是 04 D3 拒绝 `skip_freeze_check`
+时要避免的形状。且 sanity check 恰恰是人最想确认「这次冻对了」的时刻。
+
+### D4 · 校验只在 `stage == "fit"`；test / validate / predict 跳过
+
+`trainer.test`（`src/main.py:152`）同样触发 `setup()`，所以「何时校验」不止 `fast_dev_run`
+一问，是 fit / test 两条路径。**只守 fit。**
+
+冻结的三条判据（不建计算图 / 不进优化器 / 权重不变）**全部是训练期概念**；`mode == "test"`
+下没有优化器，`requires_grad` 不产生任何后果，护栏在那里守的是空气。而代价是实的：拿老 ckpt
+复现一个数字是完全正当的动作，被一个训练期契约拦住，人就会去找**真的**逃生门——D2 的强制性
+靠「跑不起来」立威，前提是它拦的每一次都拦对。跳过 test 不漏任何东西：绕过校验的唯一收益是
+「只做评测」，而评测什么都不训。
+
+### 现场发现（→ 09 的隐藏前提）
+
+`base_wrapper.py:507-508` 现有 `if not freeze_kw: return` 的提前返回。04 D2 要求 22 份全覆盖
+⇒ **这个 return 必须删**，否则 13 份不设 `freeze_keywords` 的配方永远走不到校验点，D2 当场失效。
+
+### 对下游票的约束输入
+
+→ **09**：校验端挂在 `setup()` 且以 `stage == "fit"` 为唯一门（D4）；删除 `:507-508` 提前返回；
+失败路径要写实测全文进 run 目录（`cfg.train.output_path`，`src/main.py:66`）并在异常正文点名
+四要素（D2）；生成端不设交互确认但必须打印差异（D1）。
+→ **10**：本票未新增术语，D4 的三分方案规格不变。
