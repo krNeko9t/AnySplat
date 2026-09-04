@@ -30,8 +30,9 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 2. **指纹超出 `requires_grad`，但只作记录**（2026-09-04 由 [03 号票](issues/03-what-goes-in-the-fingerprint.md) 收窄，
    原文是「dtype 是第二真相源」）。`dtype` 进指纹、进哈希，**不设任何断言**——bf16 死参数
    （`cbe93f9`：68.5%≈623M 参数 50 步后从不更新，`requires_grad=True` 全程为真）**不是冻结**，
-   它只占冻结三判据的第三条，机制在另一层（永久 cast ⇒ AdamW 状态也是 bf16），有自己的开关
-   与自己的票（07）。管它叫「静默冻结」是比喻，比喻把它偷渡进了本图。dtype 那一列保住的是
+   它只占冻结三判据的第三条，机制在另一层（永久 cast ⇒ AdamW 状态也是 bf16）。管它叫「静默
+   冻结」是比喻，比喻把它偷渡进了本图。**07 号票已于 2026-09-04 整票判出 scope**（见
+   Out of scope），本图对它零承诺、零动作。dtype 那一列保住的是
    **可见性**：真发生时哈希撞一次，人被迫看一眼。
 3. **`freeze_keywords` 现有两道护栏保留**：零命中 `raise`（`base_wrapper.py:526-527`）、
    只冻不解冻（`:515-521`）。第三道**已于 2026-09-04 由 09 号票补上**（`setup():533-546`）：
@@ -54,8 +55,15 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   **10240**（`aggregator.py:176-177`），`:486` 拼进每帧 token 序列喂给所有输出头。
 - 全仓**只有一个**冻结入口 `freeze_keywords`；三个 arch 文件里 `grep requires_grad` 的全部命中
   都是构造期不变量（AnySplat 侧只有 `aggregator.patch_embed.mask_token` 一个参数 + distill 块）。
-- `cbe93f9`（bf16 dtype 修复）**不在 `fix` 分支上**；`anysplat.py:124`、`iggt.py:80`
-  仍是无条件 `.to(torch.bfloat16)`。`arch/segvggt.py` 干净（只用 autocast）。
+- `cbe93f9`（bf16 dtype 修复）**不在 `fix` 分支上**；`anysplat.py:113`、`iggt.py:80`
+  仍是无条件 `.to(torch.bfloat16)`，且**按 07 号票的出图结论原样保留**。
+  `arch/segvggt.py` 干净（只用 autocast）。`iggt.py:80` 那行经 `git log -L` 溯到
+  `8bace2c` — 是本仓自己写的，**上游 IGGT 并无此 cast**。
+- **可训的 bf16 aggregator 参数命中 5/22 份配方**（2026-09-04 按 09 的 22 份 lock 统计，
+  取代 01 号票「九份里零次发生」的过期读数）：`instseg_small` 1209 个 / **909.1M**
+  （占其 12.49 亿可训参数的 72.8%，`base_lr: 1e-5`），`co3d`/`dl3dv`/`multi-dataset`/
+  `scannetpp` 各 866 个。**这是本图产物证伪本图事实底座的一次**，靠的是 03 保留的 dtype 列。
+  它不改变任何冻结判据 ⇒ 归训练精度策略，见 Out of scope。
 - 冻结相关 config 注释共 14 行；告警型长注释集中在 `base_wrapper.py:503-531`（09 号票后的位置）+
   `repo_knowledge.md` 四段。
 - 历史上 freeze 相关修复 commit 共 4 次：`12aaec6`（改为增量式）、`5f1eff7`
@@ -161,7 +169,8 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   **`segvggt_agnostic_phys_joint` 的实际 lr 比注释高 5 倍**（可训集合完全正确，
   现有两道护栏抓不到纯数值型偏差 ⇒ 03 号票「指纹要不要带 lr」的实物论据），
   **`repo_knowledge.md:222` 关于 `freeze_module` 生效条件的一句是错的**（⇒ 02 号票）。
-  另：**bf16 静默冻结在这九份里零次发生**（IGGT 五份都把 bf16 的 aggregator 冻了），
+  另：**bf16 死参数在这九份里零次发生**（IGGT 五份都把 bf16 的 aggregator 冻了）——
+  **此读数已于 2026-09-04 在 22 份上被推翻，见事实底座**；
   06 号票的 dtype 判据是前瞻护栏而非现存 bug；`phys_iggt` 物理阶段仍训几何头 ⇒ 05 号票；
   stage 链集合关系已算出且今天自洽 ⇒ 05 号票。
 
@@ -193,6 +202,15 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   （分组的真相源在 wrap **之后**的 `configure_optimizers`）+ 双哈希 + lr 四元组的代价。
   F1（`segvggt_agnostic_phys_joint` 实际 lr 比注释高 5 倍）的真身是「注释里的 base lr 过期了」，
   属配方审查，不由冻结层持枪站岗。`base_lr` 仍记进 lock 头部（不参与哈希、不判等）保留可见性。
+
+- **bf16 死参数 / 永久 `.to(bfloat16)`**（2026-09-04 由 [07 号票](issues/07-bf16-silent-freeze.md) 划出，
+  该票整票关闭）：它只占冻结三判据的第三条，机制在另一层，属**训练精度策略**。
+  `cbe93f9` 的 `aggregator_param_dtype` 开关**不搬过来**——它既不解决问题也不发现问题，
+  只能告诉你「dtype 有没有被改过」，而那正是 03 保留的 dtype 列已经免费提供的；
+  再加一个 config 旋钮是在同样的可见性上叠一层，还多一个能拨动的开关。真正的修法是
+  拿掉那行无条件 cast，那是精度决策不是开关决策。命中面确实不小（5/22，`instseg_small`
+  的 72.8% 可训参数在其中，见事实底座），但**读数变了不等于判据变了**——与 `lr` 出图、
+  跨 stage 出图同一条理由。本图对它的全部承诺只有一条且已兑现：改了，lock 的哈希会撞。
 
 - **把 `instance_*` 搬出 `Aggregator`**：物理上能让 backbone 变成可整体冻的干净模块，
   但要改 vendored 结构 + 全量 ckpt 键 remap + 与上游彻底分叉。距 ICLR 截止 22 天，纯风险。
