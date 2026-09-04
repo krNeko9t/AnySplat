@@ -20,11 +20,9 @@ model:
     anchor_feat_dim: 128
     gs_prune: false # ablate: opacity loss
     pred_head_type: depth
-    freeze_backbone: false
     distill: true
     render_conf: false
     conf_threshold: 0.1
-    freeze_module: patch_embed
     voxelize: true
     intermediate_layer_idx: [4, 11, 17, 23]
     
@@ -46,6 +44,7 @@ optimizer:
   lr: 2e-4
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
+  freeze_keywords: [patch_embed]
 
 data_loader:
   train:

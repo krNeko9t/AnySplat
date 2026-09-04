@@ -86,6 +86,19 @@ def _skip_backbone_download():
         VGGT.from_pretrained = classmethod(lambda cls, *a, **k: cls())
         VGGT._probe_patched = True
 
+    # Same argument for the *second* Hub pull: `pretrained_weights: hf:...` on the
+    # AnySplat path routes through `init_anysplat_from_hf`, which is
+    # `AnySplat(encoder_cfg, decoder_cfg)` + `load_state_dict` -- another ~5GB
+    # download that only changes parameter *values*.  Short-circuit to the bare
+    # constructor so the instseg_* configs stay CPU/offline like every other one.
+    import src.model.arch as _arch
+    if not getattr(_arch, "_probe_patched", False):
+        from src.model.arch.anysplat import AnySplat as _AnySplat
+        _arch.init_anysplat_from_hf = (
+            lambda hf_id, encoder_cfg, decoder_cfg, **k: _AnySplat(encoder_cfg, decoder_cfg)
+        )
+        _arch._probe_patched = True
+
 
 def build(exp: str, overrides):
     cfg_dir = os.path.abspath(os.path.dirname(__file__) + "/../../config")

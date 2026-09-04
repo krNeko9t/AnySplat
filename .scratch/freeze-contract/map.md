@@ -43,7 +43,7 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 ### 事实底座（可复核，别重新推导，2026-09-03 现场读码）
 
-- `freeze_research.md` — 6 种冻结实现的分类，带 file:line
+- `freeze_research.md` — 5 种冻结实现的分类，带 file:line
 - `docs/repo_knowledge.md:118 / :126 / :148 / :222` — 各 stage 冻结集的**意图**与实测参数量
 
 关键事实：
@@ -51,9 +51,8 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   匹配是裸子串 `kw in name`（`:512`）。
 - `camera_token` = 1×2×1×1024 = **2048**，`register_token` = 1×2×4×1024 = **8192**，共
   **10240**（`aggregator.py:176-177`），`:486` 拼进每帧 token 序列喂给所有输出头。
-- `freeze_backbone`/`freeze_module` **只存在于** `src/model/arch/anysplat.py:157-193`；
-  `segvggt.py`/`iggt.py` 里 `grep requires_grad` **零命中**。用 `freeze_module` 的 5 份
-  config 没有一份设 `freeze_keywords` ⇒ 两套今天按 arch 天然隔离，但无任何机制保证。
+- 全仓**只有一个**冻结入口 `freeze_keywords`；三个 arch 文件里 `grep requires_grad` 的全部命中
+  都是构造期不变量（AnySplat 侧只有 `aggregator.patch_embed.mask_token` 一个参数 + distill 块）。
 - `cbe93f9`（bf16 dtype 修复）**不在 `fix` 分支上**；`anysplat.py:124`、`iggt.py:80`
   仍是无条件 `.to(torch.bfloat16)`。`arch/segvggt.py` 干净（只用 autocast）。
 - 冻结相关 config 注释共 14 行；告警型长注释集中在 `base_wrapper.py:502-518` +
@@ -65,6 +64,23 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 ## Decisions so far
 
 <!-- 一行一个已关闭的票 -->
+
+- [08 — 彻底清除 `freeze_backbone` / `freeze_module`](issues/08-erase-freeze-module.md)：
+  **已删净，六份 anysplat 配方逐参数等价实测通过**（[报告](notes/anysplat_migration.md)）。
+  两个字段 + `__init__` 里的整块判定（净 -50 行）删除，5 份配方迁到 `freeze_keywords`
+  （四份上游 `[patch_embed]`、`instseg_anysplat` `[aggregator, camera_head, depth_head]`、
+  `instseg_small` 不设），`freeze_research.md` 方案 2 整节删除并重编号，
+  `repo_knowledge.md:222` 的例外句整句删除。02 号票「无条件赋值那半边今天零影响」的判断
+  **被实测正面证实**：迁移前后没有任何参数的 `requires_grad` 发生翻转。
+  预警的两个裸子串坑（`patch_embed` 多命中 `part_head`、`camera_head` 多命中 `distill_*`）
+  **都未发生，且由实测而非推理证明**。
+  **两条现场发现**：(1) AnySplat 路线的构造期冻结不变量只有 `aggregator.patch_embed.mask_token`
+  一个参数；(2) 探针漏了第二条 HF 下载路径——`pretrained_weights: "hf:..."` 走
+  `init_anysplat_from_hf`（= 构造 + `load_state_dict`，又一份约 5GB、只改参数**值**），
+  不短路它 `instseg_*` 在 `--random-backbone` 下仍联网（实测卡 22 分钟）。
+  **对下游的约束**：→ [09 号票](issues/09-implement-lock-layer.md) 生成端复用探针路径时必须
+  同样短路它，否则 22 份 lock 的批量生成挂在网络上；→ 10 少一节要吸收，术语表里
+  「构造期冻结不变量」的 AnySplat 实例可直接写 `mask_token`。
 
 - [06 — 校验失败时做什么](issues/06-failure-behaviour.md)：
   **硬错三条（哈希不符 / lock 缺失 / 零命中）、只记录一条（`base_lr` 与 dtype 列）、无 warn 档；
@@ -167,5 +183,5 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   见 `.scratch/phys-on-query/issues/01-unfreeze-lora.md`。
 - **"判断某段是否需要前向"这类手动筛查/显存优化**：冻结的目的只有三条——不建计算图、
   不进优化器、权重不变。其余不在此列。
-- **教师网 CPU 卸载 / `torch.no_grad` 推理路径**（`freeze_research.md` 方案 4/6）：
+- **教师网 CPU 卸载 / `torch.no_grad` 推理路径**（`freeze_research.md` 方案 3/5）：
   是推理与显存管理，不是训练期冻结。

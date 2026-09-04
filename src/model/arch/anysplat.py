@@ -85,17 +85,6 @@ class EncoderAnySplatCfg:
     opacity_threshold: float = 0.001
     gs_keep_ratio: float = 1.0
     pred_head_type: Literal["depth", "point"] = "point"
-    freeze_backbone: bool = False
-    freeze_module: Literal[
-        "all",
-        "global",
-        "frame",
-        "patch_embed",
-        "patch_embed+frame",
-        "patch_embed+global",
-        "global+frame",
-        "None",
-    ] = "None"
     distill: bool = False
     render_conf: bool = False
     opacity_conf: bool = False
@@ -122,7 +111,6 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         model_full = VGGT.from_pretrained("facebook/VGGT-1B")
         # model_full = VGGT()
         self.aggregator = model_full.aggregator.to(torch.bfloat16)
-        self.freeze_backbone = cfg.freeze_backbone
         self.distill = cfg.distill
         self.pred_pose = cfg.pred_pose
 
@@ -153,44 +141,6 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 for param in module.parameters():
                     param.requires_grad = False
                     param.data = param.data.cpu()
-
-        if self.freeze_backbone:
-            # Freeze backbone components
-            if self.cfg.pred_head_type == "depth":
-                modules_to_freeze = [self.aggregator, self.camera_head, self.depth_head]
-                for module in modules_to_freeze:
-                    for param in module.parameters():
-                        param.requires_grad = False
-            else:
-                for module in [self.aggregator, self.camera_head, self.point_head]:
-                    for param in module.parameters():
-                        param.requires_grad = False
-        else:
-            # aggregator freeze
-            freeze_module = self.cfg.freeze_module
-            if freeze_module == "None":
-                pass
-
-            elif freeze_module == "all":
-                for param in self.aggregator.parameters():
-                    param.requires_grad = False
-
-            else:
-                module_pairs = {
-                    "patch_embed+frame": ["patch_embed", "frame"],
-                    "patch_embed+global": ["patch_embed", "global"],
-                    "global+frame": ["global", "frame"],
-                }
-
-                if freeze_module in module_pairs:
-                    for name, param in self.aggregator.named_parameters():
-                        if any(m in name for m in module_pairs[freeze_module]):
-                            param.requires_grad = False
-                else:
-                    for name, param in self.named_parameters():
-                        param.requires_grad = (
-                            freeze_module not in name and "distill" not in name
-                        )
 
         self.pose_free = cfg.pose_free
         if self.pose_free:

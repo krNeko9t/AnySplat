@@ -1,5 +1,5 @@
 我先探索代码库中与冻结参数相关的实现。
-本仓库在训练时"冻结部分网络"共有 **6 种实现方案**，其中前 3 种是真正参与训练的冻结，另外几种是辅助手段。下面按重要性说明。
+本仓库在训练时"冻结部分网络"共有 **5 种实现方案**，其中前 2 种是真正参与训练的冻结，另外几种是辅助手段。下面按重要性说明。
 
 ---
 
@@ -27,24 +27,7 @@
 
 ---
 
-## 方案 2：arch 构造期冻结 —— `freeze_backbone` / `freeze_module`（AnySplat 老路线）
-
-`src/model/arch/anysplat.py:157-193`：
-
-- `freeze_backbone: true` → 冻 `aggregator + camera_head + (depth_head | point_head)`（`:157-167`）
-- `freeze_backbone: false` 时走 `freeze_module`（`:168-193`）：`"None"` / `"all"` / 组合名（`patch_embed+frame`、`patch_embed+global`、`global+frame`）/ 任意单模块名（如 `patch_embed`）。
-
-⚠️ **单模块名分支是无条件赋值**（`:191-193`），语义与方案 1 相反：它会把未命中的参数一律置 `requires_grad=True`，解冻别人冻的。
-
-**执行顺序**：本方案在 `EncoderAnySplat.__init__` 里跑，方案 1 在 `BaseWrapper.setup()` 里跑，`__init__` 在前。所以方案 1 后跑、只冻不解冻，**它赢**——两者并用时净效果是二者冻结集的并集。本方案的解冻只能作用于**比 `__init__` 更早**冻的东西，即子模块构造期冻结（方案 3 LoRA 基座、方案 5 `mask_token`）。今天两者都因名字含 `patch_embed`/`distill` 而侥幸未被解冻。
-
-默认值见 `config/experiment/dl3dv.yaml:23-27`（`freeze_backbone: false` + `freeze_module: patch_embed`）。
-
-**处置：整节待删。** 本方案是方案 1 的严格功能子集（唯一的非子集部分就是上面那个解冻 bug，且今天零影响），已判定彻底清除、6 份 config 迁到 `freeze_keywords`。见 `.scratch/freeze-contract/issues/02-reconcile-six-schemes.md`。
-
----
-
-## 方案 3：LoRA —— 冻基座 + 只训低秩旁路
+## 方案 2：LoRA —— 冻基座 + 只训低秩旁路
 
 `src/model/segvggt/layers/lora.py:93-147`：
 
@@ -64,7 +47,7 @@
 
 ---
 
-## 方案 4：冻结教师/参考网络 + `torch.no_grad()` + CPU 卸载
+## 方案 3：冻结教师/参考网络 + `torch.no_grad()` + CPU 卸载
 
 这一档是"连加权重的常驻显存都省掉"，分三处：
 
@@ -78,7 +61,7 @@
 
 ---
 
-## 方案 5：构造期冻单个 token / 缓冲
+## 方案 4：构造期冻单个 token / 缓冲
 
 `src/model/segvggt/models/aggregator.py:302-304` 与 vendored 的 `src/model/vggt/models/aggregator.py:183-185`：
 
@@ -90,6 +73,6 @@
 
 ---
 
-## 方案 6（仅推理期，非训练冻结）：`model.eval()` + 全参 `requires_grad=False`
+## 方案 5（仅推理期，非训练冻结）：`model.eval()` + 全参 `requires_grad=False`
 
 `src/model/wrapper/anysplat_wrapper.py:279-282`、`src/eval_pose.py:204-206`、`scripts/instseg_infer.py:396-398`、`scripts/trace_instance_to_gaussians.py:170-172`。注意 `_test_step_align` 里是 `torch.set_grad_enabled(True)` 包住的测试时位姿优化，属于例外。
