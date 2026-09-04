@@ -125,6 +125,18 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 ## Out of scope
 
+- **跨 stage 的冻结关系校验**（2026-09-04 由 [05 号票](issues/05-cross-stage-relation.md) 划出，
+  该票整票关闭，不在路线上解决）：全仓**只有一条**真正的 stage 链边（`segvggt_physgm` ←
+  `segvggt_finetune_agnostic` 的产物），五份 IGGT 配方是同一外部基座的平行分支而非续作。
+  本图对链断裂的实际防线是 **lock 的 `git diff`**（`5f1eff7` 那类漏冻在 diff 里就是多出的两行）；
+  跨 stage 约束比它多抓的只有「配方第一次就写错」一类。为 n=1 条、且实测完全自洽
+  （`trained(s1) \ frozen(s2)` = 0）的链边建第二套机制，收益对不上。
+  两个实现走法都另有硬伤：静态 `continues_from` 与实际加载的 ckpt 无绑定（`pretrained_weights`
+  是可被 CLI 覆盖的路径），ckpt 盖戳则在 22 份里 21 份的无戳路径上静默。
+  指纹正文已是逐参数名 ⇒ 未来真要建，它是一个**读两份 lock 的独立脚本**，不回改指纹格式。
+  连带出图：**F4**（`phys_iggt` 与同路线邻居对「几何该不该动」相反）——它们不构成链，
+  各自的 lock 锁各自的集合就够。
+
 - **`lr` / `param_groups` 的判等**（2026-09-04 由 [03 号票](issues/03-what-goes-in-the-fingerprint.md) 划出）：
   冻结的三条判据是不建计算图、不进优化器、权重不变；`lr` 一条都不占。把它纳入判等要付两点捕获
   （分组的真相源在 wrap **之后**的 `configure_optimizers`）+ 双哈希 + lr 四元组的代价。
