@@ -59,18 +59,14 @@ optimizer:
   warm_up_steps: 2000
   backbone_lr_multiplier: 1.0
   # Freeze everything pre-existing: DINO + frame/global blocks (incl. their LoRA),
-  # the geometry heads, the semantic head (which owns the instance classifier), and
-  # the whole object-query machinery. `instance_` covers instance_query_token,
-  # instance_cross_blocks, instance_queries_proj and instance_query_self_attn in one
-  # keyword, so this stays correct if a query submodule is toggled off in cfg.
-  # camera_token / register_token are easy to miss (10240 params, not inside any
-  # *_head or *_blocks) but they are prepended to every frame's token sequence and so
-  # feed *every* output: left trainable, the physics-only objective would quietly drag
-  # them -- and with lambda_mask/js/cls and the geo weight all at 0, nothing would pull
-  # back, so this stage's checkpoint would no longer reproduce stage 1's geometry.
-  # -> verified: with these 9 keywords, only encoder.query_physgm trains (~0.2M).
-  # QueryPhysGMReadout hangs directly off the arch (encoder.query_physgm.*), so no
-  # keyword below can reach it by the substring match base_wrapper uses.
+  # the geometry heads, the semantic head, and the whole object-query machinery, so
+  # this stage's checkpoint still reproduces stage 1's geometry. camera_token /
+  # register_token are in the list because they are prepended to every frame's token
+  # sequence and so feed *every* output head.
+  # Two consequences of the substring match base_wrapper uses: `instance_` covers
+  # instance_query_token / instance_cross_blocks / instance_queries_proj /
+  # instance_query_self_attn in one keyword; and QueryPhysGMReadout hangs directly off
+  # the arch (encoder.query_physgm.*), so no keyword below can reach it.
   freeze_keywords:
     - patch_embed
     - frame_blocks

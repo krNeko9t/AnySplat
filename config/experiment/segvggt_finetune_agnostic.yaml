@@ -59,8 +59,8 @@ optimizer:
   warm_up_steps: 200
   backbone_lr_multiplier: 1.0
   # Freeze aggregator (DINO + frame/global incl. pretrained LoRA) + geometry
-  # heads + bare camera/register tokens. semantic_head / instance_ must stay OUT
-  # of this list: they are exactly what this stage adapts (~487M trainable).
+  # heads + bare camera/register tokens; semantic_head / instance_ are what this
+  # stage adapts.
   freeze_keywords:
     - patch_embed
     - frame_blocks

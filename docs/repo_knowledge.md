@@ -3,6 +3,7 @@
 > 本文档描述仓库的**真实现状**（探索版，非定稿），供 AI 开发时对齐认知。
 > 与 `memory.md` 配合阅读：memory.md 记录项目事实，本文档记录架构约定与"坑"。
 > **新增能力的分层写法**以 `[layered_scheme.md](layered_scheme.md)` 为准（本文件偏现状与坑）。
+> **术语**（冻结三判据、冻结入口、指纹、lock 等）以根 `[CONTEXT.md](../CONTEXT.md)` 为准，本文件不重复定义。
 
 ## 1. 这个仓库是什么
 
@@ -115,9 +116,9 @@ Import 约定:跨目录一律 `from src.model.xxx import ...` 绝对导入,同�
 
 **stage-1 class-agnostic 微调**（`config/experiment/segvggt_finetune_agnostic.yaml`）——拿官方 ckpt 直接适配成 class-agnostic，用来体检训练实现：
 
-- 冻结集 `[patch_embed, frame_blocks, global_blocks, camera_head, depth_head, camera_token, register_token]`，即整个 aggregator（含 ckpt 里已训好的 LoRA）+ 几何头 + bare tokens 全冻；**只训** instance 分支 + 实例分类头（`semantic_head`）= **487M 可训**（AdamW 动量约 3.9GB）。几何不可能漂移，故 `segvggt_geo.weight: 0`。**切勿**把 `semantic_head` / `instance_` 写进 freeze——那会把本 stage 的可训主体关掉（曾误从 physgm 配方拷入，已修正）。
+- 冻结集 `[patch_embed, frame_blocks, global_blocks, camera_head, depth_head, camera_token, register_token]`，即整个 aggregator（含 ckpt 里已训好的 LoRA）+ 几何头 + bare tokens 全冻；**只训** instance 分支 + 实例分类头（`semantic_head`）= **487M 可训**（AdamW 动量约 3.9GB）。几何不可能漂移，故 `segvggt_geo.weight: 0`。
 - 因为没有任何随机初始化的新参数（是适配不是从头训），论文的 `2e-4` 太烫，改单一 `lr: 2e-5`。
-- 对照：论文全量配方 `segvggt_scannet.yaml` 冻结集只有 `[patch_embed]`，可训 **1148M**（AdamW ~9.2GB）。注意 LoRA 只冻住被包裹的 attention 基座（202M），frame/global block 的 MLP/norm（403M）仍全量可训——这是 vendored 官方代码的行为，不是我们加的。
+- 对照：论文全量配方 `segvggt_scannet.yaml` 冻结集只有 `[patch_embed]`，可训 **1148M**（AdamW ~9.2GB）。注意 `[patch_embed]` 并不等于"冻住 aggregator"——LoRA 的覆盖面见 §6.2。
 - 实测参数量核对（`paper_repo` env CPU 建模）：`patch_embed`→344 个/304M（DINO）、`instance_`→1011 个/454M、`semantic_head`→62 个/32.6M、`lora_`→192 个/9.44M（96 层 × qkv+proj）。yaml 里的 keyword 全部命中，无空组。
 
 **joint = class-agnostic 分割 + per-query 物理同训**（`config/experiment/segvggt_agnostic_phys_joint.yaml`）——Phase-1 主路径，替代「stage-1 再 stage-2」的串行冻结：
@@ -203,7 +204,80 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 
 
 
-## 6. scripts 与 trace 管线（下游推理/导出）
+## 6. 参数冻结与 freeze lock 契约
+
+术语（冻结三判据 / 冻结入口 / 构造期冻结不变量 / 指纹 / lock / bf16 死参数）在根
+[`CONTEXT.md`](../CONTEXT.md)，本节只写机制现状。
+
+### 6.1 唯一入口
+
+**config 能拨动的冻结开关只有 `optimizer.freeze_keywords`**（`src/model/wrapper/base_wrapper.py`
+的 `apply_freeze()`），在 DDP wrap **之前**的 `setup()` 里应用。三条语义：
+
+1. **裸子串匹配**：`kw in name`，不是前缀也不是正则。`patch_embed` 会命中 `part_head` 里
+   同名子串这类事要靠 lock 的 diff 看，不靠想。
+2. **只冻不解冻（增量式）**：命中置 `requires_grad=False`，未命中的**保持建模时的状态不动**。
+   早期版本是无条件赋值 `requires_grad = not matched`，会把构造期冻结不变量（LoRA 基座）
+   悄悄解冻，基座 + adapter 一起训、LoRA 完全失效。
+3. **关键词零命中直接 `raise`**，防拼错单词导致"以为冻了其实没冻"。
+
+`param_groups` 只管分组学习率，`lr_multiplier` 必须 > 0；想冻结就写进 `freeze_keywords`。
+**判断"某参数是否在训"看该配方的 lock，不看注释、不看这份文档。**
+
+### 6.2 仓库里其余四处 `requires_grad=False`——都不是入口
+
+| 位置 | 性质 |
+|---|---|
+| LoRA（`src/model/segvggt/layers/lora.py`）冻它包裹的 linear | **构造期冻结不变量**。注入在 `Aggregator._apply_lora`，只包 attention 的 qkv/proj（+可选 MLP）。只冻住被包裹的 attention 基座（约 202M），同 block 的 MLP/LayerNorm（约 403M）仍全量可训——vendored 官方行为。想连它一起冻死要另写 `frame_blocks`/`global_blocks` 关键词。 |
+| `patch_embed.mask_token`（`segvggt/models/aggregator.py`、`vggt/models/aggregator.py`） | **构造期冻结不变量**。AnySplat 路线的构造期不变量**只有它一个参数**。 |
+| 教师/参考网 + CPU 卸载（`arch/anysplat.py` 的 `distill_*`、`segvggt_wrapper` 的 `_geo_target_from_teacher`、`loss_depth.py` 的 DepthAnything） | **显存管理**，不是训练期冻结。`requires_grad=False` 且 `param.data` 常驻 CPU，前向在 `torch.no_grad()` 里。 |
+| 推理期 `model.eval()` + 全参 `requires_grad_(False)`（`anysplat_wrapper._test_step_*`、`eval_pose.py`、`scripts/instseg_infer.py`、`scripts/trace_instance_to_gaussians.py`） | **推理**，不是训练期冻结。 |
+
+历史上存在过第五处——`freeze_backbone` / `freeze_module`（AnySplat 官方上游代码）——它是
+`freeze_keywords` 的严格功能子集，**已彻底删除**，用它的配方全部迁到 `freeze_keywords`。
+
+### 6.3 lock：启动时的实测校验
+
+- **一份配方一份 lock**，路径 `config/experiment/locks/<X>.lock`，`<X>` = hydra 的
+  `+experiment=<X>`（即 yaml 文件名）。**不用 `wandb.name` 当身份键**：22 份里 4 份与文件名不等、
+  且有两组重名，重名意味着两份配方共用一份 lock。
+- **全覆盖 + 缺 lock = 启动硬错**（22/22）。不是"有就校验"——否则"这份配方没写 lock"和
+  "这份配方不需要冻结"长得一样，而"忘了写 `freeze_keywords`"正是三种故障形态之一。
+- **校验时机**：`BaseWrapper.setup()` 末尾、strategy wrap 之前，唯一的门是 `stage == "fit"`
+  （`test` 下没有优化器，护栏守的是空气）。`fast_dev_run` 与 sanity check **零豁免**。
+- **硬错三条**：正文逐行不符 / lock 缺失 / 关键词零命中。**只记录不执法两项**：`base_lr`
+  与 `dtype`（进正文与哈希，但无专门断言——改了哈希自然会撞，人被迫看一眼）。**没有 warn 档。**
+- 校验比对的是 lock 的**正文**，不是 lock 头部自己声明的 `structure:` 哈希——否则手改正文
+  不改哈希行就能全放行，"人签字的文本"与"被执法的文本"就不是同一份了。
+- 失败时把实测指纹全文写进 run 目录并在报错里点名（experiment / lock 路径 / 重生成命令 /
+  头几行 diff）。mismatch 常发生在远程节点上，若差异来自环境，本地重跑复现不出来。
+- 每个 rank 各算各的：纯 CPU walk，而 rank 之间冻结不一致是最难从 loss 曲线上看出来的故障。
+
+### 6.4 改配方时人要做的五步
+
+1. 改 `config/experiment/<X>.yaml` 的 `freeze_keywords`（或改动了任何影响参数集的结构）。
+2. `python scripts/freeze_lock.py +experiment=<X>` 重新生成 lock（纯 CPU，不加载权重，
+   不需要 GPU 节点，也不需要集群上的 ckpt 路径）。
+3. **读 `git diff`**：第一列是 `requires_grad`（`T`/`-`），第二列是 dtype。
+   `5f1eff7` 那类漏冻（`camera_token`/`register_token`）在 diff 里就是多出来的两行。
+4. **lock 与 yaml 一起提交**。git diff 就是签字现场——终端上没有第二道确认仪式。
+5. 新增 arch / 新增 experiment 无需任何登记：缺 lock 是硬错，它跑不起来，直到有人生成并看过一份 lock。
+
+批量重生成用 `python scripts/freeze_lock.py --all`：**一进程一份、串行子进程**。单份构建峰值
+RSS 约 7.3G，在一个进程里连建 22 份会把机器抖死（swap 抖死，不是 OOM kill）。
+
+### 6.5 不由这一层负责的事
+
+- **`lr` / `param_groups` 的判等**：`lr` 不占冻结三判据的任何一条。`base_lr` 只记进 lock 头部
+  （不参与哈希、不判等）保留可见性；"注释里的 base lr 过期了"属配方审查。
+- **跨 stage 的冻结关系**：全仓只有一条真正的 stage 链边（`segvggt_physgm` ←
+  `segvggt_finetune_agnostic` 的产物），实测自洽。对链断裂的防线是 lock 的 `git diff`。
+- **bf16 死参数**：见 `CONTEXT.md` 同名词条——属训练精度策略，机制在另一层。
+- **权重落位断言**（`_assert_query_physgm_coverage`）：查的是权重的**值**是否加载成功，
+  与冻结三判据无关，留在原地不并进本层。
+
+
+## 7. scripts 与 trace 管线（下游推理/导出）
 
 - `scripts/instseg_infer.py`：统一推理脚本（两种输入模式 × 多种输出：seg2d/pca2d/seg3d_ply/embedding/video…），聚类算法 kmeans/hdbscan 在 `src/instseg/` 里。
 - `scripts/trace_instance_to_gaussians.py`：把 2D 特征图 trace 到已训好的 2DGS/3DGS 高斯上（依赖带 `trace()` 的 diff_[surfel|gaussian]_rasterization CUDA 扩展，`TRACE_CHANNELS` 必须与 `src/trace_render/trace_rasterize.py` 一致）。特征来源可选 anysplat / iggt / precomputed / gt_idmap。
@@ -213,21 +287,21 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 
 
 
-## 7. 已知的坑 / AI 常犯错误清单
+## 8. 已知的坑 / AI 常犯错误清单
 
 1. **训练数据管线统一在** `src/dataset/`。`src/instseg/` 只保留推理/trace 后处理工具（kmeans / hdbscan_assign / export 等），不要在这里新增 dataset/datamodule 副本。
 2. **heads 按领域分组**：自研 head 统一在 `src/model/heads/{gaussian,instance,physics}/`；vendored VGGT 自带的 camera/dpt/track head 留在 `src/model/vggt/heads/` 盒子里，两边不要互相搬。新 head 按领域入组，或新建领域子目录。
 3. `EncoderIGGT.forward` 里对 `instance_feat_map` 有**硬编码 L2 normalize**（`iggt.py` 有注释 "hard code normalize for iggt"）；而 disc loss 又"没按原文做 L2 归一化"——改归一化策略时两处要一起考虑，别重复归一化。
 4. `EncoderAnySplat` 的 instance head 由 `instance_feat_dim` 控制（0 = 禁用，`config/model/encoder/anysplat.yaml` 默认 0）；IGGT 默认 8。同一个 PartHead 被两个 encoder 共享——这正是"同一 head 换 backbone"的实验入口，**改 PartHead 接口时两个 encoder 都要过一遍**。
-5. 参数冻结唯一入口是 `optimizer.freeze_keywords`（`BaseWrapper.setup`，在 DDP wrap 前应用；关键词零匹配直接报错）。语义是**只冻不解冻**（增量式）：命中关键词的置 `requires_grad=False`，未命中的**保持建模时的状态不动**。这点很关键——有些模块在构造时就已冻结部分参数（如 LoRA 会冻掉它包裹的 attention 基座权重），早期版本这里是无条件赋值 `requires_grad = not matched`，会把这些参数**悄悄解冻**，导致基座+adapter 一起训练、LoRA 完全失效。`param_groups` 只管分组学习率，`lr_multiplier` 必须 > 0，想冻结就写进 `freeze_keywords`。判断"某参数是否在训练"看 freeze_keywords + arch 加载日志。
-6. 精度约定：VGGT aggregator 跑 bf16 autocast，camera/point/depth head 强制 fp32，loss 计算强制 fp32（`autocast enabled=False`）。别"顺手统一"精度。
+5. 参数冻结唯一入口是 `optimizer.freeze_keywords`，语义是**只冻不解冻**（增量式）、裸子串匹配、零命中 `raise`。**每份 experiment 配方必须带一份 lock**（`config/experiment/locks/<X>.lock`），启动时逐行校验实测的可训集合，不符或缺失即拒训——改了 `freeze_keywords` 就要重生成 lock 并一起提交。判断"某参数是否在训"**看它的 lock**，不看注释。机制全文见 §6，术语见根 `CONTEXT.md`。
+6. 精度约定：camera/point/depth head 强制 fp32，loss 计算强制 fp32（`autocast enabled=False`）。别"顺手统一"精度。**注意 aggregator 不只是 autocast**：`arch/anysplat.py:113` 与 `arch/iggt.py:80` 对 aggregator 做了**无条件的永久 `.to(torch.bfloat16)`**（`arch/segvggt.py` 干净，只用 autocast）。后果是它的 AdamW 动量状态也是 bf16，量级 ~lr 的更新被舍成 0——参数 `requires_grad=True` 却不再更新。这**不是冻结**（见根 `CONTEXT.md` 的"bf16 死参数不是冻结"），是训练精度问题；22 份配方里有 5 份带着可训的 bf16 aggregator 参数（`instseg_small` 约 909M，占其可训参数的 72.8%）。
 7. Hydra 配置是**类型化的**（`src/config.py` `load_typed_root_config` + dataclass + beartype/jaxtyping import hook）。加配置项必须同步改对应 cfg dataclass，否则启动即报错；jaxtyping 的 shape 标注是运行时校验，改张量布局时记得改标注。
 8. 历史上已做过的清理，不要走回头路：post_opt 已全删；blender2opencv 手写矩阵已清理（统一走 src/coord）；trace 相机加载已抽到 src/trace_cameras 注册表。
 9. AnySplat 原始遗留死代码已于 2026-07 按引用图证据清理（`encoder/backbone/` croco/dino/resnet 全树、`model/transformer/`、`model/encodings/`、epipolar visualizer、`decoder/cuda_splatting.py`、`vggt/utils/visual_track.py`、`utils/ba.py`、`loss_point.py`、`validation_in_3d.py`、`ptc_geometry.py`）。仍保留的"看似没用"代码只有一处是刻意的：`vggt/heads/track_head.py` + `track_modules/`（`VGGT.__init__` 无条件构造，删了会破坏 HF 权重加载）。今后删代码前先做引用图核查（含函数内惰性导入），有证据即可删，git 历史兜底。
 
 
 
-## 8. 当前活跃工作区
+## 9. 当前活跃工作区
 
 - 主要改动集中在：`src/model/`、`src/trace_*`、`scripts/`。
 - 近期方向（git log）：seg3d 分割结果按实例分别渲染给 VLM；trace 支持自研 3DGS；idmap 的 3D KNN 加速。

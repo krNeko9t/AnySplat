@@ -52,7 +52,6 @@ optimizer:
   # Freeze aggregator + geometry (same spirit as stage-1): teach queries to be
   # objects+physics without letting the geometry prior drift. camera_token /
   # register_token are frozen for the same reason as in segvggt_physgm.
-  # Trainable: instance_ + semantic_head + query_physgm.
   freeze_keywords:
     - patch_embed
     - frame_blocks

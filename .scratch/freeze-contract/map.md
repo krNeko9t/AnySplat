@@ -45,8 +45,10 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 ### 事实底座（可复核，别重新推导，2026-09-03 现场读码）
 
-- `freeze_research.md` — 5 种冻结实现的分类，带 file:line
-- `docs/repo_knowledge.md:118 / :126 / :148 / :222` — 各 stage 冻结集的**意图**与实测参数量
+- ~~`freeze_research.md`~~ — 5 种冻结实现的分类；**已于 10 号票整份删除**，内容进
+  `docs/repo_knowledge.md` §6.2 的定性表
+- `docs/repo_knowledge.md:118 / :126 / :148` — 各 stage 冻结集的**意图**与实测参数量；
+  机制现在在同文件 §6，术语在根 `CONTEXT.md`
 
 关键事实：
 - 唯一通用入口 `BaseWrapper.apply_freeze()`（`src/model/wrapper/base_wrapper.py:503-531`，
@@ -64,8 +66,8 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
   （占其 12.49 亿可训参数的 72.8%，`base_lr: 1e-5`），`co3d`/`dl3dv`/`multi-dataset`/
   `scannetpp` 各 866 个。**这是本图产物证伪本图事实底座的一次**，靠的是 03 保留的 dtype 列。
   它不改变任何冻结判据 ⇒ 归训练精度策略，见 Out of scope。
-- 冻结相关 config 注释共 14 行；告警型长注释集中在 `base_wrapper.py:503-531`（09 号票后的位置）+
-  `repo_knowledge.md` 四段。
+- 冻结相关 config 注释共 14 行（**过期读数：10 号票实测为 20 行**，判完后 16 行）；告警型长注释集中在
+  `base_wrapper.py:503-531`（09 号票后的位置）+ `repo_knowledge.md` 四段。
 - 历史上 freeze 相关修复 commit 共 4 次：`12aaec6`（改为增量式）、`5f1eff7`
   （补 camera_token/register_token）、`7e196e9`（stage-1 误冻 instance 主体）、
   `cbe93f9`（bf16 静默冻结）。
@@ -73,6 +75,20 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 ## Decisions so far
 
 <!-- 一行一个已关闭的票 -->
+
+- [10 — 文档三分与长注释归位](issues/10-converge-docs-and-comments.md)：
+  **三分全部落地：根 `CONTEXT.md` 建成（7 词条纯术语）、机制并进 `docs/repo_knowledge.md` 新增 §6、
+  `freeze_research.md` 整份 `git rm`、20 行 config 冻结注释逐条判完（净删 4 行）。**
+  09 号票预警的「长注释里至少有一条内容错误」找到了：`repo_knowledge.md` 精度那条写
+  「aggregator 跑 bf16 autocast」，实际是 `anysplat.py:113`/`iggt.py:80` 的**无条件永久 cast**——
+  bf16 死参数的机制被一句「autocast」盖了过去。已改写并指回 `CONTEXT.md` 的隔离词条。
+  注释判据（提醒 ⇒ 删 / 机制因果 ⇒ 留）落到实处：physgm 那 5 行
+  「camera_token 容易漏、漏了会被悄悄拖动」删净——`5f1eff7` 那类漏冻现在在 lock diff 里就是两行硬错；
+  手抄的实测数（`~0.2M`、`~487M`、`Trainable: ...`）一律删，lock 是唯一权威；
+  裸子串匹配语义、DDP wrap 时序、论文出处一律留。`base_wrapper.py` 的长注释一行未动。
+  **票面「14 行」是 02 号票时期的过期读数，实测 20 行**，已在票内更正。
+  三份被改注释的配方重跑生成端，lock 全部 `unchanged` ⇒ 对指纹零影响。
+  **`.scratch/` 之外全仓对 `freeze_research.md` 零引用**，无迁移说明、无 deprecated 标注。
 
 - [09 — 落地指纹 + lock 层](issues/09-implement-lock-layer.md)：
   **校验层已落地并提交（`b53f7dd`），22 份 lock 全覆盖，四条完成判据逐条实测通过。**
@@ -181,7 +197,9 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
      「新 arch 怎么被强制纳入」已被 04 D2 直接回答 ⇒ 自动覆盖，新 arch 总以新 experiment config
      的形式到来，而缺 lock 是硬错，它跑不起来直到有人生成并看过一份 lock。 -->
 
-（暂无：本图的雾已散尽，剩余只剩 [10 号票](issues/10-converge-docs-and-comments.md) 一张已成票的活。）
+（无。雾已散尽，全部 10 张票均已关闭——**本图到达终点**：
+校验层在 `src/freeze_contract.py` + `BaseWrapper.setup()`，22 份 lock 在 `config/experiment/locks/`，
+术语在根 `CONTEXT.md`，机制在 `docs/repo_knowledge.md` §6。）
 
 ## Out of scope
 
