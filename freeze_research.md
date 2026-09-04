@@ -34,7 +34,13 @@
 - `freeze_backbone: true` → 冻 `aggregator + camera_head + (depth_head | point_head)`（`:157-167`）
 - `freeze_backbone: false` 时走 `freeze_module`（`:168-193`）：`"None"` / `"all"` / 组合名（`patch_embed+frame`、`patch_embed+global`、`global+frame`）/ 任意单模块名（如 `patch_embed`）。
 
-⚠️ **与方案 1 互斥**：单模块名分支是**无条件赋值**（`:191-193`），语义与方案 1 相反（会解冻别人冻的），所以只有在 `freeze_keywords` 为空时它才生效。这一点 `docs/repo_knowledge.md:222` 有明确记录。默认值见 `config/experiment/dl3dv.yaml:23-27`（`freeze_backbone: false` + `freeze_module: patch_embed`）。
+⚠️ **单模块名分支是无条件赋值**（`:191-193`），语义与方案 1 相反：它会把未命中的参数一律置 `requires_grad=True`，解冻别人冻的。
+
+**执行顺序**：本方案在 `EncoderAnySplat.__init__` 里跑，方案 1 在 `BaseWrapper.setup()` 里跑，`__init__` 在前。所以方案 1 后跑、只冻不解冻，**它赢**——两者并用时净效果是二者冻结集的并集。本方案的解冻只能作用于**比 `__init__` 更早**冻的东西，即子模块构造期冻结（方案 3 LoRA 基座、方案 5 `mask_token`）。今天两者都因名字含 `patch_embed`/`distill` 而侥幸未被解冻。
+
+默认值见 `config/experiment/dl3dv.yaml:23-27`（`freeze_backbone: false` + `freeze_module: patch_embed`）。
+
+**处置：整节待删。** 本方案是方案 1 的严格功能子集（唯一的非子集部分就是上面那个解冻 bug，且今天零影响），已判定彻底清除、6 份 config 迁到 `freeze_keywords`。见 `.scratch/freeze-contract/issues/02-reconcile-six-schemes.md`。
 
 ---
 

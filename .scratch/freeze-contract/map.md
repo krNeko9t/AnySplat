@@ -32,8 +32,11 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
    全程为真，loss 曲线看不出来。dtype 是第二真相源。
 3. **`freeze_keywords` 现有两道护栏保留**：零命中 `raise`（`base_wrapper.py:523-525`）、
    只冻不解冻（`:515-521`）。要补的是第三道：**声明的可训集合 vs 实际的可训集合**。
-4. **官方实现保留 + 记录**：VGGT / SegVGGT / AnySplat vendored 代码里的冻结行为
-   （LoRA 构造期冻基座、`mask_token` 冻结）不改，只写进契约文档。
+4. **冻结入口必须唯一**（2026-09-04 由 [02 号票](issues/02-reconcile-six-schemes.md) 收窄，
+   原文是「官方实现一律保留」）。**冻结入口 = config 能拨动的冻结开关**，只有 `freeze_keywords`
+   一个。vendored 模型内部的**构造期冻结不变量**（LoRA 冻基座、`mask_token`）不是入口——config
+   拨不动、且 `setup()` 跑时 LoRA 早已建完，原理上无法用 `freeze_keywords` 表达——**保留 + 记录**。
+   「是官方代码」本身不再构成保留理由。
 
 ### 事实底座（可复核，别重新推导，2026-09-03 现场读码）
 
@@ -60,6 +63,17 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 
 <!-- 一行一个已关闭的票 -->
 
+- [02 — 六种冻结实现：哪些留、哪些记录、哪些删](issues/02-reconcile-six-schemes.md)：
+  **`freeze_backbone`/`freeze_module` 判定彻底清除**（→ [08 号票](issues/08-erase-freeze-module.md)）。
+  它确是 AnySplat 官方上游代码（`8d6180e`，逐字未改，用它的 4 份 config 同出该 commit），但也确是
+  `freeze_keywords` 的**严格功能子集**——唯一的非子集部分（else 分支无条件赋值解冻）只能作用于
+  `mask_token`/distill 块，两者靠名字巧合躲过 ⇒ 删掉零行为变化。据此推翻并收窄 Notes 第 4 条为
+  **「冻结入口必须唯一」**（见上）；LoRA/`mask_token` 作为构造期不变量照旧保留。
+  连带纠正一条被两份文档写反的因果（**并非**「只在 `freeze_keywords` 为空时生效」；真实顺序
+  `__init__` → `setup()`，后跑的 `freeze_keywords` 只冻不解冻 ⇒ **它赢**，净效果是并集），
+  `freeze_research.md:37` 与 `docs/repo_knowledge.md:222` 已在票内修正。
+  **对 04 的约束输入**：本票选「指纹层天然覆盖」而不加专门断言，前提是 04 把 lock 定成**强制**。
+
 - [01 — 实测当前每份 config 的真实可训集合](issues/01-measure-current-trainable-sets.md)：
   九份配方的事实基线已落地（[读数](notes/trainable_sets.md) + [逐参数原始记录](notes/raw/)，
   后者即 03 号票要设计的指纹的样本数据）。七份与 `repo_knowledge.md` 一致；两处不一致：
@@ -75,8 +89,6 @@ run 的实际可训集合与配方声明一致；配套一份权威冻结契约�
 - **长注释怎么收敛**：哪些告警注释在指纹层落地后变成冗余可删、哪些必须留。等指纹层的
   实际形态出来才判断得了。
 - **新 arch 怎么被强制纳入**：将来加第四个 arch 时，指纹层是自动覆盖还是要手工接线。
-- **`freeze_module` 的无条件赋值分支要不要彻底删**：依赖 AnySplat 路线是否还活着，
-  以及 02 号票对"官方 vs 我们加的"的划线结果。
 
 ## Out of scope
 
