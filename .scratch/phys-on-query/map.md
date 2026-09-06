@@ -20,6 +20,10 @@ class 之外额外输出 object-centric 的 P = (杨氏模量, 泊松比, 密度
 
 **每个 session 应调用的 skill**：`grilling` + `domain-modeling`。
 
+**机器**（2026-09-06 核实）：本图的活跑在 **GPU 服务器 `bms-39468022-001`**（8×A100-40G），
+conda env **`anysplat`**（base 里没有 torch）。`硬件环境.md` 说的"开发机无 GPU"指的是另一台。
+数据全在本地盘 `/mnt/storage_pool/liaoyuanjun/data/InsScene-15K/`，**没有"传数据"这道工序**。
+
 ### 本图开工前已定的事（2026-09-03 grilling，不再重开）
 
 1. **上限 = 教师**。前馈视觉底座在这个任务上的天花板就是生成伪标签的那个 VLM 管线。
@@ -51,7 +55,12 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
 
 <!-- 一行一个已关闭的票 -->
 
-（暂无）
+- [02 — 把 Infinigen 全量 VLM 伪标签接进训练](issues/02-labels-into-training.md)：
+  标签本就在训练机本地（1466 场景 / 146,034 帧 / 53,328 条），缺的只是 manifest。
+  已补 4 个脚本 + 3 份数据侧产物，`DatasetManifest + instascene_vlm_physgm` 已实测吐出
+  `(类名, E, ν, ρ)`。id 空间三方统一（seg 像素值 = `Objects.object_index` = 标签 `id`），
+  类别可从 `Objects_*.json` 97.5% 无损恢复。**发现在用的 z-score 常数是抄 PhysGM 的、
+  与本语料严重不符（→ 07）**；`room:*`+`Window` 占 28.6% 标签（→ 08）。
 
 ## Not yet specified
 
@@ -61,9 +70,12 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   更抗噪。这是唯一不违反"上限=教师"的超越方式，可测，但度量怎么定还没想清楚。
 - **part-level 粒度**：29.6% 的物体跨材质原型，object-level 单标签对它们是系统性错误。
   query 范式下拆 part 最便宜（多分配几个 query + 把 GT 拆到 part 粒度，不改表示）。
-- **数据清洗**：墙面/地板/门窗/树木等不适合物理模拟的实例要不要剔除，剔除后训练分布怎么变。
 - **训练/推理的 train-test 失配复核**：query 路径按 `code_facts` D 应当自动免除 GT-mask 依赖，
   但要在真实运行里确认一遍。
+- **标签里被丢掉的那些字段**：每条伪标签都白送 `object_description` / `appearance_materials`
+  (prototype+score) / `physical_priors` (bin+confidence) / `n_views` / 每个量的 `variance`，
+  目前一个都没进 loss。哪些值得用、怎么用（样本加权？辅助监督？）还看不清，等 04 判完教师余量的
+  性质再说。
 
 ## Out of scope
 
