@@ -145,9 +145,16 @@ class DatasetManifest(Dataset):
             if not self.scenes:
                 raise ValueError(f"overfit_to_scene={cfg.overfit_to_scene} not found in manifest")
 
-        # Training requires enough views for the view sampler (>=2 and >= num_context_views
-        # so that bounded/bounded_fixed samplers do not raise "Example does not have enough frames!").
-        min_views = max(2, getattr(self.view_sampler, "num_context_views", 2))
+        # Training requires enough views for the view sampler not to raise
+        # "Example does not have enough frames!".  Ask the sampler: the bound is
+        # its *gap* requirement, not num_context_views (see
+        # ViewSamplerBoundedFixed.min_frames_required) -- with
+        # num_context_views=4 and min_gap_multiplier=3 a scene needs 13 frames,
+        # not 4, and the difference used to surface as a random crash in a
+        # dataloader worker rather than a dropped scene.
+        min_views = getattr(self.view_sampler, "min_frames_required", None)
+        if min_views is None:
+            min_views = max(2, getattr(self.view_sampler, "num_context_views", 2))
         before = len(self.scenes)
         self.scenes = [s for s in self.scenes if len(s.get("frames") or []) >= min_views]
         if before > len(self.scenes):

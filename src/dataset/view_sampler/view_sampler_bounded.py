@@ -143,6 +143,29 @@ class ViewSamplerBounded(ViewSampler[ViewSamplerBoundedCfg]):
         return self.cfg.num_target_views
     
     @property
+    def min_frames_required(self) -> int:
+        """Fewest frames a scene must have for :meth:`sample` to be satisfiable.
+
+        ``sample`` draws a context gap in ``[min_gap, max_gap]`` after clamping
+        ``max_gap`` to ``num_views - 1``, and raises "Example does not have
+        enough frames!" when that leaves an empty range.  ``min_gap`` grows with
+        the requested context count, so the bound is the *largest* ``min_gap``
+        over every count the sampler may be asked for -- a scene short of it can
+        crash on some draws and not others, which is worse than being dropped.
+
+        ``DatasetManifest`` filters on this at load time; without it the filter
+        only checked ``>= num_context_views``, which is the wrong quantity (it
+        is off by the gap multiplier) and let a handful of short scenes through
+        to fail at random inside a dataloader worker.
+        """
+        mapping = self.num_ctxt_gap_mapping
+        if not mapping:
+            return max(2, self.cfg.num_context_views)
+        min_gap = max(gaps[0] for gaps in mapping.values())
+        min_gap = max(2 * self.cfg.min_distance_to_context_views, min_gap)
+        return max(2, self.cfg.num_context_views, min_gap + 1)
+
+    @property
     def num_ctxt_gap_mapping(self) -> dict:
         mapping = dict()
         for num_ctxt in range(2, self.cfg.num_context_views + 1):

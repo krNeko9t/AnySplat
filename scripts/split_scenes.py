@@ -41,8 +41,13 @@ def main() -> None:
     ap.add_argument(
         "--min_views",
         type=int,
-        default=4,
-        help="drop scenes the view sampler would drop anyway, so the split counts are honest",
+        default=13,
+        help=(
+            "drop scenes the view sampler would drop anyway, so the split counts are "
+            "honest.  Default 13 = ViewSamplerBoundedFixed.min_frames_required for "
+            "num_context_views=4 / min_gap_multiplier=3 -- NOT 4.  Recompute it if "
+            "either changes."
+        ),
     )
     args = ap.parse_args()
 

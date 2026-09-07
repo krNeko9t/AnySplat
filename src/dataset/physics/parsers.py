@@ -52,7 +52,7 @@ class PhysGMNorm:
 
 # PROPERTY_NAMES order: density, youngs_modulus, poisson_ratio.
 #
-# Fitted 2026-09-07 on the **training split only** (1390 scenes / 49,324
+# Fitted 2026-09-07 on the **training split only** (1387 scenes / 49,214
 # instances) of the Infinigen VLM pseudo-labels, with the exact transform
 # applied below:  scripts/fit_physgm_norm.py --scene_ids
 # config/experiment/splits/infinigen_phys_train_ids.txt.  Receipt (n, clamp
@@ -72,9 +72,9 @@ class PhysGMNorm:
 # ``physgm_denormalize`` below reads the same tuple, so inference-time
 # de-normalisation follows automatically; keep it that way (one source, not two).
 PHYSGM_NORMALIZATION: tuple[PhysGMNorm, ...] = (
-    PhysGMNorm(si_scale=1.0, log10=True, mean=2.865927, std=0.399889),  # density kg/m³
-    PhysGMNorm(si_scale=1e6, log10=True, mean=9.497923, std=1.321595),  # E: MPa→Pa
-    PhysGMNorm(si_scale=1.0, log10=False, mean=0.336365, std=0.066388),  # nu
+    PhysGMNorm(si_scale=1.0, log10=True, mean=2.863740, std=0.399147),  # density kg/m³
+    PhysGMNorm(si_scale=1e6, log10=True, mean=9.495947, std=1.317972),  # E: MPa→Pa
+    PhysGMNorm(si_scale=1.0, log10=False, mean=0.336525, std=0.066235),  # nu
 )
 
 
