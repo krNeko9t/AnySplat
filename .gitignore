@@ -215,3 +215,4 @@ segvggt_finetune_agnostic*copy*
 /.codebuddy
 /ref_knowledge
 .scratch/freeze-contract/notes/raw/
+/research_space
