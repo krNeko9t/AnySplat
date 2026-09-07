@@ -24,6 +24,11 @@ Geometry supervision source (``segvggt_geo_supervision`` on TrainCfg, default ``
   * ``teacher`` -- paper-faithful: a frozen pretrained VGGT distils depth + camera.
                    Built lazily from the vendored ``src/model/vggt`` box; requires the
                    VGGT-1B weights + full env, so it is opt-in.
+
+Geometry is also reported as *read-only* validation metrics (``val/geo_*``, see
+:meth:`SegVGGTWrapper._log_geo_drift`), which stay live even when
+``segvggt_geo.weight`` is 0 and the geometry heads are frozen -- that is the only
+way backbone drift into depth / pose becomes visible at all.
 """
 from __future__ import annotations
 
@@ -38,6 +43,11 @@ from src.coord import se3_inv
 from src.dataset.types import BatchedExample
 from src.evaluation.instance_metrics import compute_instance_metrics_batch
 from src.loss import Loss
+from src.loss.loss_segvggt_geo import (
+    LossSegVGGTGeo,
+    LossSegVGGTGeoCfg,
+    LossSegVGGTGeoCfgWrapper,
+)
 from src.loss.loss_huber import extri_intri_to_pose_encoding
 from src.misc.step_tracker import StepTracker
 from src.misc.utils import inverse_normalize, vis_depth_map
@@ -144,6 +154,13 @@ class SegVGGTWrapper(BaseModelWrapper):
             getattr(train_cfg, "segvggt_geo_supervision", "gt")
         ).lower()
         self._teacher: nn.Module | None = None
+        # Read-only geometry-drift metric (validation only). Reuses the configured
+        # LossSegVGGTGeo when there is one -- so its lambdas match the loss it
+        # mirrors -- and falls back to a default instance when geometry is not in
+        # the loss list at all, since the metric must survive either config.
+        self._geo_metric = next(
+            (l for l in losses if isinstance(l, LossSegVGGTGeo)), None
+        ) or LossSegVGGTGeo(LossSegVGGTGeoCfgWrapper(LossSegVGGTGeoCfg()))
 
     # ------------------------------------------------------------------ #
     # geometry target
@@ -202,6 +219,42 @@ class SegVGGTWrapper(BaseModelWrapper):
             depth = depth.squeeze(-1)
         valid = None if conf is None else (conf > conf.new_tensor(0.0))
         return {"pose_enc": pose_enc, "depth": depth, "valid": valid}
+
+    @torch.no_grad()
+    def _log_geo_drift(self, batch: BatchedExample, encoder_output, depth_dict: dict) -> None:
+        """Log depth / pose error as *metrics only* -- never as loss.
+
+        ``camera_head`` / ``depth_head`` are frozen and ``segvggt_geo.weight`` is 0,
+        so nothing in the objective watches geometry: unfreezing the backbone (LoRA)
+        can move it and no number would say so.  These are that missing second
+        column next to segmentation / physics.  Read-only by construction: no grad,
+        no ``requires_grad`` touched, the freeze lock is unchanged.
+
+        The ruler is always manifest GT, even when training distils geometry from
+        the VGGT teacher -- drift is only meaningful against something fixed.
+        """
+        geo_target = self._geo_target_from_gt(batch)
+        if geo_target is None:
+            return
+        d = dict(depth_dict)
+        d["segvggt_geo_target"] = geo_target
+        if encoder_output.pred_pose_enc_list is not None:
+            d["pred_pose_enc_list"] = encoder_output.pred_pose_enc_list
+        with torch.amp.autocast("cuda", enabled=False):
+            m = self._geo_metric.metrics(d)
+        for key, value in m.items():
+            self.log(f"val/{key}", float(value))
+        if m and self.trainer.global_rank == 0:
+            logger.info(
+                "[val geo step=%d] camera=%.4f (T=%.4f R=%.4f fl=%.4f) "
+                "depth=%.3f depth_rel=%.4f",
+                self.global_step, float(m.get("geo_camera", float("nan"))),
+                float(m.get("geo_camera_T_last", float("nan"))),
+                float(m.get("geo_camera_R_last", float("nan"))),
+                float(m.get("geo_camera_fl_last", float("nan"))),
+                float(m.get("geo_depth", float("nan"))),
+                float(m.get("geo_depth_rel", float("nan"))),
+            )
 
     # ------------------------------------------------------------------ #
     def training_step(self, batch, batch_idx):
@@ -273,6 +326,9 @@ class SegVGGTWrapper(BaseModelWrapper):
             self.log("val/queries_fired", float(fired))
         if "depth" in depth_dict and depth_dict["depth"] is not None:
             self.log("val/depth_mean", depth_dict["depth"].float().mean())
+
+        # ---- read-only geometry drift (val/geo_*) --------------------------
+        self._log_geo_drift(batch, encoder_output, depth_dict)
 
         # ---- instance-segmentation metrics --------------------------------
         # The only in-flight signal that distinguishes "not converged yet" from

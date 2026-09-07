@@ -27,6 +27,12 @@ class 之外额外输出 object-centric 的 P = (杨氏模量, 泊松比, 密度
 `research_space/`（事实底座）2026-09-07 已从开发机拷到本机，但**不在 git 里**——
 换机器要重新拷。
 
+⚠️ **跑任何 python 都要带 `PYTHONNOUSERSITE=1`**（2026-09-07 [11 号票](issues/11-geo-drift-readonly-metric.md)
+现场发现）：`~/.local/lib/python3.10/site-packages` 里有个 2026-09-05 装的 **torch 2.7.1+cu118**，
+user-site 优先级高于 env，把 `anysplat` 自己的 **torch 2.4.1+cu124** 顶掉，
+`pytorch3d._C` / `torch_scatter` 立刻 undefined symbol，**训练根本起不来**。
+加上这个变量即好，env 本身没坏。
+
 ### 本图开工前已定的事（2026-09-03 grilling，不再重开）
 
 1. **上限 = 教师**。前馈视觉底座在这个任务上的天花板就是生成伪标签的那个 VLM 管线。
@@ -109,6 +115,18 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   且 grounding 一致率相同 ⇒ 直接答了 [08](issues/08-non-object-classes.md) 第 4 点，
   但**最脏的其实是软体真物体**（Pillow/Blanket/Towel sd≈2.0）⇒ 归 12 不归 08。
   局限：一致/不一致是非随机划分，46.4% 是**带选择偏差的下界**；全程没看过一张图。
+
+- [11 — depth/pose 漂移的只读指标](issues/11-geo-drift-readonly-metric.md)：
+  **做完了**。`LossSegVGGTGeo.metrics()`（`@no_grad`，复用 `_camera_loss`/`_depth_loss`，
+  不是新写一套）+ wrapper `_log_geo_drift()`，validation 里报 6 条 `val/geo_*`：
+  `geo_camera` 与末次迭代的 **T/R/fl 分解**、`geo_depth` 与无量纲的 **`geo_depth_rel`**。
+  指标在 wrapper 里不在 config 里 ⇒ **两臂自动都有**。
+  实测 `camera=0.0079 (T=0.0134 R=0.0001 fl=0.0022) depth=106.3 depth_rel=0.052`；
+  `weight: 0` 不动、`Trainable params 487M` 不变、**lock `unchanged`**。
+  **加 `geo_depth_rel` 是实测逼出来的**：GT depth 是**毫米**（median 2263）⇒ 106 其实是
+  4.7% 相对误差，绝对值跨臂不可比。顺带记下：训练侧 depth 项 117.6 vs camera 0.022 而
+  `lambda_camera:5 / lambda_depth:1` ⇒ **谁哪天打开 `segvggt_geo.weight`，depth 会以约 1000× 压死 camera**
+  （现被 `weight:0` 挡着，本图不开 geo loss，不处理，只留话）。
 
 ## Not yet specified
 

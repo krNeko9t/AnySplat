@@ -4,6 +4,10 @@ Type: task
 Status: open
 Blocked by: —  (01、02 均已关闭；(b) 臂的 config 另需 09)
 
+> ⚠️ **开跑前先看 map 的「机器」一节**：本机所有 python 都要带 `PYTHONNOUSERSITE=1`，
+> 否则 user-site 的 torch 2.7.1 顶掉 env 的 2.4.1，import 阶段就炸
+> （2026-09-07 [11 号票](11-geo-drift-readonly-metric.md) 现场发现）。
+
 ## Question
 
 距 2026-09-25 只剩三周，且这个 checkpoint 必须留出重跑一两次的余地。要定：

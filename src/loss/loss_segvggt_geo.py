@@ -128,6 +128,61 @@ class LossSegVGGTGeo(Loss[LossSegVGGTGeoCfg, LossSegVGGTGeoCfgWrapper]):
         return l1 + self.cfg.depth_grad_weight * grad
 
     # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def metrics(self, depth_dict: dict | None) -> dict[str, Tensor]:
+        """Read-only geometry-drift numbers.  Never enters the loss.
+
+        Reuses exactly the terms :meth:`forward` computes, so ``geo_camera`` /
+        ``geo_depth`` stay comparable with ``loss_segvggt_camera`` /
+        ``loss_segvggt_depth`` even while ``weight: 0`` keeps geometry out of the
+        objective.  Adds a per-component breakdown of the *final* camera-head
+        iteration -- with no geometry loss watching, "did it drift" is only useful
+        if it also says *what* drifted (translation, rotation, or focal).
+
+        Returns ``{}`` when the pieces aren't there (no target, no predictions).
+        A depth target that is constant everywhere is the manifest's
+        depth-less placeholder (see ``DatasetManifest``: depth of ones, valid
+        all-True), so the depth terms are dropped rather than reported as 0.
+        """
+        out: dict[str, Tensor] = {}
+        if depth_dict is None:
+            return out
+        target = depth_dict.get("segvggt_geo_target")
+        if target is None:
+            return out
+
+        pose_list = depth_dict.get("pred_pose_enc_list")
+        gt_pose = target.get("pose_enc")
+        if pose_list and gt_pose is not None:
+            gt_pose = gt_pose.float()
+            out["geo_camera"] = self._camera_loss(pose_list, gt_pose)
+            last = pose_list[-1].float()
+            out["geo_camera_T_last"] = huber_loss(last[..., :3], gt_pose[..., :3]).clamp(-100, 100).mean()
+            out["geo_camera_R_last"] = huber_loss(last[..., 3:7], gt_pose[..., 3:7]).clamp(-100, 100).mean()
+            out["geo_camera_fl_last"] = huber_loss(last[..., 7:], gt_pose[..., 7:]).clamp(-100, 100).mean()
+
+        pred_depth = depth_dict.get("depth")
+        gt_depth, valid = target.get("depth"), target.get("valid")
+        if pred_depth is not None and gt_depth is not None and valid is not None:
+            if pred_depth.dim() == 5:
+                pred_depth = pred_depth.squeeze(-1)
+            if valid.dim() == 5:
+                valid = valid.squeeze(-1)
+            gt_depth = gt_depth.float()
+            valid = valid.bool()
+            if gt_depth.numel() > 0 and (gt_depth.amax() - gt_depth.amin()) > 1e-6:
+                out["geo_depth"] = self._depth_loss(pred_depth, gt_depth, valid)
+                # ...and the same number divided by the median GT depth. The raw
+                # term carries the dataset's depth unit (the manifest hands over
+                # ScanNet++ depth in *millimetres*, median ~2263), so 106 reads as
+                # alarming when it is 4.7% relative error. The ratio is the one
+                # that can be compared across arms, datasets and resolutions.
+                if valid.any():
+                    med = gt_depth[valid].median().clamp_min(1e-6)
+                    out["geo_depth_rel"] = out["geo_depth"] / med
+        return {k: v.detach() for k, v in out.items()}
+
+    # ------------------------------------------------------------------ #
     def forward(
         self,
         prediction,
