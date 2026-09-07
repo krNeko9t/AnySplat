@@ -5,8 +5,13 @@ Label: wayfinder:map
 ## Destination
 
 跑出**第一个可交付的 checkpoint**：SegVGGT backbone + pretrained weight，query 在预测
-class 之外额外输出 object-centric 的 P = (杨氏模量, 泊松比, 密度)，一次前馈、场景级、
+**实例分割**之外额外输出 object-centric 的 P = (杨氏模量, 泊松比, 密度)，一次前馈、场景级、
 推理不需要 GT mask。
+
+（2026-09-07 [05 号票](issues/05-training-operating-point.md)更正措辞：原文写的是"预测 class
+之外"，但 joint 配方是 `class_agnostic: true`，`loss_segvggt.py:274-277` 把 200+1 的分类头
+logsumexp 成 2 列 ⇒ **这条路上的 checkpoint 不预测类别，只预测 objectness**。
+这是有意的 Phase-1 配方，不是漂移；**类别预测因此明确出 scope**。）
 
 **判据不是"物性预测得准"，是"学生逼近教师"**——即逼近当前这条 VLM 伪标签管线的上限。
 
@@ -61,8 +66,19 @@ user-site 优先级高于 env，把 `anysplat` 自己的 **torch 2.4.1+cu124** �
 `instance_` 454.25M / `semantic_head` 32.63M（= 现可训 487M）、**block MLP 402.90M**、
 block attn qkv/proj 底座 201.52M（LoRA 构造期冻）、block norm/ls 0.31M、**block LoRA 9.44M**、
 `patch_embed` 304.37M、geo 头 248.83M。
-**实测吞吐**：1.30 s/step（8×A100 / bs=1 / 4 视角 / 252×448）⇒ 20k step ≈ 7.2 小时。
-`segvggt_agnostic_phys_joint.lock`：1533 行冻 / 1088 行训。
+**实测吞吐**：1.30 s/step（8×A100 / 4 视角 / 252×448）⇒ 20k step ≈ 7.2 小时。
+⚠️ 那次是 **scannet100 且开着抖动**跑的；05 号票钉死视角/分辨率并换到 Infinigen 后要重测。
+**`data_loader.train.batch_size` 在这条路径上是死的**（`data_sampler.py:118`）：
+每卡场景数 = `floor(max_img_per_gpu / 视角数)` = `floor(8/4)` = **2**，4 卡 ⇒ 8 场景/step。
+`segvggt_agnostic_phys_joint.lock`：1533 行冻 / 1088 行训（05 号票的 (a) 臂 lock 与它逐字节相同）。
+**训练划分**（05 号票）：`config/experiment/splits/infinigen_phys_split.json`，
+1461 个可用场景 ⇒ **1387 训 / 74 验**，按 `scene_XXX` 生成分片整组切（实测分片间不共享资产：
+物体名 Jaccard 组内 0.049 vs 组间 0.047）。
+**`PHYSGM_NORMALIZATION` 已换成本语料训练集拟合值**（05 号票执行了 07 号票的内容）：
+density 2.863740/0.399147、E 9.495947/1.317972、ν 0.336525/0.066235。
+⇒ **所有用 `instascene_vlm_physgm` 的旧 ckpt 反归一化都对不上了。**
+**留出集上的类别查表基线**（05 号票，2724 实例）：log10 E 常数 **0.9050** → 查表 **0.7477**（−17.4%）；
+ρ 0.2708→0.2260；ν 0.0504→0.0424。分片间波动不小（另一份划分给 −12.5%），别当三位有效数字。
 **VLM 伪标签的类内方差分解**（2026-09-07，全量 51,981 条，04 号票，与 parser 同量纲）：
 log10 E / log10 ρ / ν 的类内占比 **73.6% / 76.7% / 78.2%**（截尾后 72.7%，非离群值所致）；
 **描述-类名不一致率 49.3%**，一致子集类内 **46.4%**、不一致子集 **87.5%**；
@@ -128,6 +144,23 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   `lambda_camera:5 / lambda_depth:1` ⇒ **谁哪天打开 `segvggt_geo.weight`，depth 会以约 1000× 压死 camera**
   （现被 `weight:0` 挡着，本图不开 geo loss，不处理，只留话）。
 
+- [05 — 三周内能跑完的运行点](issues/05-training-operating-point.md)：
+  **两臂运行点定死，(a) 臂已在 4 卡上跑起来。** 数据 = **Infinigen 全量**
+  （1387 训 / 74 验，按生成分片整组切；选它的决定性理由不是数据量而是**参照系**——
+  04 号票的全部刻度只在这份语料上存在，scannet100 上的 checkpoint 主表没有横坐标）；
+  **无 curriculum**（预训练已完成"几何→实例"两段，且仓库根本没有该机制）；
+  **Q=400 锁死**（`instance_query_token` 在权重里就是 `(1,400,1024)`，改了就随机初始化整个 query bank，
+  票面第 3 项自动答完）；20k step；lr 维持 `1e-4/5e-4`（**10 号票改成从两臂曲线读答案**——
+  降到 2e-5 会让 (b) 臂的 LoRA 几乎不动，把对照读成噪声）。
+  **查出四件"不改就读不出东西"的事，都就地改了**：(i) train/val 此前共用同一份 dataset cfg
+  ⇒ **val 跑在训练场景上**；(ii) `DynamicBatchSampler` 有两个没人提过的抖动（视角数 ∈ {2,3,4}、
+  输入高 ∈ [252,448]，H=448 端**裁掉 44% 画幅**）⇒ 钉死；(iii) z-score 常数是抄来的
+  ⇒ **07 号票的阻塞随划分落地当场消失**，就地换成训练集拟合值；(iv) **val 里一个物性数都没有**
+  ⇒ 新增 `src/evaluation/physics_metrics.py`，学生/常数/类别查表三行同批对照。
+  留出集实测 log10 E 常数 **0.9050** → 类别查表 **0.7477**（−17.4%），与 04 的 −15.6% 一致。
+  顺带修了个潜伏 bug：`DatasetManifest` 的"帧数够不够"过滤器比错了量（要 13 帧却比 4 帧），
+  钉死视角把它从偶发崩变成必现崩。
+
 ## Not yet specified
 
 - **物性头的花招**：`P̂ = LUT[ĉ] + Δ(q)` 这类"类别项 + 残差项"显式分解。等第一个 checkpoint
@@ -146,6 +179,15 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   query 范式下拆 part 最便宜（多分配几个 query + 把 GT 拆到 part 粒度，不改表示）。
 - **训练/推理的 train-test 失配复核**：query 路径按 `code_facts` D 应当自动免除 GT-mask 依赖，
   但要在真实运行里确认一遍。
+  **2026-09-07 缩小了**（[05](issues/05-training-operating-point.md)）：`fixed_views_and_shape`
+  已把训练分布钉成与 val / 推理相同（4 视角 / 252×448），所以"视角数与分辨率的失配"这一半
+  已消。剩下的只有 GT-mask 依赖那一半。
+
+- **运维：DDP 崩了要手动收尸**（05 号票现场吃到）。rank 0 抛异常退出后，
+  rank 1/2/3 **不跟着退**，变成 ppid=1 的孤儿，每个占着约 21 GB 显存不放
+  ⇒ 下一次启动必 OOM，而报错指向新进程，很容易误判成"配置吃显存"。
+  排查靠 `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` 对 `ps` 查 ppid=1。
+  值不值得做成 launcher 的一道自动检查还没想清楚，先记在这里。
 
 ## Out of scope
 
@@ -167,6 +209,14 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   参数进了优化器，只占冻结三判据的第三条，**不是冻结**。freeze-contract 图已据此把它
   整票判出 scope（该图 07 号票），本图不能再把它推回去，否则两张图互指、它谁都不归。
   现寄存为本图 [06 号票](issues/06-aggregator-precision.md)（明确标注不在路上、不阻塞任何票）。
+- **类别预测**（2026-09-07 由 [05 号票](issues/05-training-operating-point.md)划出）：
+  joint 配方是 `class_agnostic: true`，`loss_segvggt.py:274-277` 把 200+1 的头 logsumexp 成
+  2 列（object / no-object）、`:194-196` 把 GT 类别全填 0 ⇒ **本图的 checkpoint 只预测 objectness**。
+  要真做类别得换头（Infinigen 213 类 vs 预训练 ScanNet200），是一个新的随机初始化大模块，
+  config 注释自己写了 "no classifier surgery" —— 这是有意的 Phase-1 配方。
+  **连带**：Not yet specified 里 `P̂ = LUT[ĉ] + Δ(q)` 依赖闭集 `ĉ`，因此它挂在"哪天做类别"上，
+  在本图内不可能成立。
+
 - **IGGT 路线**（`phys_iggt.yaml`）：aggregator/part_adaptor/part_head 全冻，phys head 是纯 frozen
   probe；要修得先给 VGGT aggregator 加 adapter，成本高一个量级。降级为"冻结底座"那一行的对照组。
 - **复现 PIXIE / VoMP / PhysGS，MPM 灵敏度实验，HILO / PixieVerse**（memory `paper-direction-scene-phys`

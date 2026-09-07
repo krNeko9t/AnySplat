@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: 03
+Blocked by: —（原为 03；2026-09-07 阻塞已解除，且正文已被 05 号票就地执行）
 
 ## Question
 
@@ -35,3 +35,36 @@ Blocked by: 03
 
 常数来源定死并写进 config/代码，且 `physgm_denormalize` 与训练用的是同一套；
 若选拟合，`physgm_norm_infinigen.json` 已按训练集划分重生成。
+
+
+## 2026-09-07 更新（[05 号票](05-training-operating-point.md)已就地执行）
+
+**本票阻塞于 03 的理由消失了，而且要决定的三件事 05 号票都已执行。**
+
+阻塞理由原本是"train-only 拟合要等 03 定划分"。05 号票为了让 val 不再跑在训练场景上，
+自己加了 `scene_split_path` 并切出 **1387 训 / 74 验**（按 `scene_XXX` 生成分片整组切）
+⇒ 训练集当场就有了，不必等 03。
+
+05 号票据此执行的（提交 `40ff919` / `3a14983`）：
+
+1. **换成本语料拟合值**。留 PhysGM 常数的唯一理由是与 PhysGM 报的数可比，
+   而我们本来就不复现 PhysGM ⇒ 理由不成立。
+2. **只在训练集上拟合**：`fit_physgm_norm.py --scene_ids config/experiment/splits/infinigen_phys_train_ids.txt`，
+   1387 场景 / 49,214 实例。凭据 `config/experiment/splits/physgm_norm_infinigen_train.json` 进 git。
+3. **落在哪：改死 `parsers.py` 的 tuple**，不走 config 指 JSON。本图只有一份语料，
+   config 的灵活性买不到东西，却买来一个"推理期读了另一份"的静默错误面——
+   而本票自己写了"改一处即可，别改成两处"。注释里写明拟合来源、日期、以及
+   "换数据集要重新拟合，不能照抄这三行"。
+
+| 量 | 新（训练集拟合） | 旧（抄 PhysGM） |
+|---|---|---|
+| density (log10 kg/m³) | 2.863740 / 0.399147 | 3.0 / 0.5 |
+| youngs_modulus (log10 Pa) | 9.495947 / 1.317972 | 7.387210 / 2.456477 |
+| poisson_ratio (raw) | 0.336525 / 0.066235 | 0.398 / 0.111 |
+
+⚠️ **副作用（05 号票记在案）**：所有用 `instascene_vlm_physgm` 的配方
+（`physgm_iggt` / `physgm_mvimgnet2` / `segvggt_physgm` / `segvggt_agnostic_phys_joint`）
+归一化都跟着换了 ⇒ **拿旧 ckpt 做推理，反归一化对不上**。
+
+**本票剩下的只有确认**：上面三条是不是你要的。若是，直接关票；
+若第 3 条你更想要 config 指 JSON，那是一次独立的改动，在本票里做。
