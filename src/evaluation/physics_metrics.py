@@ -29,10 +29,13 @@ so its error is 0 by construction.
 
 Matching.  Queries are assigned to GT instances by the same IoU-optimal
 assignment ``matched_iou_mean`` uses (imported from ``instance_metrics`` rather
-than reimplemented), on the same flattened S*h*w volume.  So the physics numbers
-describe exactly the instances the segmentation numbers describe -- including,
-early in training, the bias towards large easy objects.  ``phys_n_matched``
-records how many instances that was.
+than reimplemented), on the same flattened S*h*w volume.  One deliberate
+difference: GT instances the teacher never labelled are dropped *before* the
+assignment, since they have no target to score against -- so this is the same
+recipe over a subset, not literally the same assignment as
+``matched_iou_mean``.  Either way the physics numbers inherit the segmentation
+numbers' bias, notably the pull towards large easy objects early in training.
+``phys_n_matched`` records how many instances were scored.
 """
 from __future__ import annotations
 
