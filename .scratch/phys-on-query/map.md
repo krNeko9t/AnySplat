@@ -57,6 +57,12 @@ block attn qkv/proj 底座 201.52M（LoRA 构造期冻）、block norm/ls 0.31M�
 `patch_embed` 304.37M、geo 头 248.83M。
 **实测吞吐**：1.30 s/step（8×A100 / bs=1 / 4 视角 / 252×448）⇒ 20k step ≈ 7.2 小时。
 `segvggt_agnostic_phys_joint.lock`：1533 行冻 / 1088 行训。
+**VLM 伪标签的类内方差分解**（2026-09-07，全量 51,981 条，04 号票，与 parser 同量纲）：
+log10 E / log10 ρ / ν 的类内占比 **73.6% / 76.7% / 78.2%**（截尾后 72.7%，非离群值所致）；
+**描述-类名不一致率 49.3%**，一致子集类内 **46.4%**、不一致子集 **87.5%**；
+`prototype` 解释类内残差 60.4%（一致子集）；类别查表 vs 常数基线只降 **15.6%**（log10 E MAE 0.890→0.751）；
+213 类中 **126 个单例类** ⇒ 只能按场景划 train/val。
+脚本 `scripts/analyze_teacher_headroom.py`，全部数字在 `$R/teacher_headroom_infinigen.json`。
 
 SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座下加大 head 22.4/23.4/**16.7**（倒退）。
 ⚠️ 以上是**论文数字，非本仓库实测**，不同数据/配方下不可直接套用。
@@ -84,20 +90,44 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   类别可从 `Objects_*.json` 97.5% 无损恢复。**发现在用的 z-score 常数是抄 PhysGM 的、
   与本语料严重不符（→ 07）**；`room:*`+`Window` 占 28.6% 标签（→ 08）。
 
+- [04 — 教师自己留了多少余量（同类别内标签方差）](issues/04-teacher-headroom.md)：
+  **教师留了约 74% 的类内余量，但其中约一半是 grounding 噪声。** 全量 51,981 条实测
+  类内/全体方差占比 log10 E **73.6%** / log10 ρ 76.7% / ν 78.2%（截尾后 72.7%，
+  **不是离群值撑的**）⇒ `H(P_VLM|类别) ≈ 0` 正式证伪，**最坏情形排除，学生有东西可学**。
+  但这个数是客观 shader 残差（37.4%）的**两倍**，多出来的那倍被抓到了：
+  **49.3% 的标签，VLM 自己写的 `object_description` 与该 id 的真实类名对不上**
+  （`CeilingLight`→冰箱、`Window`→会议桌）；一致子集类内 **46.4%**、不一致子集 **87.5%**,
+  而 46.4% 正好回到客观残差的量级。**排除了"类别表错位"**（id 偏移 k=±1 未富集），
+  认错目标弱富集于同场景内（94.9% vs 机会基线 85.1%），指向"给 VLM 看的图对错了物体"，
+  **但机制未定案且属抬高上限 ⇒ 仍在 Out of scope**；"训练要不要区别对待"属逼近上限
+  ⇒ → [12](issues/12-label-reliability.md)。
+  **余量是结构化的**：`appearance_materials.prototype` 解释掉类内残差的 60.4%（一致子集内）
+  ⇒ 教师在做逐实例材质判断，不是给随机数。
+  **免费捎带**：(a) 类别查表只比常数基线好 15.6%（log10 E 0.890→0.751）⇒ trivial baseline 很弱，
+  对本图是好消息；(b) **按类别划 train/val 不可行**（213 类里 126 个单例），只能按场景划 ⇒ 直接答了
+  [03](issues/03-approach-ceiling-metric.md) 第 4 点；(c) 非物体类 log10 E 类内 **95.6%** vs 真物体 65.9%
+  且 grounding 一致率相同 ⇒ 直接答了 [08](issues/08-non-object-classes.md) 第 4 点，
+  但**最脏的其实是软体真物体**（Pillow/Blanket/Towel sd≈2.0）⇒ 归 12 不归 08。
+  局限：一致/不一致是非随机划分，46.4% 是**带选择偏差的下界**；全程没看过一张图。
+
 ## Not yet specified
 
 - **物性头的花招**：`P̂ = LUT[ĉ] + Δ(q)` 这类"类别项 + 残差项"显式分解。等第一个 checkpoint
   的失败模式出来再判断值不值。已知代价：依赖闭集 200 类的 `ĉ`，认错类时误差不再平滑。
+  **2026-09-07 加料**（[04](issues/04-teacher-headroom.md)）：标签白送的 `appearance_materials.prototype`
+  解释掉类内残差的 60.4%（一致子集内、log10 E）——比类名本身有用得多。
+  把它当辅助监督头（query → 材质原型 → P）诱惑很大，但仍是**改头**，按 Notes 第 4 条押后。
+  [12 号票](issues/12-label-reliability.md)已明确把它排除在外，只谈样本可靠性。
 - **学生超越教师的那条合法路径**：教师只看一个最佳视角，学生看全部视角 ⇒ 学生可以更一致、
   更抗噪。这是唯一不违反"上限=教师"的超越方式，可测，但度量怎么定还没想清楚。
+  **2026-09-07 变具体了一点**（[04](issues/04-teacher-headroom.md)）：`n_views=1` 的 3,716 条
+  类内方差占比 81.9%，显著高于 2/3/4 视角的 68–78% ⇒ **"视角越多标签越稳"在标签侧已有实证**。
+  但它只占 7.2%，且 49.3% 的 grounding 错误在 4 视角上照样发生 ⇒ 多视角**没能**修好 grounding。
+  这条路径要成立，得先想清楚学生凭什么修好教师修不好的东西。仍不够格开票。
 - **part-level 粒度**：29.6% 的物体跨材质原型，object-level 单标签对它们是系统性错误。
   query 范式下拆 part 最便宜（多分配几个 query + 把 GT 拆到 part 粒度，不改表示）。
 - **训练/推理的 train-test 失配复核**：query 路径按 `code_facts` D 应当自动免除 GT-mask 依赖，
   但要在真实运行里确认一遍。
-- **标签里被丢掉的那些字段**：每条伪标签都白送 `object_description` / `appearance_materials`
-  (prototype+score) / `physical_priors` (bin+confidence) / `n_views` / 每个量的 `variance`，
-  目前一个都没进 loss。哪些值得用、怎么用（样本加权？辅助监督？）还看不清，等 04 判完教师余量的
-  性质再说。
 
 ## Out of scope
 
