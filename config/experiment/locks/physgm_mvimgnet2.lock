@@ -1,6 +1,6 @@
 # freeze-lock: physgm_mvimgnet2
 arch: IGGTWrapper
-freeze_keywords: [aggregator, camera_head, point_head, depth_head, part_adaptor, part_head]
+freeze_keywords: [*aggregator*, *camera_head*, *point_head*, *depth_head*, *part_adaptor*, *part_head*]
 base_lr: 1e-05
 structure: sha256:43e9b3d488d0372f852dcc4681e89c83313d42210e99c793bb9147d16fe89557
 

@@ -1,7 +1,7 @@
 """Generate the freeze lock for one experiment config (or all of them).
 
     python scripts/freeze_lock.py +experiment=<X>      # one recipe
-    python scripts/freeze_lock.py --all                # all 22, serially
+    python scripts/freeze_lock.py --all                # all 26, serially
 
 This is a pure-CPU script on purpose. Driving the check through ``src/main.py``
 would mean standing up a Trainer just to reach ``setup()``, binding a CPU-only
@@ -11,9 +11,9 @@ state -- and serialise with the *same* ``src.freeze_contract.capture`` the runti
 check uses.
 
 **--all spawns one subprocess per recipe, serially.** Building these models costs
-roughly 5GB of fp32 each; looping in-process over 22 of them exhausts memory and
+roughly 5GB of fp32 each; looping in-process over 26 of them exhausts memory and
 takes the machine down with it. A subprocess returns every byte on exit, and one
-recipe that fails to build does not take the other 21 with it.
+recipe that fails to build does not take the other 25 with it.
 
 Weights are never loaded. Every route into weights -- ``pretrained_weights``
 pointing at a cluster checkpoint, the ``hf:`` route, and the VGGT-1B backbone pull

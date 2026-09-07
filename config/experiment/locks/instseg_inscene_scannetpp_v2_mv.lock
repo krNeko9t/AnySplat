@@ -1,6 +1,6 @@
 # freeze-lock: instseg_inscene_scannetpp_v2_mv
 arch: AnySplatWrapper
-freeze_keywords: [aggregator, camera_head, depth_head]
+freeze_keywords: [*aggregator*, *camera_head*, *depth_head*]
 base_lr: 0.0002
 structure: sha256:ca0e0fa52e0a09a201efbb41ca291cbfa3d4f96b682e227909fa2f47ca515407
 

@@ -7,6 +7,7 @@ Subclasses must implement ``training_step``, ``validation_step``, and
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 import gc
 import logging
@@ -507,19 +508,33 @@ class BaseModelWrapper(LightningModule):
         Split out from ``setup()`` so ``scripts/freeze_lock.py`` can reach the same
         final state without tripping the check it is generating the lock for. One
         freeze implementation, two callers.
+
+        Each keyword is an ``fnmatch`` glob over the full parameter name, so a bare
+        substring is written ``*patch_embed*``. A leading ``!`` inverts the keyword:
+        it *deselects* the names it matches. Keywords are read in order and the last
+        one to match a name decides it, so ``[*global_blocks*, !*.lora.*]`` reads as
+        "the global blocks, except their LoRA adapters" -- the one recipe bare
+        substrings cannot express, since OR-of-substrings has no "except".
+
+        ``!`` narrows what this function selects; it never *un*-freezes. A parameter
+        no keyword selects is simply left as it was, which is what keeps the
+        additive-only invariant below intact for the LoRA base weights.
         """
         freeze_kw = list(self.optimizer_cfg.freeze_keywords or [])
         hit_counts = dict.fromkeys(freeze_kw, 0)
         n_frozen = 0
         for name, param in self.named_parameters():
-            matched = [kw for kw in freeze_kw if kw in name]
-            for kw in matched:
-                hit_counts[kw] += 1
+            selected = False
+            for kw in freeze_kw:
+                negated = kw.startswith("!")
+                if fnmatchcase(name, kw[1:] if negated else kw):
+                    hit_counts[kw] += 1
+                    selected = not negated  # last match wins
             # Additive only: never flip requires_grad back on. Some modules freeze
             # params at construction time (e.g. LoRA freezes the base weights of the
             # attention layers it wraps); an unconditional assignment here would
             # silently un-freeze them and train base + adapter together.
-            if matched:
+            if selected:
                 param.requires_grad = False
                 n_frozen += 1
         missed = [kw for kw, n in hit_counts.items() if n == 0]
@@ -527,7 +542,7 @@ class BaseModelWrapper(LightningModule):
             raise ValueError(f"freeze_keywords matched no parameters: {missed}")
         if self.global_rank == 0:
             for kw, n in hit_counts.items():
-                logger.info("[setup] freeze keyword %r -> %d params", kw, n)
+                logger.info("[setup] freeze keyword %r -> %d params matched", kw, n)
             logger.info("[setup] frozen %d params total", n_frozen)
 
     def setup(self, stage: str) -> None:

@@ -6,13 +6,10 @@
 # data, split, normalisation, views, resolution, lr, steps, seed -- is shared
 # between the two arms **on purpose**: change anything here and change it there.
 #
-# ⚠️ NOT RUNNABLE YET -- BLOCKED ON TICKET 09.
-# `freeze_keywords` is a bare-substring OR match (base_wrapper.py: `kw in name`),
-# which cannot express "everything in the block except LoRA".  The `!` line below
-# is the syntax ticket 09 adds (fnmatch glob + `!` negation, last-match-wins in
-# the same loop).  Until that lands this config freezes nothing extra and the
-# arm is not the arm.  After it lands: regenerate the lock -- the diff must be
-# **exactly 192 lines** flipping from `-` to `T`.
+# Ticket 09 landed the `!` syntax this depends on (fnmatch glob + `!` negation,
+# last-match-wins in one loop), so this arm is runnable.  Verified against arm
+# (a)'s lock: **exactly 192 tensors / 9,437,184 params** flip from `-` to `T`,
+# all of them `.lora.`, and not one other row moves.
 #
 # Operating point fixed by ticket 05 (2026-09-07):
 #   data      Infinigen full, 1390 train / 73 val scenes, split by generation

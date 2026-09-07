@@ -1,6 +1,6 @@
 # freeze-lock: instseg_iggt_infinigen_mv
 arch: IGGTWrapper
-freeze_keywords: [aggregator, camera_head]
+freeze_keywords: [*aggregator*, *camera_head*]
 base_lr: 0.0002
 structure: sha256:d512e419e78f5c87271702fe8aa4ed0d680a4985760644ab95c8ebceea285d0b
 

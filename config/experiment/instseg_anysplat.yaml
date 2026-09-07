@@ -36,7 +36,7 @@ optimizer:
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
   new_param_keywords: ["part_adaptor", "part_head", "point_head"]
-  freeze_keywords: [aggregator, camera_head, depth_head]
+  freeze_keywords: ["*aggregator*", "*camera_head*", "*depth_head*"]
 
 trainer:
   max_steps: 60000

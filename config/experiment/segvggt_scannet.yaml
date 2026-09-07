@@ -37,7 +37,7 @@ optimizer:
   lr: 6.0e-5                       # pre-existing params (paper A.4)
   warm_up_steps: 1000
   backbone_lr_multiplier: 1.0      # pre-existing (camera/depth heads, LoRA base) at base lr
-  freeze_keywords: [patch_embed]   # DINO backbone frozen (paper)
+  freeze_keywords: ["*patch_embed*"]   # DINO backbone frozen (paper)
   param_groups:
     # newly-introduced params (cross/self-attn, instance queries, semantic DPT, LoRA)
     # trained at 2e-4 = 6e-5 * 3.333 (paper A.4)

@@ -62,13 +62,13 @@ optimizer:
   # heads + bare camera/register tokens; semantic_head / instance_ are what this
   # stage adapts.
   freeze_keywords:
-    - patch_embed
-    - frame_blocks
-    - global_blocks
-    - camera_head
-    - depth_head
-    - camera_token
-    - register_token
+    - "*patch_embed*"
+    - "*frame_blocks*"
+    - "*global_blocks*"
+    - "*camera_head*"
+    - "*depth_head*"
+    - "*camera_token*"
+    - "*register_token*"
 train:
   segvggt_geo_supervision: gt
 

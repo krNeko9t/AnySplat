@@ -68,15 +68,15 @@ optimizer:
   # instance_query_self_attn in one keyword; and QueryPhysGMReadout hangs directly off
   # the arch (encoder.query_physgm.*), so no keyword below can reach it.
   freeze_keywords:
-    - patch_embed
-    - frame_blocks
-    - global_blocks
-    - camera_head
-    - depth_head
-    - semantic_head
-    - instance_
-    - camera_token
-    - register_token
+    - "*patch_embed*"
+    - "*frame_blocks*"
+    - "*global_blocks*"
+    - "*camera_head*"
+    - "*depth_head*"
+    - "*semantic_head*"
+    - "*instance_*"
+    - "*camera_token*"
+    - "*register_token*"
 
 train:
   segvggt_geo_supervision: gt

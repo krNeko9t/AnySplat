@@ -1,6 +1,6 @@
 # freeze-lock: dl3dv
 arch: AnySplatWrapper
-freeze_keywords: [patch_embed]
+freeze_keywords: [*patch_embed*]
 base_lr: 0.0002
 structure: sha256:9e500bdfe0469a0b5ac0eb5c34862f7d663069d461e6869047864da480d1f1f9
 

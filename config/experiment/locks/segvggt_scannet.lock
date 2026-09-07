@@ -1,6 +1,6 @@
 # freeze-lock: segvggt_scannet
 arch: SegVGGTWrapper
-freeze_keywords: [patch_embed]
+freeze_keywords: [*patch_embed*]
 base_lr: 6e-05
 structure: sha256:05a1c24e0e1a214da21c04f6d1067f4cca94e736e1c7c6efd448763b91645885
 

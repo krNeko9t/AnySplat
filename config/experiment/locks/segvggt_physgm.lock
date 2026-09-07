@@ -1,6 +1,6 @@
 # freeze-lock: segvggt_physgm
 arch: SegVGGTWrapper
-freeze_keywords: [patch_embed, frame_blocks, global_blocks, camera_head, depth_head, semantic_head, instance_, camera_token, register_token]
+freeze_keywords: [*patch_embed*, *frame_blocks*, *global_blocks*, *camera_head*, *depth_head*, *semantic_head*, *instance_*, *camera_token*, *register_token*]
 base_lr: 0.0001
 structure: sha256:62a00ee5843b274dbc85f071ad4fba8d82718883881d4c9103681d0494ed6a94
 

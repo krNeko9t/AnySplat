@@ -214,12 +214,17 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 **config 能拨动的冻结开关只有 `optimizer.freeze_keywords`**（`src/model/wrapper/base_wrapper.py`
 的 `apply_freeze()`），在 DDP wrap **之前**的 `setup()` 里应用。三条语义：
 
-1. **裸子串匹配**：`kw in name`，不是前缀也不是正则。`patch_embed` 会命中 `part_head` 里
-   同名子串这类事要靠 lock 的 diff 看，不靠想。
-2. **只冻不解冻（增量式）**：命中置 `requires_grad=False`，未命中的**保持建模时的状态不动**。
+1. **glob 匹配 + `!` 取反，后命中者胜**（`fnmatchcase(name, kw)`，不是前缀也不是正则）。
+   裸子串要写成 `*patch_embed*`——**裸写 `patch_embed` 匹配不到任何东西**，会撞上第 3 条硬错。
+   前缀 `!` 的关键词**取消选中**它匹配的名字：关键词按顺序读，最后一个命中的说了算，
+   所以 `[*global_blocks*, !*.lora.*]` 读作"global blocks，但不含它们的 LoRA"。
+   `*patch_embed*` 会命中 `part_head` 里同名子串这类事仍要靠 lock 的 diff 看，不靠想。
+2. **只冻不解冻（增量式）**：选中置 `requires_grad=False`，未选中的**保持建模时的状态不动**。
    早期版本是无条件赋值 `requires_grad = not matched`，会把构造期冻结不变量（LoRA 基座）
    悄悄解冻，基座 + adapter 一起训、LoRA 完全失效。
-3. **关键词零命中直接 `raise`**，防拼错单词导致"以为冻了其实没冻"。
+   **`!` 只收窄"选中什么"，它不解冻**——同一条不变量因此原样成立。
+3. **关键词零命中直接 `raise`**，防拼错单词导致"以为冻了其实没冻"。`!` 关键词一视同仁：
+   拼错的 `!` 同样危险（它本该放行的东西会被冻掉）。
 
 `param_groups` 只管分组学习率，`lr_multiplier` 必须 > 0；想冻结就写进 `freeze_keywords`。
 **判断"某参数是否在训"看该配方的 lock，不看注释、不看这份文档。**
@@ -239,9 +244,9 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 ### 6.3 lock：启动时的实测校验
 
 - **一份配方一份 lock**，路径 `config/experiment/locks/<X>.lock`，`<X>` = hydra 的
-  `+experiment=<X>`（即 yaml 文件名）。**不用 `wandb.name` 当身份键**：22 份里 4 份与文件名不等、
-  且有两组重名，重名意味着两份配方共用一份 lock。
-- **全覆盖 + 缺 lock = 启动硬错**（22/22）。不是"有就校验"——否则"这份配方没写 lock"和
+  `+experiment=<X>`（即 yaml 文件名）。**不用 `wandb.name` 当身份键**：26 份里 7 份与文件名不等、
+  且有三组重名（`instseg_inscene_infinigen` ×2、`instseg_inscene_scannetpp_v2` ×2、`segvggt_finetune_agnostic` ×3），重名意味着数份配方共用一份 lock。
+- **全覆盖 + 缺 lock = 启动硬错**（26/26）。不是"有就校验"——否则"这份配方没写 lock"和
   "这份配方不需要冻结"长得一样，而"忘了写 `freeze_keywords`"正是三种故障形态之一。
 - **校验时机**：`BaseWrapper.setup()` 末尾、strategy wrap 之前，唯一的门是 `stage == "fit"`
   （`test` 下没有优化器，护栏守的是空气）。`fast_dev_run` 与 sanity check **零豁免**。
@@ -264,7 +269,7 @@ Physics / 通用分层契约、改需求指哪里、反模式：见 `[layered_sc
 5. 新增 arch / 新增 experiment 无需任何登记：缺 lock 是硬错，它跑不起来，直到有人生成并看过一份 lock。
 
 批量重生成用 `python scripts/freeze_lock.py --all`：**一进程一份、串行子进程**。单份构建峰值
-RSS 约 7.3G，在一个进程里连建 22 份会把机器抖死（swap 抖死，不是 OOM kill）。
+RSS 约 7.3G，在一个进程里连建 26 份会把机器抖死（swap 抖死，不是 OOM kill）。
 
 ### 6.5 不由这一层负责的事
 
@@ -293,7 +298,7 @@ RSS 约 7.3G，在一个进程里连建 22 份会把机器抖死（swap 抖死�
 2. **heads 按领域分组**：自研 head 统一在 `src/model/heads/{gaussian,instance,physics}/`；vendored VGGT 自带的 camera/dpt/track head 留在 `src/model/vggt/heads/` 盒子里，两边不要互相搬。新 head 按领域入组，或新建领域子目录。
 3. `EncoderIGGT.forward` 里对 `instance_feat_map` 有**硬编码 L2 normalize**（`iggt.py` 有注释 "hard code normalize for iggt"）；而 disc loss 又"没按原文做 L2 归一化"——改归一化策略时两处要一起考虑，别重复归一化。
 4. `EncoderAnySplat` 的 instance head 由 `instance_feat_dim` 控制（0 = 禁用，`config/model/encoder/anysplat.yaml` 默认 0）；IGGT 默认 8。同一个 PartHead 被两个 encoder 共享——这正是"同一 head 换 backbone"的实验入口，**改 PartHead 接口时两个 encoder 都要过一遍**。
-5. 参数冻结唯一入口是 `optimizer.freeze_keywords`，语义是**只冻不解冻**（增量式）、裸子串匹配、零命中 `raise`。**每份 experiment 配方必须带一份 lock**（`config/experiment/locks/<X>.lock`），启动时逐行校验实测的可训集合，不符或缺失即拒训——改了 `freeze_keywords` 就要重生成 lock 并一起提交。判断"某参数是否在训"**看它的 lock**，不看注释。机制全文见 §6，术语见根 `CONTEXT.md`。
+5. 参数冻结唯一入口是 `optimizer.freeze_keywords`，语义是**只冻不解冻**（增量式）、glob 匹配 + `!` 取反（后命中者胜）、零命中 `raise`。**每份 experiment 配方必须带一份 lock**（`config/experiment/locks/<X>.lock`），启动时逐行校验实测的可训集合，不符或缺失即拒训——改了 `freeze_keywords` 就要重生成 lock 并一起提交。判断"某参数是否在训"**看它的 lock**，不看注释。机制全文见 §6，术语见根 `CONTEXT.md`。
 6. 精度约定：camera/point/depth head 强制 fp32，loss 计算强制 fp32（`autocast enabled=False`）。别"顺手统一"精度。**注意 aggregator 不只是 autocast**：`arch/anysplat.py:113` 与 `arch/iggt.py:80` 对 aggregator 做了**无条件的永久 `.to(torch.bfloat16)`**（`arch/segvggt.py` 干净，只用 autocast）。后果是它的 AdamW 动量状态也是 bf16，量级 ~lr 的更新被舍成 0——参数 `requires_grad=True` 却不再更新。这**不是冻结**（见根 `CONTEXT.md` 的"bf16 死参数不是冻结"），是训练精度问题；22 份配方里有 5 份带着可训的 bf16 aggregator 参数（`instseg_small` 约 909M，占其可训参数的 72.8%）。
 7. Hydra 配置是**类型化的**（`src/config.py` `load_typed_root_config` + dataclass + beartype/jaxtyping import hook）。加配置项必须同步改对应 cfg dataclass，否则启动即报错；jaxtyping 的 shape 标注是运行时校验，改张量布局时记得改标注。
 8. 历史上已做过的清理，不要走回头路：post_opt 已全删；blender2opencv 手写矩阵已清理（统一走 src/coord）；trace 相机加载已抽到 src/trace_cameras 注册表。

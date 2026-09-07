@@ -53,13 +53,13 @@ optimizer:
   # objects+physics without letting the geometry prior drift. camera_token /
   # register_token are frozen for the same reason as in segvggt_physgm.
   freeze_keywords:
-    - patch_embed
-    - frame_blocks
-    - global_blocks
-    - camera_head
-    - depth_head
-    - camera_token
-    - register_token
+    - "*patch_embed*"
+    - "*frame_blocks*"
+    - "*global_blocks*"
+    - "*camera_head*"
+    - "*depth_head*"
+    - "*camera_token*"
+    - "*register_token*"
   param_groups:
     - keywords: [query_physgm]
       lr_multiplier: 5.0   # 2e-5 * 5 = 1e-4

@@ -35,7 +35,7 @@ optimizer:
   lr: 3.0e-5
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
-  freeze_keywords: [aggregator, camera_head, point_head, depth_head, part_adaptor, part_head]
+  freeze_keywords: ["*aggregator*", "*camera_head*", "*point_head*", "*depth_head*", "*part_adaptor*", "*part_head*"]
   param_groups:
     # - keywords: [part_adaptor, part_head]
     #   lr_multiplier: 0.1

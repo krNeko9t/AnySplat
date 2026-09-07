@@ -75,7 +75,7 @@ optimizer:
   lr: 2e-4
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
-  freeze_keywords: [patch_embed]
+  freeze_keywords: ["*patch_embed*"]
 
 data_loader:
   train:
