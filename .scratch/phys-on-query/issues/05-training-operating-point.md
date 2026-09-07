@@ -75,7 +75,7 @@ learned Parameter**。改 Q ⇒ 形状不匹配 ⇒ `strict=False` 静默丢弃 
 | 分辨率 | **252×448，钉死**；对 Infinigen 原生 288×512 是无损缩放（同为 0.5625） | 见 §4.2 |
 | Q | 400 | §0 |
 | 每步场景数 | `floor(max_img_per_gpu / views)` = `floor(8/4)` = **2/卡** ⇒ 4 卡 **8 场景/step** | §4.2 |
-| 步数 | **20k**（= 160k 场景样本 ≈ 对 1387 个场景过 115 遍） | 不预支：两臂 7 小时到手，看曲线再决定续不续 |
+| 步数 | **20k**（= 160k 场景样本 ≈ 对 1387 个场景过 115 遍） | 不预支：两臂约 6 小时到手，看曲线再决定续不续 |
 | 课程 | **无** | §3 |
 | 几何 | 不监督（`weight: 0`、`teacher` 不开），只留 11 号票的只读 `val/geo_*` | 01 号票已判，本票不推回 |
 | lr | `1e-4` / `query_physgm ×5 = 5e-4`（维持现状） | §5 |
@@ -247,7 +247,17 @@ python scripts/freeze_lock.py +experiment=phys_query_arm_a_frozen
 CUDA_VISIBLE_DEVICES=0,1,2,3 python src/main.py +experiment=phys_query_arm_a_frozen
 ```
 
-提交 `40ff919`。
+**墙钟（本票的第 3 项）**：(a) 臂实测 **≈1.1 s/step**（4×A100 / 4 视角 / 252×448 /
+每卡 2 场景，前 90 步）⇒ 20k step ≈ **6.1 小时**，比 scannet100 那次的 1.30 s/step 略快
+（Infinigen 图更小，解码便宜）。**19 天里两臂各跑一次只花一个上午**，算力确实不是约束。
+
+**启动核对**（4 卡日志）：`frozen 1533 params total`、
+`param_groups[0] keywords=['query_physgm'] -> 15 params` + `default -> 1073 params`、
+**`Trainable params: 487 M`** —— 与地图记的 1533/1088/487M 全部对上，lock 校验通过。
+⚠️ 日志里 LoRA 自己打的 `Trainable percentage: 85.32%` 是**构造期、`apply_freeze()` 之前**的数，
+不是冻结后的可训比例，别被它吓到。
+
+提交 `40ff919` / `3a14983` / `005ed62` / `8b3c4b6`。
 
 ### 9. 追修：视角钉死暴露的"帧数不够"崩溃（提交 `3a14983`）
 

@@ -67,7 +67,8 @@ user-site 优先级高于 env，把 `anysplat` 自己的 **torch 2.4.1+cu124** �
 block attn qkv/proj 底座 201.52M（LoRA 构造期冻）、block norm/ls 0.31M、**block LoRA 9.44M**、
 `patch_embed` 304.37M、geo 头 248.83M。
 **实测吞吐**：1.30 s/step（8×A100 / 4 视角 / 252×448）⇒ 20k step ≈ 7.2 小时。
-⚠️ 那次是 **scannet100 且开着抖动**跑的；05 号票钉死视角/分辨率并换到 Infinigen 后要重测。
+⚠️ 那次是 **scannet100 且开着抖动**跑的。05 号票钉死视角/分辨率并换到 Infinigen 后**重测为
+≈1.1 s/step**（4×A100 / 4 视角 / 252×448 / 每卡 2 场景）⇒ 20k step ≈ **6.1 小时/臂**。
 **`data_loader.train.batch_size` 在这条路径上是死的**（`data_sampler.py:118`）：
 每卡场景数 = `floor(max_img_per_gpu / 视角数)` = `floor(8/4)` = **2**，4 卡 ⇒ 8 场景/step。
 `segvggt_agnostic_phys_joint.lock`：1533 行冻 / 1088 行训（05 号票的 (a) 臂 lock 与它逐字节相同）。
