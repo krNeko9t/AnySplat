@@ -12,15 +12,18 @@
 # all of them `.lora.`, and not one other row moves.
 #
 # Operating point fixed by ticket 05 (2026-09-07):
-#   data      Infinigen full, 1390 train / 73 val scenes, split by generation
-#             shard (config/experiment/splits/infinigen_phys_split.json)
+#   data      Infinigen full, 1387 train / 74 val scenes, split by generation
+#             shard (config/experiment/splits/infinigen_phys_split.json).  1461
+#             of 1466 scenes are usable: the view sampler needs 13 frames for a
+#             4-view draw, not 4 (ViewSamplerBoundedFixed.min_frames_required).
 #   views     4, pinned (no {2,3,4} jitter)
 #   shape     252x448, pinned (no [252,448] height jitter); aspect-lossless for
 #             Infinigen's native 288x512
 #   Q         400 -- NOT a free parameter: aggregator.instance_query_token is a
 #             (1, 400, 1024) learned tensor in segvggt_scannet200.pt, so any
 #             other value silently random-inits the whole query bank
-#   steps     20k (~9.1 scenes/step over 4 GPUs => ~124 passes over the scenes)
+#   steps     20k (8 scenes/step over 4 GPUs => ~115 passes over the scenes);
+#             measured ~1.09 s/step => ~6.0 h per arm
 #   geometry  no supervision, read-only val/geo_* drift metrics only (ticket 11)
 #   curriculum  none: we start from pretrained SegVGGT, so GroupForward's
 #             "geometry then instances" stages are already done
@@ -108,7 +111,14 @@ checkpointing:
 
 hydra:
   run:
-    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+    # NOT under the repo: `/` is a 439G disk that runs ~93% full, and one
+    # checkpoint here is **9.8 GB** (save_weights_only: false => the full 1.37B
+    # fp32 model plus AdamW state for the 487M trainable params).  Lightning
+    # keeps `last.ckpt` alongside the save_top_k=1 best, so each arm sits on
+    # ~20 GB and peaks near 30 GB mid-write; two arms filled the root disk and
+    # killed arm (a) at step 1990 with OSError 28.  /mnt/storage_pool is the
+    # 3.5T array the dataset already lives on.
+    dir: /mnt/storage_pool/liaoyuanjun/runs/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
 
 loss:
   segvggt:

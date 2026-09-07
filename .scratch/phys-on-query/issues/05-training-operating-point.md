@@ -316,3 +316,23 @@ Infinigen 里够不着的场景共 5 个（1/1/2/5/10 帧）⇒ **1466 → 1461*
 2. **step 500 学生反而退到常数之后**（1.08 vs 0.90）。此时 `warm_up_steps: 1000` 还没走完、
    `query_physgm` 在 5e-4 上，早期乱走属正常，**但这正是 [10 号票](10-joint-lr.md)要盯的那条线**：
    若到几千步还回不到常数基线以下，就是 lr 太烫的证据。
+
+
+### 12. 追修三：根盘写满（`OSError: [Errno 28]`）
+
+(a) 臂在 **step 1990** 死于写 checkpoint 时磁盘满，并再次留下孤儿 rank（同 §10）。
+
+**账**：`save_weights_only: false` ⇒ 一份 ckpt **9.8 G**（1.37B fp32 权重 5.5 G +
+487M 可训参数的 AdamW 状态 3.9 G）。`save_top_k: 1` 之外 Lightning 另留 `last.ckpt`
+⇒ **每臂常驻约 20 G**，写新的那一刻峰值近 30 G。而仓库所在的 `/dev/sda1` 是 439 G、
+长期 **93% 满**，可用只剩 685 M。两臂一起跑必然写满。
+
+**改**：两份 config 的 `hydra.run.dir` 改到
+`/mnt/storage_pool/liaoyuanjun/runs/exp_${wandb.name}/...`（3.5 T 阵列，766 G 可用，
+数据本来就在那），理由写进 config 注释。删掉本 session 三次崩溃跑留下的 30 G 输出后根盘回到 31 G 可用。
+
+**这条已升进地图的「机器」一节**——它不是本票的事，是这台机器上所有训练的事。
+
+**监控的教训**：我第一版 `Monitor` 的 grep 里没有 `OSError` / `No space`，
+只靠 `Traceback` 兜住（这次兜住了，但纯属运气——磁盘满也可能表现为静默的 ckpt 缺失）。
+过滤器要按"这个进程现在崩了，我这条 grep 会不会出声"来设计，不是按"我期待看到什么"。

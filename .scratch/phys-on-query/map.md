@@ -29,6 +29,14 @@ logsumexp 成 2 列 ⇒ **这条路上的 checkpoint 不预测类别，只预测
 核实时 0 MiB 占用），conda env **`anysplat`**（base 里没有 torch）。`硬件环境.md` 说的
 "开发机无 GPU"指的是另一台；该文件现已随仓库在本机。
 数据全在本地盘 `/mnt/storage_pool/liaoyuanjun/data/InsScene-15K/`，**没有"传数据"这道工序**。
+
+⚠️ **训练输出必须写 `/mnt/storage_pool`，不能写仓库下的 `output/`**（2026-09-07
+[05 号票](issues/05-training-operating-point.md)现场吃到）：根盘 `/dev/sda1` 只有 439G 且长期
+**93% 满**，而本配方一份 checkpoint 就是 **9.8 G**（`save_weights_only: false` ⇒ 1.37B fp32
+权重 + 487M 可训参数的 AdamW 状态）；Lightning 还会在 `save_top_k` 之外另留 `last.ckpt`
+⇒ **每臂常驻约 20 G、写入峰值近 30 G**。两臂一起跑直接把根盘写满，
+arm (a) 在 step 1990 死于 `OSError: [Errno 28] No space left on device`。
+两份臂 config 的 `hydra.run.dir` 已改到 `/mnt/storage_pool/liaoyuanjun/runs/`（3.5T，766G 可用）。
 `research_space/`（事实底座）2026-09-07 已从开发机拷到本机，但**不在 git 里**——
 换机器要重新拷。
 
