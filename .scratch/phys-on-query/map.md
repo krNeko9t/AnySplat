@@ -20,9 +20,12 @@ class 之外额外输出 object-centric 的 P = (杨氏模量, 泊松比, 密度
 
 **每个 session 应调用的 skill**：`grilling` + `domain-modeling`。
 
-**机器**（2026-09-06 核实）：本图的活跑在 **GPU 服务器 `bms-39468022-001`**（8×A100-40G），
-conda env **`anysplat`**（base 里没有 torch）。`硬件环境.md` 说的"开发机无 GPU"指的是另一台。
+**机器**（2026-09-07 复核）：本图的活跑在 **GPU 服务器 `bms-39468022-001`**（8×A100-40G，
+核实时 0 MiB 占用），conda env **`anysplat`**（base 里没有 torch）。`硬件环境.md` 说的
+"开发机无 GPU"指的是另一台；该文件现已随仓库在本机。
 数据全在本地盘 `/mnt/storage_pool/liaoyuanjun/data/InsScene-15K/`，**没有"传数据"这道工序**。
+`research_space/`（事实底座）2026-09-07 已从开发机拷到本机，但**不在 git 里**——
+换机器要重新拷。
 
 ### 本图开工前已定的事（2026-09-03 grilling，不再重开）
 
@@ -48,12 +51,31 @@ conda env **`anysplat`**（base 里没有 torch）。`硬件环境.md` 说的"�
 
 关键数字：材质熵 H=3.865 bit，H(P|类别)=1.444 bit ⇒ **类别解释 62.6%，残差 37.4%**（Infinigen shader，
 非 VLM 标签）；同场景同类别 ≥2 实例的实例占比 99.2%；29.6% 的物体跨材质原型。
+**逐张量实测参数量**（2026-09-07，从官方 `segvggt_scannet200.pt` 直接数，01 号票）：
+`instance_` 454.25M / `semantic_head` 32.63M（= 现可训 487M）、**block MLP 402.90M**、
+block attn qkv/proj 底座 201.52M（LoRA 构造期冻）、block norm/ls 0.31M、**block LoRA 9.44M**、
+`patch_embed` 304.37M、geo 头 248.83M。
+**实测吞吐**：1.30 s/step（8×A100 / bs=1 / 4 视角 / 252×448）⇒ 20k step ≈ 7.2 小时。
+`segvggt_agnostic_phys_joint.lock`：1533 行冻 / 1088 行训。
+
 SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座下加大 head 22.4/23.4/**16.7**（倒退）。
 ⚠️ 以上是**论文数字，非本仓库实测**，不同数据/配方下不可直接套用。
 
 ## Decisions so far
 
 <!-- 一行一个已关闭的票 -->
+
+- [01 — 要不要放开 LoRA（冻结底座 vs LoRA joint）](issues/01-unfreeze-lora.md)：
+  **不是三选一，是 (d) 两臂并行对照**——4 卡全冻底座、4 卡放开 LoRA，同时起，
+  唯一变量 `!*.lora.*`（+9.44M / **+1.9%**，AdamW 动量 +75MB ⇒ **显存代价约等于零**，
+  票面"代价一"作废）。改用实测而非论证，因为**时间不是稀缺资源**：实测 **1.30 s/step**
+  ⇒ 20k step ≈ **7.2 小时**，19 天里能跑 60 次，(c) 的"先 a 后 b"所依赖的算力紧张假设被证伪。
+  **代价二（几何漂移）在现状下不可观测**（geo 头全冻 + `weight: 0` + 无指标）⇒ 判几何
+  不作为交付，代之以只读漂移指标（→ 11）。**票面给的改法实测不可行**：裸子串 OR 表达不出
+  "除了 lora"，补冻关键词会连带冻死 `instance_cross_blocks`(302M)+`instance_query_self_attn`(151M)
+  ⇒ 匹配语言要加"除了"（→ 09，**本图 Out of scope 因此开了一个窄口**）。
+  norm+ls(0.31M) 不一起放、LoRA 用默认组 1e-4——两条都为保住单变量。
+  顺带查出 `optimizer.lr` 注释过期（实际 1e-4/5e-4，注释写 2e-5/1e-4）⇒ → 10。
 
 - [02 — 把 Infinigen 全量 VLM 伪标签接进训练](issues/02-labels-into-training.md)：
   标签本就在训练机本地（1466 场景 / 146,034 帧 / 53,328 条），缺的只是 manifest。
@@ -83,7 +105,16 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   一定会做，但不在这张图里——这张图只做逼近当前上限。
 - **视频监督反演物性**（看物体形变优化参数）。原理上是唯一真有视觉物理信号的路，我们做不到。
 - **冻结机制本身**（字符串匹配脆弱、漏冻 token、多种实现并存）：
-  另开一张图 `.scratch/freeze-contract/map.md`。本图只消费冻结配方，不改机制。
+  另开一张图 `.scratch/freeze-contract/map.md`（**该图已于 2026-09-04 到达终点**，10 票全关）。
+  本图只消费冻结配方，不改机制。
+  **2026-09-07 开了一个窄口**（由 [01 号票](issues/01-unfreeze-lora.md) 逼出）：
+  freeze-contract 把"设计一套新的冻结 API"判出 scope 的理由是「换任何声明式语法照样要枚举，
+  会咬人的是枚举漏了没人发现，那是校验问题」。01 号票实测**证伪了这条前提的一半**——
+  问题不是"照样要枚举"，是**裸子串在表达力上写不出来**："block 里除了 lora 全冻"这条合法配方
+  根本不存在对应写法。**仅此一个缺口**收进本图为 [09 号票](issues/09-freeze-matching-language.md)
+  （glob + `!` 取反，一个循环、零新增分支、两道护栏原样存活）。
+  **不重开 freeze-contract**——它的终点（验收层）确实建成了，且已在该图 Out of scope
+  留了指回本票的一行。**这个口只开这么大**：除"表达'除了'"之外的任何机制改动仍在本图之外。
   **2026-09-04 更正**：原文把"bf16 静默冻结"也算进这条，是错的——它 `requires_grad` 全程为真、
   参数进了优化器，只占冻结三判据的第三条，**不是冻结**。freeze-contract 图已据此把它
   整票判出 scope（该图 07 号票），本图不能再把它推回去，否则两张图互指、它谁都不归。
