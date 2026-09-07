@@ -34,3 +34,12 @@ far: 100.0
 # Registry: src/dataset/physics/parsers.py  (e.g. 3dovs_json)
 physics_parser: null
 
+# JSON with {"train_scene_ids": [...], "val_scene_ids": [...]}; see
+# scripts/split_scenes.py.  train and val share this cfg, so null means
+# **validation runs on training scenes**.
+scene_split_path: null
+
+# Pin the DynamicBatchSampler's jitters (views per sample, input height) so
+# train == val == inference.  See src/dataset/data_sampler.py.
+fixed_views_and_shape: false
+

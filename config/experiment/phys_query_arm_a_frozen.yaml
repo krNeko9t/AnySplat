@@ -1,0 +1,126 @@
+# @package _global_
+# ARM (a) of the two-arm contrast decided in ticket 01: **frozen backbone**.
+# The only difference from `phys_query_arm_b_lora.yaml` is one line in
+# `freeze_keywords` (`!*.lora.*`, +9.44M / +1.9% trainable).  Everything else --
+# data, split, normalisation, views, resolution, lr, steps, seed -- is shared
+# between the two arms **on purpose**: change anything here and change it there.
+#
+# Operating point fixed by ticket 05 (2026-09-07):
+#   data      Infinigen full, 1390 train / 73 val scenes, split by generation
+#             shard (config/experiment/splits/infinigen_phys_split.json)
+#   views     4, pinned (no {2,3,4} jitter)
+#   shape     252x448, pinned (no [252,448] height jitter); aspect-lossless for
+#             Infinigen's native 288x512
+#   Q         400 -- NOT a free parameter: aggregator.instance_query_token is a
+#             (1, 400, 1024) learned tensor in segvggt_scannet200.pt, so any
+#             other value silently random-inits the whole query bank
+#   steps     20k (~9.1 scenes/step over 4 GPUs => ~124 passes over the scenes)
+#   geometry  no supervision, read-only val/geo_* drift metrics only (ticket 11)
+#   curriculum  none: we start from pretrained SegVGGT, so GroupForward's
+#             "geometry then instances" stages are already done
+#
+# Usage (4 GPUs; arm (b) takes the other 4):
+#   PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#     python src/main.py +experiment=phys_query_arm_a_frozen
+#
+# NOTE `PYTHONNOUSERSITE=1` is mandatory on this machine: ~/.local carries a
+# torch 2.7.1+cu118 that outranks the env's 2.4.1+cu124 and breaks
+# pytorch3d._C / torch_scatter at import.
+
+defaults:
+  - /dataset@_group_.manifest: manifest
+  - override /model/encoder: segvggt
+  - override /loss: [segvggt, segvggt_geo]
+
+wandb:
+  name: phys_query_arm_a_frozen
+  tags: [instseg, segvggt, class_agnostic, physics, physgm, joint, arm_a, frozen]
+
+logger: tensorboard
+
+data_loader:
+  train:
+    # Ignored on this path: DynamicBatchSampler sets the batch from
+    # floor(max_img_per_gpu / views) = floor(8 / 4) = 2 scenes per GPU.
+    batch_size: 1
+
+model:
+  encoder:
+    pretrained_weights: /mnt/storage_pool/liaoyuanjun/hf_home/hub/models--JinyuanQu--SegVGGT/snapshots/5a7818348c1f4978db4a8be904f180575fc2322a/checkpoint/segvggt_scannet200.pt
+    num_semantic_classes: 200
+    non_instance_classes: [wall, floor]
+    instance_query_num: 400
+    phys_scheme: query_physgm
+    physgm_hidden: 64
+  decoder: null
+
+optimizer:
+  # 1e-4 default group / 5e-4 for the randomly-init query_physgm.  Ticket 10
+  # argues these should be 2e-5 / 1e-4 (stage-1's reasoning); ticket 05 kept the
+  # current pair for THIS run because arm (b) unfreezes LoRA at the default
+  # group, and 2e-5 could leave LoRA barely moving -- which would read as "the
+  # two arms are the same" for the wrong reason.  Ticket 10 reads its answer off
+  # these two curves.  Both arms must use the same values.
+  lr: 1.0e-4
+  warm_up_steps: 1000
+  backbone_lr_multiplier: 1.0
+  freeze_keywords:
+    - patch_embed
+    - frame_blocks
+    - global_blocks
+    - camera_head
+    - depth_head
+    - camera_token
+    - register_token
+  param_groups:
+    - keywords: [query_physgm]
+      lr_multiplier: 5.0
+
+train:
+  segvggt_geo_supervision: gt
+
+trainer:
+  max_steps: 20000
+  val_check_interval: 500
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  # Validate on the whole 73-scene split.  The old `1` meant 4 scenes per
+  # validation (b==1, one batch per rank), whose noise swamps the difference
+  # between the two arms.
+  limit_val_batches: 1.0
+
+checkpointing:
+  load: null
+  every_n_train_steps: 1000
+  save_weights_only: false
+  save_top_k: 1
+
+hydra:
+  run:
+    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+loss:
+  segvggt:
+    weight: 1.0
+    class_agnostic: true
+    lambda_cls: 0.5
+    lambda_mask: 1.0
+    lambda_js: 0.5
+    lambda_phys: 1.0
+    phys_mse_weight: 1.0
+  segvggt_geo:
+    weight: 0.0   # geometry is read-only here; see val/geo_* (ticket 11)
+
+dataset:
+  manifest:
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K
+    manifest_path: manifest_infinigen_phys.jsonl
+    scene_split_path: config/experiment/splits/infinigen_phys_split.json
+    original_image_shape: [288, 512]
+    input_image_shape: [252, 448]
+    physics_parser: instascene_vlm_physgm
+    fixed_views_and_shape: true
+    view_sampler:
+      num_context_views: 4
+      num_target_views: 0
+      max_img_per_gpu: 8

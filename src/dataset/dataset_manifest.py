@@ -55,6 +55,16 @@ class DatasetManifestCfg(DatasetCfgCommon):
     # Physics GT parser registry key (see src/dataset/physics/parsers.py).
     # None = do not load physics supervision.
     physics_parser: str | None = None
+    # JSON holding {"train_scene_ids": [...], "val_scene_ids": [...]} (see
+    # scripts/split_scenes.py).  ``train`` and ``val`` share one
+    # ``DatasetManifestCfg``, so without this the validation set *is* the
+    # training set.  None = no split (legacy behaviour).
+    scene_split_path: Path | None = None
+    # Freeze the DynamicBatchSampler's two jitters (views per sample, input
+    # height).  Training then matches validation and inference exactly, at the
+    # cost of the multi-scale/multi-view regularisation.  See
+    # src/dataset/data_sampler.py:DynamicBatchSampler.
+    fixed_views_and_shape: bool = False
 
 
 @dataclass
@@ -109,6 +119,26 @@ class DatasetManifest(Dataset):
             with manifest.open("r") as f:
                 obj = json.load(f)
             self.scenes = obj["scenes"] if isinstance(obj, dict) and "scenes" in obj else obj
+
+        if cfg.scene_split_path is not None and stage in ("train", "val"):
+            split_path = Path(cfg.scene_split_path)
+            if not split_path.is_absolute():
+                split_path = self.root / split_path if (self.root / split_path).exists() else split_path
+            split = json.loads(split_path.read_text())
+            wanted = set(split["val_scene_ids" if stage == "val" else "train_scene_ids"])
+            known = set(split["val_scene_ids"]) | set(split["train_scene_ids"])
+            unlisted = [s_ for s_ in self.scenes if str(s_.get("scene_id", "")) not in known]
+            before = len(self.scenes)
+            self.scenes = [s_ for s_ in self.scenes if str(s_.get("scene_id", "")) in wanted]
+            if not self.scenes:
+                raise ValueError(
+                    f"scene_split_path={split_path} left 0 scenes for stage={stage!r} "
+                    f"(manifest had {before}); split and manifest do not match"
+                )
+            logger.info(
+                "[DatasetManifest] stage=%s split=%s kept %d/%d scenes (%d manifest scenes in neither list)",
+                stage, split_path, len(self.scenes), before, len(unlisted),
+            )
 
         if cfg.overfit_to_scene is not None:
             self.scenes = [s for s in self.scenes if str(s.get("scene_id", "")) == cfg.overfit_to_scene]

@@ -29,6 +29,13 @@ Geometry is also reported as *read-only* validation metrics (``val/geo_*``, see
 :meth:`SegVGGTWrapper._log_geo_drift`), which stay live even when
 ``segvggt_geo.weight`` is 0 and the geometry heads are frozen -- that is the only
 way backbone drift into depth / pose becomes visible at all.
+
+Physics is reported the same way (``val/phys_mae_*``, see
+:mod:`src.evaluation.physics_metrics`): per-property MAE in reportable units for
+the student, alongside a constant and a class-lookup baseline scored on the same
+matched instances.  The training loss is a Gaussian NLL and says nothing
+reportable on its own, so without these a run produces no readable signal about
+the only thing the physics head is for.
 """
 from __future__ import annotations
 
@@ -42,6 +49,7 @@ from torch import nn
 from src.coord import se3_inv
 from src.dataset.types import BatchedExample
 from src.evaluation.instance_metrics import compute_instance_metrics_batch
+from src.evaluation.physics_metrics import compute_physics_metrics_batch
 from src.loss import Loss
 from src.loss.loss_segvggt_geo import (
     LossSegVGGTGeo,
@@ -357,6 +365,46 @@ class SegVGGTWrapper(BaseModelWrapper):
                     self.global_step, metrics["matched_iou_mean"],
                     metrics["best_iou_per_gt_mean"], metrics["ap50"], metrics["ap25"],
                     metrics["n_gt"], metrics["n_fired"], metrics["mask_area_mean"],
+                )
+
+        # ---- physics: student vs the class-lookup baseline -----------------
+        # The map's destination is "student approaches teacher", and ticket 03
+        # fixes the reference frame: the teacher is not a row (the student's
+        # labels *are* the teacher), so what gets reported is the student's
+        # position relative to a training-split class lookup table.  Scored on
+        # the same IoU-optimal match as val/matched_iou_mean, so segmentation
+        # and physics describe the same instances.  Read-only, no grad.
+        if (
+            pred is not None
+            and pred.query_masks is not None
+            and pred.query_phys_mu is not None
+            and inst_mask is not None
+            and "physgm_target" in batch
+        ):
+            phys_metrics = compute_physics_metrics_batch(
+                pred.query_masks,
+                pred.query_phys_mu,
+                inst_mask,
+                batch["physgm_target"],
+                None,  # same as the instance metrics: do not crop GT with valid_mask
+            )
+            for key, value in phys_metrics.items():
+                self.log(f"val/{key}", float(value))
+            if phys_metrics and self.trainer.global_rank == 0 and batch_idx % 100 == 0:
+                logger.info(
+                    "[val phys step=%d n=%.1f] log10 E %.4f (const %.4f, clut %.4f)  "
+                    "log10 rho %.4f (const %.4f, clut %.4f)  nu %.4f (const %.4f, clut %.4f)",
+                    self.global_step,
+                    phys_metrics.get("phys_n_matched", float("nan")),
+                    phys_metrics.get("phys_mae_log10_youngs_modulus", float("nan")),
+                    phys_metrics.get("phys_mae_log10_youngs_modulus_const", float("nan")),
+                    phys_metrics.get("phys_mae_log10_youngs_modulus_clut", float("nan")),
+                    phys_metrics.get("phys_mae_log10_density", float("nan")),
+                    phys_metrics.get("phys_mae_log10_density_const", float("nan")),
+                    phys_metrics.get("phys_mae_log10_density_clut", float("nan")),
+                    phys_metrics.get("phys_mae_raw_poisson_ratio", float("nan")),
+                    phys_metrics.get("phys_mae_raw_poisson_ratio_const", float("nan")),
+                    phys_metrics.get("phys_mae_raw_poisson_ratio_clut", float("nan")),
                 )
 
         if self.trainer.global_rank == 0 and batch_idx % 100 == 0:

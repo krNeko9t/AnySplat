@@ -1,0 +1,32 @@
+{
+  "manifest": "/mnt/storage_pool/liaoyuanjun/data/InsScene-15K/manifest_infinigen_phys.jsonl",
+  "scene_ids": "config/experiment/splits/infinigen_phys_train_ids.txt",
+  "n_scenes": 1390,
+  "n_instances": 49324,
+  "properties": {
+    "density": {
+      "si_scale": 1.0,
+      "log10": true,
+      "mean": 2.865927051219448,
+      "std": 0.39988920240648507,
+      "n": 49324,
+      "clamped_below_1": 24
+    },
+    "youngs_modulus": {
+      "si_scale": 1000000.0,
+      "log10": true,
+      "mean": 9.49792289103076,
+      "std": 1.3215952871983865,
+      "n": 49324,
+      "clamped_below_1": 23
+    },
+    "poisson_ratio": {
+      "si_scale": 1.0,
+      "log10": false,
+      "mean": 0.3363652177438975,
+      "std": 0.06638787227913376,
+      "n": 49324,
+      "clamped_below_1": 0
+    }
+  }
+}

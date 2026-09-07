@@ -48,6 +48,13 @@ class PhysGMTarget:
     value_lut: Float32[Tensor, "max_id_plus_1 n_prop"]
     valid: Bool[Tensor, " max_id_plus_1"]
     property_names: tuple[str, ...]
+    # Optional, evaluation-only: the same rows filled with the **training-split
+    # mean of that instance's class** (also z-scored).  This is the trivial
+    # class-lookup baseline ticket 03 makes the student's reference frame, and
+    # it is carried on the target so the baseline is scored on exactly the
+    # instances the student was scored on.  None ⇒ baseline unavailable.
+    # Never read by any loss.
+    class_mean_lut: Float32[Tensor, "max_id_plus_1 n_prop"] | None = None
 
 
 @dataclass

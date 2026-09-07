@@ -313,10 +313,21 @@ class MixedBatchSampler(BatchSampler):
                 ds.epoch = 0
             if hasattr(ds, "set_epoch"):
                 ds.set_epoch(0)
+            # Two jitters live in DynamicBatchSampler: views per sample is drawn
+            # from image_num_range (weights n^2) and input height from h_range.
+            # ``fixed_views_and_shape`` pins both by handing it degenerate ranges
+            # -- no branch inside the sampler, so the jittered path is untouched.
+            n_ctx = ds.cfg.view_sampler.num_context_views
+            if getattr(ds.cfg, "fixed_views_and_shape", False):
+                image_num_range = [n_ctx, n_ctx]
+                h_range = [ds.cfg.input_image_shape[0], ds.cfg.input_image_shape[0]]
+            else:
+                image_num_range = [2, n_ctx]
+                h_range = ds.cfg.input_image_shape
             batch_sampler = DynamicBatchSampler(
                 sampler, 
-                [2, ds.cfg.view_sampler.num_context_views], 
-                ds.cfg.input_image_shape,
+                image_num_range, 
+                h_range,
                 seed=42,
                 max_img_per_gpu=ds.cfg.view_sampler.max_img_per_gpu
             )
