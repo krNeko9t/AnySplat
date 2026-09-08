@@ -2,7 +2,8 @@
 
 Type: task
 Status: open
-Blocked by: [02 — 让 trace 支持 feat_dim > 20](02-chunked-trace-over-20-channels.md), [05 — 预处理与 trace 相机对不对得上](05-preprocess-camera-alignment.md)
+Blocked by: [02 — 让 trace 支持 feat_dim > 20](02-chunked-trace-over-20-channels.md)
+  （[05 — 预处理与 trace 相机对不对得上](05-preprocess-camera-alignment.md) 已关闭 2026-09-08）
 Blocks: [04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)
 Assignee: —
 
@@ -45,3 +46,28 @@ Assignee: —
   以及各批的 `Q_all` / 物性 / score。
 - `report_physics` 的那张表能打出来（SI 单位，不是归一化空间的数）。
 - feature map 的 PCA 伪彩色贴回原图对得上边缘（05 号票的判据在这里复查一次）。
+
+
+---
+
+## 05 号票（2026-09-08 关闭）钉死的实现细节
+
+**照抄，不要重新推导。**
+
+1. **相机：什么都不做。** `trace_cams = list(cam_list)` —— 用场景自己的相机。
+   整图 resize 对 `TraceCamera` 是无操作（只存 `FoVx/FoVy`，`focal2fov` 对同比缩放不变），
+   而 trace 循环（`trace_instance_to_gaussians.py:1516`）已经把 feature map 插值到相机栅格，
+   那一步就是要的映射。**`trace_crop_aligned` 的两个 helper 对 segvggt 都不适用**，
+   `create_virtual_crop_camera` 尤其不要碰（它算了 `cx_crop` 却从不传出，偏心裁剪静默错）。
+
+2. **护栏（本票要写的唯一一段几何代码）**：进 forward 前断言
+   **全部帧尺寸相同** 且 **`new_h <= new_w`**（横图），否则**硬报错**。
+   不满足时 `load_and_preprocess` 会裁剪，恒等映射随之失效 —— 而且不会报错，只会出糊图。
+   报错信息要写清是哪张图、什么尺寸。
+
+3. **运行点 = 252×448**，`encoder_batch_size = 4`。两个都不是可调参数：
+   252×448 是 01 号票读出"不漂"的那个点，4 是训练视角数且实测单调最优
+   （4→0.613、8→0.606、12→0.555、24→0.561）。**不要沿用 iggt 的 48**。
+
+4. **判据里的 GT 用 `sam/mask/*.png`**（原生 756×1008、8 实例），
+   **不是** `id_maps/*.npy`（336×504，上一次 IGGT 的产物）。

@@ -32,7 +32,8 @@ GPU 服务器 `bms-39468022-001`（8×A100-40G），conda env `anysplat`，
 
 1. **终点 = 定性图 + 可复现脚本**，量化只捎带 3dovs 的分割指标；不承诺物性的任何量化声明。
 2. **trace 的是 128 维 feature field，分 7 趟 ×20 通道**，不重编译 `TRACE_CHANNELS`。
-3. **场景**：主用 `3dovs/bench`（2DGS，自带 `id_maps` GT），另加 `mipnerf360/garden` 证明 3DGS 后端也通。
+3. **场景**：主用 `3dovs/bench`（2DGS，逐视角 GT 是 `sam/mask/*.png`，原生 756×1008、8 个实例——
+   `id_maps/*.npy` 是 336×504 的**上一次 IGGT 产物，不是 GT**，05 号票查证），另加 `mipnerf360/garden` 证明 3DGS 后端也通。
 4. **只用 `arm_b_lora`**（`/mnt/storage_pool/liaoyuanjun/runs/exp_phys_query_arm_b_lora/2026-09-07_17-09-03/checkpoints/epoch_114-step_20000.ckpt`）。
    分割是这条链路上唯一站得住的东西，b 臂 120/120 全胜；物性两臂半斤八两，不值得多跑一遍。
 5. **一致性判据用定性 + 端到端旁证**，不定硬阈值（现在没有依据，容易定出个假精确）。
@@ -97,6 +98,17 @@ mask logit 是 `q·f`，点积线性 ⇒ `Σ αT·(q·f) = q·(Σ αT·f)`。
   端到端旁证：query 打到平均特征上 mask IoU 中位 0.937，**比打到单个别的批还高**，平均在去噪不在抹糊。
   三条带下游：① query 比 feature 漂得多 ⇒ 04 号票必须在 3D 里按高斯 IoU 去重，不能用 query 余弦；
   ② 换 slot 只动尺度不动方向，但有 3% 的 norm 地板 ⇒ 04 定阈值别比它细；③ 只测了 bench 一个场景，08 顺手复跑。
+
+- [05 — SegVGGT 的预处理与 trace 相机对不对得上](issues/05-preprocess-camera-alignment.md)：
+  **对得上，且不用改相机。** bench 36 帧同尺寸横图 ⇒ 预处理退化成整图 resize，而
+  `focal2fov(f·s, W·s) == focal2fov(f, W)` ⇒ resize 对 `TraceCamera` 是**无操作**，
+  直接 `trace_cams = list(cam_list)`（`trace_crop_aligned=False`，与现有 config 一致）。
+  PCA 伪彩色贴回原图，边界落在物体上，三个候选运行点全过。三个决定带下游：
+  ① **运行点 = 252×448**（三者质量并列 0.611–0.618，决定性理由是 01 号票的读数就在这个点上）；
+  ② **裁剪设护栏硬报错**，不给 `TraceCamera` 加主点（顺带查出 `create_virtual_crop_camera`
+  算了 `cx_crop` 却从不传出，偏心裁剪本来就静默错——只记不修）；
+  ③ **`encoder_batch_size` = 4**（视角数单调退化：4→0.613、24→0.561；显存/速度都不是约束，
+  IGGT 那个 48 有害）⇒ garden 47 批、`Q_all` 约 650 行，04 号票按"几百"设计。
 
 ## Not yet specified
 
