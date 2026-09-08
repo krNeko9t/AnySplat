@@ -98,6 +98,22 @@ SegVGGT 的 query 自己就是实例，这个问题不存在；**IGGT 没有 que
 `src/instseg/hdbscan_assign.py`：subsample → HDBSCAN → NearestCentroid 全量赋值。
 用户点名要重新评估这个代价 ⇒ 03 号票量它。
 
+
+**G8 — ⚠️ IGGT 的实例特征空间是 batch-relative 的（2026-09-09 由 03 号票发现，地图原先没有这条）。**
+同样 4 个视角，单独跑 / 放进 8 张的 batch / 放进 48 张的 batch，逐像素实例特征会变：
+平均 cosine 0.958 / 0.947，**5 分位 0.76、最小 0.19**。
+控制组：同一分组跑两遍 cosine = 1.0000 精确 ⇒ **编码器是确定性的，漂移全部来自 batch 组成。**
+bench 碰不到（36 视角一次前馈）。**garden 的 185 视角被切成 4 个 48 的 batch，
+全场景 HDBSCAN 因而混了 4 个朝向不同的特征空间**，而漂移量（≈0.05）与
+`cluster_selection_epsilon`（0.06）同量级。实测 garden 的主要簇扛住了，
+但**任何视角数多于一次前馈的场景都踩着这个雷**。
+
+**G9 — `sam/mask` 不是 3D 实例 GT，是逐帧 SAM 输出。**
+帧 00 是 id 1–8、帧 12 是 1–7、帧 24 是 1–9，**同一 id 在不同帧指不同物体**。
+⇒ 老图记的「bench 8 个实例」是**帧 00 的计数**；04 号票报的「10 个」是 36 帧 id 并集的最大值，
+**两个都不是场景实例数**。只有「逐视角 IoU + 匹配」是它的正当用法。
+bench 的 stuff 像素占比实测 **84.2%**（不是地图原先写的 62%），stuff 问题比假设的更重。
+
 ### 从两张老图继承的东西（引用，不重抄）
 
 - [老图 05 — 相机对齐](../segvggt-trace-3dgs/issues/05-preprocess-camera-alignment.md)：
@@ -153,6 +169,25 @@ SegVGGT 的 query 自己就是实例，这个问题不存在；**IGGT 没有 que
   且**分母因 LayerNorm 的正标量尺度不变性完全不重要**——池化的全部内容是
   「把该实例的高斯的 `gau_sem` 加起来」。承重的是 LayerNorm，不是分母的推敲。
   ⚠️ **bench 的 GT mask 是 10 个实例，不是老图记的 8 个。**
+
+- [03 — 官方 IGGT 权重的实例基线 + HDBSCAN 代价](issues/03-iggt-baseline-and-hdbscan-cost.md)：
+  **验收对照组已就位**——`runs/ticket03/overlay_bench_default/contact_sheet.png`，
+  6 帧 **1008×756 原生分辨率**、原图在下半透明实例色在上、无灰底（覆盖率 100%）。
+  orchestrator 逐张看过，边界贴着物体；**六视角同物体同色 ⇒ 顺带兑现了 05 的交付物 4**。
+  bench **9 个实例** = 2 stuff（墙 42.6% / 地板 40.9% 像素）+ 6 个真物体 + 1 个 1,025 高斯的碎片。
+  **HDBSCAN 代价：bench 9.64 s / 1.01 GB RSS，garden 11.36 s / 1.10 GB；
+  代价由 `max_points` cap 决定而非场景大小**（garden 多 74% 高斯只贵 18%）。
+  ⚠️ **真正的大头是 `postprocess_knn_k=20` 的 cKDTree 平滑：13.87 s / 1.78 GB，比 HDBSCAN 还贵。**
+  **参数：什么都不改。** 50/10/0.06 @ 200000 是网格里唯一在两场景上都不退化的点
+  （eps ≥ 0.10 两边塌、≤ 0.04 两边碎）；调高 `max_points` 反而更差（500k 上 bench 把墙和地板并了）。
+  噪声底是**零标签变动**（两次独立 trace 得到完全相同的 9 个实例，ARI 1.0000）。
+  ⚠️ **garden：相机/图像/trace/聚类/叠加全链路已跑通，但本机唯一的 garden PLY 是
+  31.5% 的中断拷贝**（header 声明 5,834,784 顶点，实有 1,839,236；文件恰好 435 MiB 整）。
+  在残缺场景上跑通不崩（185 视角、82 实例）。完整 garden 需重拷 ~1.45 GB。
+  garden 另需 `scripts/make_transforms_from_3dgs_cameras.py`（它没有 COLMAP `sparse/`，
+  转换约定已用渲染对齐验证）。
+  ⚠️ 更正：`configs/trace/*.json` 的**场景路径**并非「全部指向失联挂载点」，
+  只有 `alocasia.json` 是；真正指着失联挂载点的是 6 个里 3 个的 `iggt_model_path`。
 
 ## Not yet specified
 
