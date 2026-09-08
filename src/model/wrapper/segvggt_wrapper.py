@@ -250,19 +250,17 @@ class SegVGGTWrapper(BaseModelWrapper):
             d["pred_pose_enc_list"] = encoder_output.pred_pose_enc_list
         with torch.amp.autocast("cuda", enabled=False):
             m = self._geo_metric.metrics(d)
-        for key, value in m.items():
-            self.log(f"val/{key}", float(value))
-        if m and self.trainer.global_rank == 0:
-            logger.info(
-                "[val geo step=%d] camera=%.4f (T=%.4f R=%.4f fl=%.4f) "
-                "depth=%.3f depth_rel=%.4f",
-                self.global_step, float(m.get("geo_camera", float("nan"))),
-                float(m.get("geo_camera_T_last", float("nan"))),
-                float(m.get("geo_camera_R_last", float("nan"))),
-                float(m.get("geo_camera_fl_last", float("nan"))),
-                float(m.get("geo_depth", float("nan"))),
-                float(m.get("geo_depth_rel", float("nan"))),
-            )
+        # `sorted`, and it is load-bearing on every val log loop in this class.
+        # `sync_dist=True` makes Lightning all-reduce each metric across ranks,
+        # and it walks its results in *insertion* order -- so if two ranks
+        # insert the same names in two different orders, the collectives pair up
+        # mismatched metrics and each rank gets back someone else's number.
+        # Iterating a `set` of strings does exactly that (string hashing is
+        # salted per process).  Measured on a 2-GPU smoke run before this line
+        # existed: nu's constant baseline came back 0.5285 where the truth was
+        # 0.0498, with every other tag plausible-looking and wrong.
+        for key, value in sorted(m.items()):
+            self.log(f"val/{key}", float(value), sync_dist=True)
 
     # ------------------------------------------------------------------ #
     def training_step(self, batch, batch_idx):
@@ -331,9 +329,9 @@ class SegVGGTWrapper(BaseModelWrapper):
         if pred is not None and pred.query_class_logits is not None:
             probs = pred.query_class_logits[0].float().softmax(-1)
             fired = int((1.0 - probs[:, -1] > VAL_SCORE_THRESHOLD).sum().item())
-            self.log("val/queries_fired", float(fired))
+            self.log("val/queries_fired", float(fired), sync_dist=True)
         if "depth" in depth_dict and depth_dict["depth"] is not None:
-            self.log("val/depth_mean", depth_dict["depth"].float().mean())
+            self.log("val/depth_mean", depth_dict["depth"].float().mean(), sync_dist=True)
 
         # ---- read-only geometry drift (val/geo_*) --------------------------
         self._log_geo_drift(batch, encoder_output, depth_dict)
@@ -356,16 +354,8 @@ class SegVGGTWrapper(BaseModelWrapper):
                 None,  # do not crop instance GT with depth valid_mask
                 score_threshold=VAL_SCORE_THRESHOLD,
             )
-            for key, value in metrics.items():
-                self.log(f"val/{key}", float(value))
-            if self.trainer.global_rank == 0 and batch_idx % 100 == 0:
-                logger.info(
-                    "[val step=%d] matched_iou=%.4f best_iou_per_gt=%.4f "
-                    "ap50=%.4f ap25=%.4f n_gt=%.1f n_fired=%.1f area=%.4f",
-                    self.global_step, metrics["matched_iou_mean"],
-                    metrics["best_iou_per_gt_mean"], metrics["ap50"], metrics["ap25"],
-                    metrics["n_gt"], metrics["n_fired"], metrics["mask_area_mean"],
-                )
+            for key, value in sorted(metrics.items()):   # order matters: see _log_geo_drift
+                self.log(f"val/{key}", float(value), sync_dist=True)
 
         # ---- physics: student vs the class-lookup baseline -----------------
         # The map's destination is "student approaches teacher", and ticket 03
@@ -388,24 +378,8 @@ class SegVGGTWrapper(BaseModelWrapper):
                 batch["physgm_target"],
                 None,  # same as the instance metrics: do not crop GT with valid_mask
             )
-            for key, value in phys_metrics.items():
-                self.log(f"val/{key}", float(value))
-            if phys_metrics and self.trainer.global_rank == 0 and batch_idx % 100 == 0:
-                logger.info(
-                    "[val phys step=%d n=%.1f] log10 E %.4f (const %.4f, clut %.4f)  "
-                    "log10 rho %.4f (const %.4f, clut %.4f)  nu %.4f (const %.4f, clut %.4f)",
-                    self.global_step,
-                    phys_metrics.get("phys_n_matched", float("nan")),
-                    phys_metrics.get("phys_mae_log10_youngs_modulus", float("nan")),
-                    phys_metrics.get("phys_mae_log10_youngs_modulus_const", float("nan")),
-                    phys_metrics.get("phys_mae_log10_youngs_modulus_clut", float("nan")),
-                    phys_metrics.get("phys_mae_log10_density", float("nan")),
-                    phys_metrics.get("phys_mae_log10_density_const", float("nan")),
-                    phys_metrics.get("phys_mae_log10_density_clut", float("nan")),
-                    phys_metrics.get("phys_mae_raw_poisson_ratio", float("nan")),
-                    phys_metrics.get("phys_mae_raw_poisson_ratio_const", float("nan")),
-                    phys_metrics.get("phys_mae_raw_poisson_ratio_clut", float("nan")),
-                )
+            for key, value in sorted(phys_metrics.items()):  # order matters: see _log_geo_drift
+                self.log(f"val/{key}", float(value), sync_dist=True)
 
         if self.trainer.global_rank == 0 and batch_idx % 100 == 0:
             logger.info(
@@ -441,6 +415,77 @@ class SegVGGTWrapper(BaseModelWrapper):
                 step=self.global_step,
                 caption=batch["scene"],
             )
+
+    # ------------------------------------------------------------------ #
+    def on_validation_epoch_end(self) -> None:
+        """Print the numbers the curves are actually made of -- nothing else.
+
+        The console lines used to sit inside ``validation_step`` behind
+        ``batch_idx % 100 == 0``, and a rank sees only ~10 val batches, so every
+        printed row was *batch 0 alone*: 2 scenes, ~36 instances.  At the last
+        validation of arm (a) that row said E/clut = 1.447 while the aggregate
+        was 0.952 -- opposite signs of the same comparison, and this round it
+        was read as "the student is worse than the constant baseline" before
+        the tfevents said otherwise (ticket 13.3).  Lightning has already
+        reduced these over batches and (``sync_dist=True``) over ranks by the
+        time this hook runs, so what is printed is exactly what TensorBoard gets.
+        """
+        if self.trainer.global_rank != 0:
+            return
+        metrics = self.trainer.callback_metrics
+
+        def m(key: str) -> float:
+            value = metrics.get(f"val/{key}")
+            return float("nan") if value is None else float(value)
+
+        logger.info(
+            "[val step=%d] matched_iou=%.4f best_iou_per_gt=%.4f "
+            "ap50=%.4f ap25=%.4f n_gt=%.1f n_fired=%.1f area=%.4f",
+            self.global_step, m("matched_iou_mean"), m("best_iou_per_gt_mean"),
+            m("ap50"), m("ap25"), m("n_gt"), m("n_fired"), m("mask_area_mean"),
+        )
+        logger.info(
+            "[val phys step=%d n=%.1f] log10 E %.4f (const %.4f, clut %.4f)  "
+            "log10 rho %.4f (const %.4f, clut %.4f)  nu %.4f (const %.4f, clut %.4f)",
+            self.global_step, m("phys_n_matched"),
+            m("phys_mae_log10_youngs_modulus"),
+            m("phys_mae_log10_youngs_modulus_const"),
+            m("phys_mae_log10_youngs_modulus_clut"),
+            m("phys_mae_log10_density"),
+            m("phys_mae_log10_density_const"),
+            m("phys_mae_log10_density_clut"),
+            m("phys_mae_raw_poisson_ratio"),
+            m("phys_mae_raw_poisson_ratio_const"),
+            m("phys_mae_raw_poisson_ratio_clut"),
+        )
+        # ...and the same three properties in the caliber the paper table uses
+        # (instance-weighted pooled, ticket 13.2): mean(<tag>_xn) / mean(n).
+        n = m("phys_n_matched")
+
+        def pooled(key: str) -> float:
+            return m(f"{key}_xn") / n if n else float("nan")
+
+        logger.info(
+            "[val phys pooled step=%d] log10 E %.4f (const %.4f, clut %.4f)  "
+            "log10 rho %.4f (const %.4f, clut %.4f)  nu %.4f (const %.4f, clut %.4f)",
+            self.global_step,
+            pooled("phys_mae_log10_youngs_modulus"),
+            pooled("phys_mae_log10_youngs_modulus_const"),
+            pooled("phys_mae_log10_youngs_modulus_clut"),
+            pooled("phys_mae_log10_density"),
+            pooled("phys_mae_log10_density_const"),
+            pooled("phys_mae_log10_density_clut"),
+            pooled("phys_mae_raw_poisson_ratio"),
+            pooled("phys_mae_raw_poisson_ratio_const"),
+            pooled("phys_mae_raw_poisson_ratio_clut"),
+        )
+        logger.info(
+            "[val geo step=%d] camera=%.4f (T=%.4f R=%.4f fl=%.4f) "
+            "depth=%.3f depth_rel=%.4f",
+            self.global_step, m("geo_camera"), m("geo_camera_T_last"),
+            m("geo_camera_R_last"), m("geo_camera_fl_last"),
+            m("geo_depth"), m("geo_depth_rel"),
+        )
 
     # ------------------------------------------------------------------ #
     def test_step(self, batch, batch_idx):

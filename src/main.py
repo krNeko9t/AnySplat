@@ -73,7 +73,19 @@ def train(cfg_dict: DictConfig):
         if wandb.run is not None:
             wandb.run.log_code("src")
     
-    # Set up checkpointing.
+    # Set up checkpointing.  Two series, because a run produces two different
+    # artifacts and only one of them is expensive:
+    #
+    #   checkpoints/  the resumable one -- full optimiser state, latest step
+    #                 only (`last.ckpt`).  ~10.5 GB per copy here (1.37B fp32
+    #                 weights + AdamW state for 487M trainable params).
+    #   snapshots/    the curve -- weights-only, every snapshot kept.  6.62 GB
+    #                 per copy, measured on this recipe.
+    #
+    # Ticket 13.4: with one series at `save_top_k: 1` every save evicts the
+    # previous one, so both arms of the first two-arm run ended with nothing but
+    # `step_20000`, and re-scoring the middle of the curve offline (on the now
+    # fixed val views, ticket 13.1) became impossible for that run -- permanently.
     callbacks.append(
         ModelCheckpoint(
             output_dir / "checkpoints",
@@ -87,6 +99,18 @@ def train(cfg_dict: DictConfig):
         )
     )
     callbacks[-1].CHECKPOINT_EQUALS_CHAR = '_'
+
+    if cfg.checkpointing.snapshot_every_n_train_steps > 0:
+        callbacks.append(
+            ModelCheckpoint(
+                output_dir / "snapshots",
+                save_last=False,
+                every_n_train_steps=cfg.checkpointing.snapshot_every_n_train_steps,
+                save_top_k=-1,  # keep every one: this series *is* the record
+                save_weights_only=True,
+            )
+        )
+        callbacks[-1].CHECKPOINT_EQUALS_CHAR = '_'
     
     # Prepare the checkpoint for loading.
     checkpoint_path = update_checkpoint_path(cfg.checkpointing.load, cfg.wandb)

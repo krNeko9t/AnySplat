@@ -54,6 +54,11 @@ class ViewSamplerBoundedFixed(ViewSampler[ViewSamplerBoundedFixedCfg]):
     ]:
         num_views, _, _ = extrinsics.shape
 
+        # Non-train stages draw from a per-scene RNG so the frames are a pure
+        # function of the scene id rather than of whatever the training loop
+        # left in the global RNG (ticket 13.1).  ``None`` on train => global RNG.
+        generator = self.scene_generator(scene, device)
+
         # Compute the context view spacing based on the current global step.
         if self.stage == "test":
             # When testing, always use the full gap.
@@ -74,6 +79,7 @@ class ViewSamplerBoundedFixed(ViewSampler[ViewSamplerBoundedFixedCfg]):
             max_gap + 1,
             size=tuple(),
             device=device,
+            generator=generator,
         ).item()
 
         # Pick the left and right context indices.
@@ -81,6 +87,7 @@ class ViewSamplerBoundedFixed(ViewSampler[ViewSamplerBoundedFixedCfg]):
             num_views if self.cameras_are_circular else num_views - context_gap,
             size=tuple(),
             device=device,
+            generator=generator,
         ).item()
         if self.stage == "test":
             index_context_left = index_context_left * 0
@@ -104,6 +111,7 @@ class ViewSamplerBoundedFixed(ViewSampler[ViewSamplerBoundedFixedCfg]):
                 index_context_right + 1 - self.cfg.min_distance_to_context_views,
                 size=(self.cfg.num_target_views,),
                 device=device,
+                generator=generator,
             )
 
         # Apply modulo for circular datasets.
@@ -135,7 +143,7 @@ class ViewSamplerBoundedFixed(ViewSampler[ViewSamplerBoundedFixedCfg]):
             k_unique = min(num_extra_views, n_avail)
 
             if k_unique > 0:
-                perm = torch.randperm(n_avail, device=device)[:k_unique]
+                perm = torch.randperm(n_avail, device=device, generator=generator)[:k_unique]
                 extra_unique = candidates[perm]
             else:
                 extra_unique = torch.empty((0,), dtype=torch.int64, device=device)
@@ -146,7 +154,7 @@ class ViewSamplerBoundedFixed(ViewSampler[ViewSamplerBoundedFixedCfg]):
                 # Prefer sampling from available middle candidates; if none exist,
                 # fall back to repeating the left endpoint (degenerate but finite).
                 if n_avail > 0:
-                    fill_idx = torch.randint(0, n_avail, (need,), device=device)
+                    fill_idx = torch.randint(0, n_avail, (need,), device=device, generator=generator)
                     extra_fill = candidates[fill_idx]
                 else:
                     extra_fill = torch.full((need,), int(index_context_left), dtype=torch.int64, device=device)

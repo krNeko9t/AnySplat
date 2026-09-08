@@ -19,6 +19,11 @@ class CheckpointingCfg:
     every_n_train_steps: int
     save_top_k: int
     save_weights_only: bool
+    # Cadence of the *snapshot* series: weights-only checkpoints, all kept, for
+    # re-evaluating a finished run offline at several points on its curve.  0
+    # disables them.  Separate from the fields above because the two artifacts
+    # are for different things and cost differently -- see `src/main.py`.
+    snapshot_every_n_train_steps: int = 0
 
 
 @dataclass

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Read a TensorBoard ``events.out.tfevents.*`` file with the standard library only.
 
-Why this exists: the per-step scalars a training run writes are a *single sample*
-from rank 0 (Lightning's ``self.log`` does not reduce across ranks unless asked),
-recorded every ``log_every_n_steps``.  Eyeballing that in the TensorBoard UI with
+Why this exists: the per-step ``loss/*`` scalars a training run writes are a
+*single sample* from rank 0 (Lightning's ``self.log`` does not reduce across
+ranks unless asked), recorded every ``log_every_n_steps``.  (The ``val/*`` tags
+do ask, since ticket 13: they are reduced over every val batch on every rank.
+This file is also the only place a reported number may come from -- a console
+line is a convenience, not a source, and ticket 13.5 caught a monitoring agent
+inventing a row that appears in no log at all.)  Eyeballing that in the TensorBoard UI with
 smoothing cranked to 0.99 shows a trend but hides the two things that actually
 matter when a loss looks noisy: how wide the per-step spread is, and whether the
 spread is explained by the batch composition rather than by the model.

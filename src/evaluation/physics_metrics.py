@@ -36,6 +36,27 @@ recipe over a subset, not literally the same assignment as
 ``matched_iou_mean``.  Either way the physics numbers inherit the segmentation
 numbers' bias, notably the pull towards large easy objects early in training.
 ``phys_n_matched`` records how many instances were scored.
+
+Two calibers, and the table uses the pooled one.  Averaging these dicts over a
+val set gives a **scene-weighted** number (every scene counts once, whatever its
+instance count), while tickets 04 and 05 -- which set the scale everything on
+this map is read against -- pool over instances.  The two disagree by a factor
+of three on the class-lookup gap (val -9.7% vs pooled -17.4% on log10 E), so a
+"the student beats the lookup by X%" claim moves with the caliber.  Ticket 13.2
+picks **instance-weighted pooled**: it is the estimand 04/05 already report, and
+a scene-weighted mean of per-scene MAEs depends on how instances happen to be
+distributed over scenes, which the split can change.
+
+Rather than redefine the existing tags (that would make this run's points
+incomparable with the last one), the batch wrapper emits the missing sufficient
+statistic alongside them: ``<tag>_xn`` is the per-scene MAE times that scene's
+instance count, so
+
+    pooled MAE = mean(<tag>_xn) / mean(phys_n_matched)
+
+recovers the pooled caliber from any aggregator that can only take means --
+Lightning's included.  The plain ``phys_mae_*`` tags keep their scene-weighted
+meaning and stay what the in-flight curves are read from.
 """
 from __future__ import annotations
 
@@ -169,12 +190,35 @@ def compute_physics_metrics_batch(
         )
         if m:
             rows.append(m)
+    return aggregate_rows(rows)
+
+
+def aggregate_rows(rows: list[dict[str, float]]) -> dict[str, float]:
+    """Average per-scene metric dicts, and carry the pooled caliber alongside.
+
+    Split out from the wrapper so the two calibers can be tested without a model
+    (``tests/test_physics_metric_calibers.py``).
+    """
     if not rows:
         return {}
     # Scenes differ in how many instances matched; keys present in only some
     # rows (the class-lookup row) are averaged over the rows that have them.
-    keys = {k for r in rows for k in r}
-    return {
+    #
+    # `sorted`, not set order: every rank must see these in the same order --
+    # see the comment on the log loop in `SegVGGTWrapper.validation_step`.
+    keys = sorted({k for r in rows for k in r})
+    out = {
         k: sum(r[k] for r in rows if k in r) / sum(1 for r in rows if k in r)
         for k in keys
     }
+    # ...and the instance-weighted caliber, as `<tag>_xn` (see module docstring):
+    # mean(<tag>_xn) / mean(phys_n_matched) is the pooled MAE, recoverable
+    # downstream by any aggregator that can only take means.
+    # The denominator is `phys_n_matched` over *all* rows, so a tag missing from
+    # some rows (only `_clut` can be, and only if a scene has no class LUT at
+    # all) would divide by too large an n.  On this path the LUT is either
+    # present everywhere or nowhere, so the two row sets coincide.
+    for k in [k for k in keys if k != "phys_n_matched"]:
+        present = [r for r in rows if k in r]
+        out[f"{k}_xn"] = sum(r[k] * r["phys_n_matched"] for r in present) / len(present)
+    return out

@@ -119,8 +119,9 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   A 臂最终比常数基线好 12.9/4.1/3.3%，与类别查表比 **E 赢 3.3%、ρ 打平、ν 输 3.0%**。
   物性 5–10k 触底后回退，分割到 20k 未见顶 ⇒ **二者脱钩，瓶颈在头或监督信号不在特征。**
   ⇒ 交付哪个 ckpt 取决于主表报什么；改头之前先做 [14 号票](issues/14-checkpoint-diagnosis.md)
-  的诊断。⚠️ 全部数字受四个度量缺陷影响 ⇒ [13 号票](issues/13-measurement-trust.md)，
-  其中"val 视角未固定 seed"和"中间 ckpt 被 `save_top_k:1` 删光"**必须在下一次起跑前解决**。
+  的诊断。⚠️ 全部数字受度量缺陷影响 ⇒ [13 号票](issues/13-measurement-trust.md)
+  **2026-09-08 已全部修完并关闭**（含它自己查出的第五条：这 40 点只覆盖 74 个验证场景里的
+  **18 个**）；下一次起跑前的两条阻塞（固定 val 视角、保留中间权重）已解除。
 
 - [02 — 把 Infinigen 全量 VLM 伪标签接进训练](issues/02-labels-into-training.md)：
   标签本就在训练机本地（1466 场景 / 146,034 帧 / 53,328 条），缺的只是 manifest。
@@ -214,6 +215,29 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
   另三份 ckpt 根本没用 physgm parser），已改名 `__STALE-PHYSGM-NORM` + 放 `STALE_NORMALIZATION.md`。
   诚实记账：**目录名只挡人不挡程序**，ckpt 拷走标记就没了；没做"常数哈希写进 ckpt、
   不匹配硬报错"那一档。
+
+- [13 — 度量装置不可信（val 抽样、clut 口径、控制台行、权重保留）](issues/13-measurement-trust.md)：
+  **四条全做完，并在验收时撞出第五条更重的。** (1) val 视角改成**按场景名 sha256 播种**
+  （不是"一个固定 seed"）⇒ 视角不再依赖 step / rank / worker / batch 顺序，
+  **离线重评一份 ckpt 拿到的是同一批帧**；实测连续两次 validation 的 `phys_n_matched`
+  与全部 `*_const` / `*_clut` / `val/geo_*` 逐位相同。
+  (2) clut 口径定为**实例加权 pooled**（04/05 就是这个口径，而全图刻度都由它们给），
+  但**一个现有 tag 都没改**：新增 `<tag>_xn` 携带缺的充分统计量，
+  `pooled = mean(<tag>_xn)/mean(n)`——Lightning 只会做均值，这是关键。
+  本轮 40 点里的 `−9.7%` 是场景加权，**标注不可比、不进主表**。
+  (3) 三条控制台行挪到 `on_validation_epoch_end`，读 `callback_metrics` ⇒ **打印的就是
+  写进 tfevents 的数**；batch-0 那条骗人的路没了。
+  (4) checkpoint 拆两条序列：`checkpoints/last.ckpt` 全量 10.52 G（`save_top_k: 0`，
+  原来那份 "best by step" 与它逐字节相同）＋ `snapshots/` 每 2000 步一份 weights-only
+  **6.62 G 全留** ⇒ **153 G / 现余 531 G**（不是票面的 709 G）。
+  ⚠️ **新查出 13.6：本轮 40 点只覆盖 74 个验证场景里的 18 个**——`self.log` 默认
+  `sync_dist=False`，写进 tfevents 的是 rank 0 的局部均值（铁证：`phys_n_matched`
+  s499 = 521/18 = 28.9444…）。已全部加 `sync_dist=True` ⇒ 覆盖 72/74。
+  **不推翻 01**（两臂 rank 0 吃同一批场景，同 step 跨臂比较不受影响），但绝对数字
+  今后要记作"18 场景的读数"。⚠️ 顺带修掉一个**一开 `sync_dist` 就静默串号**的潜伏 bug：
+  指标 dict 的 key 来自 `set`，字符串哈希每进程加盐 ⇒ 两个 rank 以不同顺序 `self.log`，
+  Lightning 按插入顺序 all-reduce ⇒ **每个 rank 拿回别人的数**（nu 常数基线读成 0.5285，
+  真值 0.0498）。`sorted()` 即修；**任何 `sync_dist=True` 的日志循环都有这个坑**。
 
 ## Not yet specified
 

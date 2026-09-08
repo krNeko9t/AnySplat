@@ -93,18 +93,32 @@ trainer:
   limit_val_batches: 1.0
 
 checkpointing:
+  # Two series (ticket 13.4).  `checkpoints/` is the resumable one: full
+  # optimiser state, and `save_top_k: 0` leaves only `last.ckpt` -- the extra
+  # "best by step" copy the old `save_top_k: 1` kept was a byte-for-byte
+  # duplicate of it.  `snapshots/` is the curve: weights-only, every one kept.
+  #
+  # Budget, measured on the first two-arm run (10,516,643,400 B per full ckpt;
+  # the AdamW state is 8 B x 487M trainable = 3.90 GB of that, which is exactly
+  # the 0.076 GB by which arm (b)'s file is larger -- +9.44M LoRA params):
+  #   snapshots   10 per arm x ~6.6 GB x 2 arms = ~132 GB
+  #   last.ckpt   ~10.5 GB x 2 arms             =   ~21 GB
+  #                                              ~153 GB of the 544 GB free on
+  #   /mnt/storage_pool.  (Note 544, not the 709 GB the ticket assumed: the
+  #   first run's own output is already sitting there.)
   load: null
   every_n_train_steps: 1000
   save_weights_only: false
-  save_top_k: 1
+  save_top_k: 0
+  snapshot_every_n_train_steps: 2000
 
 hydra:
   run:
     # NOT under the repo: `/` is a 439G disk that runs ~93% full, and one
-    # checkpoint here is **9.8 GB** (save_weights_only: false => the full 1.37B
-    # fp32 model plus AdamW state for the 487M trainable params).  Lightning
-    # keeps `last.ckpt` alongside the save_top_k=1 best, so each arm sits on
-    # ~20 GB and peaks near 30 GB mid-write; two arms filled the root disk and
+    # checkpoint here is **10.5 GB** (save_weights_only: false => the full 1.37B
+    # fp32 model plus AdamW state for the 487M trainable params); with the
+    # snapshot series above each arm now writes ~76 GB over a run and peaks
+    # near 17 GB mid-write.  Two arms filled the root disk once already and
     # killed arm (a) at step 1990 with OSError 28.  /mnt/storage_pool is the
     # 3.5T array the dataset already lives on.
     dir: /mnt/storage_pool/liaoyuanjun/runs/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
