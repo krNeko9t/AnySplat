@@ -126,7 +126,25 @@ SegVGGT 的 query 自己就是实例，这个问题不存在；**IGGT 没有 que
   逐高斯单独 decode 出的 `mu` 的标准差。两处不等价分派：池化口径 → 04，成员集合 → 06。
   **给 02 的交待：训练侧照原样配，不改头、不改 loss、不改 `instance_mask` 来源。**
 
+- [02 — 物性头的训练接线与运行点，并起跑](issues/02-train-physics-head.md)：
+  **训练 2026-09-09 00:19 起跑，PID 500516，GPU 0/2/3/4，ETA ~02:04。**
+  dataset 换 Infinigen（manifest 1466 行 / 1387 训 74 验，`PHYSGM_NORMALIZATION` 逐位对上，没动）、
+  `max_steps` 60000→**10000**、`hydra.run.dir` 挪到 `/mnt/storage_pool`、
+  `freeze_keywords` → `["*", "!*physics_scheme*"]`。lock：**1729 参数 134 可训，
+  `physics_scheme` 之外 0 行可训**。log 在 `runs/logs/physgm_dpt_iggt_2026-09-09_00-19-50.log`。
+  ⚠️ **更正一条记录**：旧的六前缀枚举**并没有**漏掉东西——这套 build 只有七个带参模块，
+  没有带参数的 SamProjector / instance head，新旧写法逐位等价（`structure` sha256 未变）。
+  改保留是因为 glob 写法对未来加模块是不变式。
+
 ## Not yet specified
+
+- **val 里的物性对照面板**（学生 / 常数 / 类别查表三行）。02 号票查明它不是「白送」：
+  `compute_physics_metrics`（`src/evaluation/physics_metrics.py:80`）是按 SegVGGT 的 **query 口径**
+  写的（吃 `query_masks [Q,S,h,w]` 做 IoU 最优匹配），`physgm_dpt` 没有 query；
+  且自然插入点 `IGGTWrapper._log_physgm_predictions` 在 `if global_rank == 0:` 分支里
+  （`iggt_wrapper.py:186-193`），从那里发 `sync_dist=True` **会挂死 DDP**。
+  ⇒ 要接得先把 `physics_metrics` 从 query 口径解耦、并把调用提出 rank-0 块。
+  本图不需要它（不承诺物性的量化声明），留给下一张图。
 
 - **物性在 3D 空间的粒度**（逐高斯物性场 vs 实例级一个值）。01 号票的候选 C 会一并答掉它，
   但 C 已判出本图 scope ⇒ 这条 fog 留着，等本图收工后连同候选 C 一起重开。

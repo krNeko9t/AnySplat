@@ -42,13 +42,25 @@ optimizer:
   lr: 2.0e-4
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.1
-  freeze_keywords: ["*aggregator*", "*camera_head*", "*point_head*", "*depth_head*", "*part_adaptor*", "*part_head*"]
+  # Ticket 02 (iggt-phys-pipeline): "everything except physics_scheme", written
+  # as glob + `!` negation (last match wins -- base_wrapper.apply_freeze).
+  # Measured equivalent to the old enumeration it replaces (*aggregator* /
+  # *camera_head* / *point_head* / *depth_head* / *part_adaptor* / *part_head*):
+  # regenerating the lock moved zero requires_grad rows, because those six
+  # prefixes happen to cover all 1595 non-physics params this arch builds.  The
+  # point of the rewrite is that it *stays* true -- an enumeration silently
+  # starts training any module added later, a frozen probe cannot afford that.
+  # 1729 params total, 134 trainable, all under physics_scheme.
+  freeze_keywords: ["*", "!*physics_scheme*"]
   param_groups:
     - keywords: [physics_scheme]
       lr_multiplier: 1.0
 
 trainer:
-  max_steps: 60000
+  # 10k, not 60k: this is a frozen probe -- only physics_scheme has gradients --
+  # and phys-on-query saw the physics metrics bottom out around 5-10k.  10k
+  # leaves room for one full re-run inside the two-day window.
+  max_steps: 10000
   val_check_interval: 500
   precision: bf16-mixed
   limit_val_batches: 1
@@ -61,7 +73,11 @@ checkpointing:
 
 hydra:
   run:
-    dir: output/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
+    # NOT under the repo: `/` is a 439G disk sitting at 96% (21G free), and a
+    # full checkpoint here is multi-GB.  A previous run filled the root disk and
+    # killed a job with OSError 28.  /mnt/storage_pool is the 3.5T array the
+    # dataset already lives on.
+    dir: /mnt/storage_pool/liaoyuanjun/runs/exp_${wandb.name}/${now:%Y-%m-%d_%H-%M-%S}
 
 loss:
   physgm:
@@ -70,11 +86,18 @@ loss:
 
 dataset:
   manifest:
-    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K/processed_scannetpp_v2
-    manifest_path: /home/liaoyuanjun/projects/AnySplat/manifests/manifest_phys_scannet100.jsonl
-    # ScanNet++ iPhone frames are typically ~690x920; crop shim uses input_image_shape.
-    original_image_shape: [690, 920]
+    # Infinigen physics corpus (map G6), copied from phys_query_arm_b_lora.yaml:
+    # 1466 manifest rows -> 1387 train / 74 val scenes by generation shard.
+    # PHYSGM_NORMALIZATION (src/dataset/physics/parsers.py:74) is already fitted
+    # on THIS corpus's train split -- do not point this block elsewhere without
+    # refitting it.
+    root: /mnt/storage_pool/liaoyuanjun/data/InsScene-15K
+    manifest_path: manifest_infinigen_phys.jsonl
+    scene_split_path: config/experiment/splits/infinigen_phys_split.json
+    original_image_shape: [288, 512]
+    input_image_shape: [252, 448]
     physics_parser: instascene_vlm_physgm
+    fixed_views_and_shape: true
     view_sampler:
       num_context_views: 4
       num_target_views: 0   # IGGT: all supervised frames in context only

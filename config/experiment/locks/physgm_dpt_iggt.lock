@@ -1,6 +1,6 @@
 # freeze-lock: physgm_dpt_iggt
 arch: IGGTWrapper
-freeze_keywords: [*aggregator*, *camera_head*, *point_head*, *depth_head*, *part_adaptor*, *part_head*]
+freeze_keywords: [*, !*physics_scheme*]
 base_lr: 0.0002
 structure: sha256:43e9b3d488d0372f852dcc4681e89c83313d42210e99c793bb9147d16fe89557
 
