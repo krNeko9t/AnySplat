@@ -14,6 +14,9 @@ Feature sources (--feature_source):
   precomputed : Load pre-computed feature maps from .pt / .npy files.
   gt_idmap    : Load multi-view-consistent GT integer ID maps, encode via
                 random embeddings, trace, then decode back to IDs.
+  segvggt     : Run SegVGGT for a 128-d field plus its object-query bank.
+  iggt_phys   : Like `iggt`, plus the physgm_dpt 32-d dense physics feature from
+                the same forward pass, traced onto the same Gaussians.
 
 Legacy args (--run_dir, --feat_dir, --model_type iggt) are still supported
 and auto-detected when --feature_source is omitted.
@@ -767,12 +770,251 @@ def prepare_segvggt_features(cam_list, args, device):
     }
 
 
+# ---------------------------------------------------------------------------
+# Mode F (iggt_phys): IGGT instance feat (8-d) + physgm_dpt physics feat (32-d)
+# from ONE forward pass, traced onto ONE set of Gaussians.
+# ---------------------------------------------------------------------------
+#
+# Ticket 04 of the iggt-phys-pipeline map.  This source is a strict superset of
+# `iggt`: the primary stream it returns is byte-for-byte the same computation as
+# prepare_iggt_features (same weights, same preprocessing, same default image
+# size), and the 32-d physics map rides along as an *aux* stream so both land on
+# the same Gaussians and the same cameras by construction.
+#
+# The 32-d map is the input of PhysGMDenseReadout, i.e. the tensor the training
+# recipe pools with `pool_one_sample` before the per-property MLP
+# (physgm_dense_readout.py:68-90).  Pooling it in 3D instead of 2D is exactly
+# what ticket 01 decided (candidate A: "the head does not change one byte").
+
+IGGT_PHYS_FEAT_DIM = 32
+IGGT_PHYS_HIDDEN = 64
+
+
+def _strip_lightning_model_prefix(sd: dict) -> dict:
+    """Drop the LightningModule wrapper prefix (`model.`) from checkpoint keys."""
+    return {
+        (k[len("model."):] if k.startswith("model.") else k): v
+        for k, v in sd.items()
+    }
+
+
+def load_iggt_phys_weights(model, ckpt_path, device="cuda"):
+    """Overlay a trained `physics_scheme.*` state dict onto a built IGGT model.
+
+    The base IGGT checkpoint has no physics head, so `from_checkpoint` leaves
+    `physics_scheme` freshly initialised.  This copies the physics path (and only
+    the physics path) out of a Lightning checkpoint from experiment
+    `physgm_dpt_iggt` and asserts full coverage -- a silently half-loaded head
+    would produce plausible-looking numbers that mean nothing.
+
+    Returns a short provenance string.
+    """
+    raw = torch.load(ckpt_path, map_location="cpu")
+    step = None
+    src = None
+    if isinstance(raw, dict) and "state_dict" in raw:
+        step = raw.get("global_step")
+        src = raw.get("source_ckpt")
+        raw = raw["state_dict"]
+    raw = {k.replace("module.", "", 1): v for k, v in raw.items()}
+    raw = _strip_lightning_model_prefix(raw)
+
+    model_sd = model.state_dict()
+    want = [k for k in model_sd if "physics_scheme" in k]
+    if not want:
+        raise ValueError("Model was built without a physics_scheme; nothing to load.")
+
+    aligned = {}
+    missing, mismatched = [], []
+    for k in want:
+        if k not in raw:
+            missing.append(k)
+            continue
+        if tuple(raw[k].shape) != tuple(model_sd[k].shape):
+            mismatched.append((k, tuple(raw[k].shape), tuple(model_sd[k].shape)))
+            continue
+        aligned[k] = raw[k]
+    if missing or mismatched:
+        raise ValueError(
+            f"physics head checkpoint {ckpt_path} does not cover the built head: "
+            f"{len(missing)} missing (e.g. {missing[:3]}), "
+            f"{len(mismatched)} shape-mismatched (e.g. {mismatched[:2]}). "
+            "Refusing to run with a partially initialised physics head."
+        )
+    model.load_state_dict(aligned, strict=False)
+    prov = f"{ckpt_path} ({len(aligned)} physics_scheme tensors"
+    if step is not None:
+        prov += f", global_step={step}"
+    if src is not None:
+        prov += f", from {src}"
+    prov += ")"
+    print(f"[iggt_phys] Loaded physics head from {prov}")
+    return prov
+
+
+def load_iggt_phys_model(model_path, phys_ckpt, device="cuda"):
+    """Build IGGT with the `physgm_dpt` physics scheme attached.
+
+    Returns ``(model, capture, provenance)`` where *capture* is a dict that the
+    forward hook fills with the dense 32-d physics feature map.
+    """
+    from src.model.arch.iggt import EncoderIGGTCfg, IGGTModel
+
+    cfg = EncoderIGGTCfg(
+        name="iggt",
+        instance_feat_dim=8,
+        pretrained_weights="",
+        phys_scheme="physgm_dpt",
+        phys_feat_dim=IGGT_PHYS_FEAT_DIM,
+        physgm_hidden=IGGT_PHYS_HIDDEN,
+        phys_use_point_feat=True,
+        phys_use_window_cross_attn=True,
+    )
+    model = IGGTModel.from_checkpoint(cfg, model_path, device=device)
+
+    if phys_ckpt is not None:
+        prov = load_iggt_phys_weights(model, phys_ckpt, device=device)
+    else:
+        prov = "RANDOMLY INITIALISED (no --iggt_phys_ckpt given)"
+        print(
+            "[iggt_phys] WARNING: no physics checkpoint given -- the 32-d physics "
+            "stream comes from a freshly initialised head.  The plumbing is exact; "
+            "the values are not meaningful."
+        )
+
+    model.eval().to(device)
+    for p in model.parameters():
+        p.requires_grad = False
+
+    # The dense feature map never reaches EncoderOutput: PhysGMDPTBundle keeps it
+    # local and only publishes the pooled (mu, var).  A forward hook on the DPT
+    # head is the non-invasive way to get it -- no model code is touched, so the
+    # tensor is provably the same one the readout pools.
+    capture: dict[str, torch.Tensor] = {}
+    model.encoder.physics_scheme.physics_head.register_forward_hook(
+        lambda _m, _i, out: capture.__setitem__("feat_map", out)
+    )
+    print(
+        f"[iggt_phys] Loaded IGGT from {model_path}; "
+        f"instance_feat_dim=8, phys_feat_dim={IGGT_PHYS_FEAT_DIM}"
+    )
+    return model, capture, prov
+
+
+@torch.no_grad()
+def run_iggt_phys_batch(model, capture, image_paths, image_size, device="cuda"):
+    """One IGGT forward → (instance_feat [V,8,H,W], physics_feat [V,32,H,W])."""
+    images = load_and_preprocess_images_resize(
+        image_paths, resize_target_size=image_size
+    ).to(device)
+    images_batch = images.unsqueeze(0)  # [1, V, 3, H, W]
+
+    # instance_mask is all-`ignore_id`: PhysGMDPTBundle short-circuits to the
+    # empty-pool branch (the DPT head still runs, so the hook still fires), so we
+    # pay for the dense features and nothing else.  Pooling is ours to do in 3D.
+    b, v, _, h, w = images_batch.shape
+    dummy_mask = torch.zeros(b, v, h, w, dtype=torch.long, device=device)
+
+    capture.pop("feat_map", None)
+    enc_out, _ = model(images_batch, instance_mask=dummy_mask)
+    inst_feat = enc_out.instance_feat_map[0].float()  # [V, 8, H, W]
+
+    phys_feat = capture.pop("feat_map", None)
+    if phys_feat is None:
+        raise RuntimeError(
+            "physics_head forward hook never fired -- the physgm_dpt bundle did "
+            "not run its DPT head this pass."
+        )
+    phys_feat = phys_feat[0].float()  # [V, 32, H, W]
+
+    if phys_feat.shape[0] != inst_feat.shape[0]:
+        raise RuntimeError(
+            f"view count mismatch between streams: instance {inst_feat.shape} "
+            f"vs physics {phys_feat.shape}"
+        )
+    return inst_feat, phys_feat
+
+
+def prepare_iggt_phys_features(cam_list, args, device):
+    """IGGT instance feat + physgm_dpt dense physics feat from one forward pass."""
+    w_in, h_in = args._iggt_phys_image_size
+    print("\n[iggt_phys] Loading IGGT + physgm_dpt physics head ...")
+    model, capture, phys_prov = load_iggt_phys_model(
+        args.iggt_model_path, args.iggt_phys_ckpt, device,
+    )
+
+    batch_size = args.encoder_batch_size
+    image_paths = [c.image_path for c in cam_list]
+    inst_maps, phys_maps = [], []
+    print(f"[iggt_phys] Running IGGT on {len(cam_list)} views "
+          f"(batch_size={batch_size}, image_size={w_in}x{h_in}) ...")
+    for start in tqdm(range(0, len(cam_list), batch_size), desc="IGGT+phys"):
+        end = min(start + batch_size, len(cam_list))
+        inst_b, phys_b = run_iggt_phys_batch(
+            model, capture, image_paths[start:end], args._iggt_phys_image_size, device,
+        )
+        for vi in range(inst_b.shape[0]):
+            inst_maps.append(inst_b[vi].cpu())
+            phys_maps.append(phys_b[vi].cpu())
+    del model, capture
+    torch.cuda.empty_cache()
+
+    if len(inst_maps) != len(cam_list) or len(phys_maps) != len(cam_list):
+        raise RuntimeError(
+            f"stream/camera count mismatch: {len(inst_maps)} instance maps, "
+            f"{len(phys_maps)} physics maps, {len(cam_list)} cameras"
+        )
+
+    # Same forward, same views: the two streams must agree on the raster grid, or
+    # they are not describing the same pixels and the shared-Gaussian claim is void.
+    for i, (a, b) in enumerate(zip(inst_maps, phys_maps)):
+        if a.shape[1:] != b.shape[1:]:
+            raise RuntimeError(
+                f"view {i}: instance map {tuple(a.shape)} and physics map "
+                f"{tuple(b.shape)} disagree on spatial size"
+            )
+
+    # Ticket 05 of the segvggt map: a full-image resize is a no-op for TraceCamera,
+    # so `trace_crop_aligned` is only meaningful when the encoder crops.  Kept
+    # identical to prepare_iggt_features so the instance stream is comparable.
+    if args.trace_crop_aligned:
+        trace_cams = [
+            create_virtual_resize_camera(
+                cam, cam.orig_width, cam.orig_height,
+                cam.fx_raw, cam.fy_raw, cam.cx_raw, cam.cy_raw,
+                w_in, h_in,
+            )
+            for cam in cam_list
+        ]
+        print(f"  Using {w_in}x{h_in} virtual camera (resize-aligned)")
+    else:
+        trace_cams = list(cam_list)
+
+    return {
+        "feat_maps": inst_maps,
+        "trace_cams": trace_cams,
+        "feat_dim": inst_maps[0].shape[0],
+        "masks": None,
+        "primary_name": "inst",
+        "aux_feat_maps": {"phys": phys_maps},
+        "provenance": {
+            "iggt_ckpt": args.iggt_model_path,
+            "phys_ckpt": phys_prov,
+            "image_size_wh": (w_in, h_in),
+            "encoder_batch_size": batch_size,
+            "phys_feat_dim": IGGT_PHYS_FEAT_DIM,
+            "physgm_hidden": IGGT_PHYS_HIDDEN,
+        },
+    }
+
+
 FEATURE_PREP = {
     "anysplat": prepare_anysplat_features,
     "iggt": prepare_iggt_features,
     "precomputed": prepare_precomputed_features,
     "gt_idmap": prepare_gt_idmap_features,
     "segvggt": prepare_segvggt_features,
+    "iggt_phys": prepare_iggt_phys_features,
 }
 
 
@@ -1404,6 +1646,11 @@ def _validate_source_args(feature_source, args, parser):
             parser.error(
                 "--iggt_model_path is required for feature_source=iggt"
             )
+    elif feature_source == "iggt_phys":
+        if args.iggt_model_path is None:
+            parser.error(
+                "--iggt_model_path is required for feature_source=iggt_phys"
+            )
     elif feature_source == "precomputed":
         if args.feat_dir is None:
             parser.error(
@@ -1475,7 +1722,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     g_feat = parser.add_argument_group("Feature source")
     g_feat.add_argument(
         "--feature_source", default=None,
-        choices=["anysplat", "iggt", "precomputed", "gt_idmap", "segvggt"],
+        choices=["anysplat", "iggt", "precomputed", "gt_idmap", "segvggt",
+                 "iggt_phys"],
         help="Feature source type (auto-detected from legacy args if omitted)",
     )
     g_feat.add_argument("--feat_dir", default=None,
@@ -1504,6 +1752,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="iggt: path to IGGT checkpoint")
     g_feat.add_argument("--iggt_image_size", default="504,336",
                         help="iggt: resize target as W,H (default: 504,336)")
+    g_feat.add_argument("--iggt_phys_ckpt", default=None,
+                        help="iggt_phys: Lightning .ckpt of the physgm_dpt_iggt run "
+                             "(supplies physics_scheme.*; omit to run a freshly "
+                             "initialised head -- plumbing only, values meaningless)")
+    g_feat.add_argument("--iggt_phys_image_size", default=None,
+                        help="iggt_phys: resize target as W,H "
+                             "(default: follow --iggt_image_size, so the instance "
+                             "stream matches feature_source=iggt exactly)")
     g_feat.add_argument("--idmap_dir", default=None,
                         help="gt_idmap: directory of integer ID map files "
                              "(.npy or single-channel images)")
@@ -1521,6 +1777,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     g_run.add_argument("--white_background", action="store_true")
     g_run.add_argument("--save_render", action="store_true",
                        help="Save per-view trace RGB renders")
+    g_run.add_argument("--trace_blend_mass", action="store_true", default=False,
+                       help="Trace one extra constant-1.0 channel per view and save "
+                            "it as `blend_mass [N]`.  The kernel accumulates "
+                            "gau_sem[g] = sum_r w_gr * img_sem[r] with per-ray blend "
+                            "weights, while num_ray[g] is an unweighted hit count, so "
+                            "feat = gau_sem/num_ray carries a per-Gaussian scale of "
+                            "blend_mass/num_ray (bench: median 0.012).  Saving it "
+                            "makes that scale removable later without re-tracing.")
+    g_run.add_argument("--dump_feat_maps", default=None,
+                       help="Directory to write the per-view 2D feature maps "
+                            "(fp16, <dir>/<stream>/<image_name>.pt) that were fed "
+                            "to trace.  Needed to compare a 2D pooling protocol "
+                            "against the 3D one without a second forward pass.")
     g_run.add_argument("--trace_crop_aligned", action="store_true", default=True,
                        help="anysplat/iggt: trace with virtual camera aligned "
                             "to encoder preprocessing (default: True)")
@@ -1602,6 +1871,12 @@ def main():
     args._iggt_image_size = (iggt_w, iggt_h)
     sv_w, sv_h = [int(x) for x in args.segvggt_image_size.split(",")]
     args._segvggt_image_size = (sv_w, sv_h)
+    # iggt_phys defaults to the iggt operating point on purpose: the instance
+    # stream must stay comparable with feature_source=iggt (the acceptance
+    # control group), so this is opt-in, not a silent new default.
+    _ip_size = args.iggt_phys_image_size or args.iggt_image_size
+    ip_w, ip_h = [int(x) for x in _ip_size.split(",")]
+    args._iggt_phys_image_size = (ip_w, ip_h)
 
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -1727,18 +2002,50 @@ def main():
     masks = prep.get("masks")
     id_codec = prep.get("id_codec")
     query_bank = prep.get("query_bank")
+    # Optional extra feature streams that must land on the SAME Gaussians and the
+    # SAME cameras as the primary one (iggt-phys-pipeline ticket 04).  Each entry
+    # is name -> list of [D, H, W], one per camera in cam_list.
+    aux_feat_maps = prep.get("aux_feat_maps") or {}
+    primary_name = prep.get("primary_name")
+    provenance = prep.get("provenance")
+
+    for name, amaps in aux_feat_maps.items():
+        if len(amaps) != len(cam_list):
+            parser.error(
+                f"aux stream {name!r} has {len(amaps)} feature maps for "
+                f"{len(cam_list)} cameras"
+            )
 
     if args.save_render:
         os.makedirs(os.path.join(output_dir, "renders"), exist_ok=True)
+    if args.dump_feat_maps:
+        for name in [primary_name or "primary", *aux_feat_maps]:
+            os.makedirs(os.path.join(args.dump_feat_maps, name), exist_ok=True)
 
     # ---- 4. Trace loop (unified across all sources) ----
     sum_gau_sem = torch.zeros(N, feat_dim, device=device, dtype=torch.float32)
     sum_num_ray = torch.zeros(N, device=device, dtype=torch.float32)
+    aux_sum = {
+        name: torch.zeros(N, amaps[0].shape[0], device=device, dtype=torch.float32)
+        for name, amaps in aux_feat_maps.items()
+    }
+    sum_blend_mass = (
+        torch.zeros(N, device=device, dtype=torch.float32)
+        if args.trace_blend_mass else None
+    )
 
     n_passes = (feat_dim + TRACE_CHANNELS - 1) // TRACE_CHANNELS
+    aux_passes = sum(
+        (amaps[0].shape[0] + TRACE_CHANNELS - 1) // TRACE_CHANNELS
+        for amaps in aux_feat_maps.values()
+    )
     print(f"\nTracing {len(cam_list)} views (feat_dim={feat_dim}, "
           f"TRACE_CHANNELS={TRACE_CHANNELS} x {n_passes} pass(es), "
           f"backend={args.resolved_trace_backend}) ...")
+    if aux_feat_maps:
+        dims = ", ".join(f"{n}={a[0].shape[0]}d" for n, a in aux_feat_maps.items())
+        print(f"  + {len(aux_feat_maps)} aux stream(s) ({dims}) "
+              f"= {aux_passes} more pass(es); {n_passes + aux_passes} total per view")
 
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
         trace_cam = trace_cams[idx]
@@ -1773,6 +2080,60 @@ def main():
         sum_gau_sem += gau_sem
         sum_num_ray += num_ray.float()
 
+        # ---- 4b. Aux streams: same Gaussians, same camera, same mask ----
+        # The invariant is enforced, not assumed.  num_ray is an integer per-Gaussian
+        # hit count that depends only on geometry + camera + img_mask (never on the
+        # feature values), and it is bit-exact across passes -- so an exact compare
+        # is the right test here, and it is the strongest available proof that this
+        # aux stream landed on the same Gaussians through the same camera.
+        for name, amaps in aux_feat_maps.items():
+            aux_2d = amaps[idx].to(device)
+            if aux_2d.shape[1] != H or aux_2d.shape[2] != W:
+                aux_2d = F.interpolate(
+                    aux_2d.unsqueeze(0), size=(H, W),
+                    mode="bilinear", align_corners=False,
+                ).squeeze(0)
+            aux_gau, aux_num_ray, _, _ = trace_single_view_chunked(
+                means, quats, scales, opacities, colors,
+                aux_2d.permute(1, 2, 0).contiguous(), img_mask, trace_cam, bg_color,
+                args.resolved_trace_backend,
+            )
+            if not torch.equal(aux_num_ray, num_ray):
+                n_diff = (aux_num_ray != num_ray).sum().item()
+                raise RuntimeError(
+                    f"view {idx} ({cam.image_name}): aux stream {name!r} traced a "
+                    f"different Gaussian/ray set than the primary stream "
+                    f"({n_diff:,} of {num_ray.numel():,} Gaussians differ in "
+                    "num_ray).  The two streams are NOT on the same Gaussians / "
+                    "cameras; refusing to write a .pt that claims they are."
+                )
+            aux_sum[name] += aux_gau
+
+        if sum_blend_mass is not None:
+            ones = torch.ones(H, W, 1, device=device, dtype=torch.float32)
+            bm_gau, bm_num_ray, _, _ = trace_single_view_chunked(
+                means, quats, scales, opacities, colors,
+                ones, img_mask, trace_cam, bg_color, args.resolved_trace_backend,
+            )
+            if not torch.equal(bm_num_ray, num_ray):
+                raise RuntimeError(
+                    f"view {idx} ({cam.image_name}): the blend-mass pass traced a "
+                    "different ray set than the primary stream."
+                )
+            sum_blend_mass += bm_gau[:, 0]
+
+        if args.dump_feat_maps:
+            torch.save(
+                feat_maps[idx].detach().half().cpu(),
+                os.path.join(args.dump_feat_maps, primary_name or "primary",
+                             f"{cam.image_name}.pt"),
+            )
+            for name, amaps in aux_feat_maps.items():
+                torch.save(
+                    amaps[idx].detach().half().cpu(),
+                    os.path.join(args.dump_feat_maps, name, f"{cam.image_name}.pt"),
+                )
+
         if args.save_render:
             render_np = (
                 out_color.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255
@@ -1787,6 +2148,13 @@ def main():
     final_feat[valid_mask] = (
         sum_gau_sem[valid_mask] / sum_num_ray[valid_mask].unsqueeze(-1)
     )
+    # Same denominator, by construction: sum_num_ray is shared, which is only
+    # legitimate because the assert above proved every aux pass saw the same rays.
+    aux_final = {}
+    for name, s in aux_sum.items():
+        t = torch.zeros_like(s)
+        t[valid_mask] = s[valid_mask] / sum_num_ray[valid_mask].unsqueeze(-1)
+        aux_final[name] = t
 
     # ---- 6. Source-specific post-decode ----
     gaussian_ids = None
@@ -1803,7 +2171,10 @@ def main():
     print(f"  Trace backend:     {args.resolved_trace_backend}")
     print(f"  Gaussians total:   {N:,}")
     print(f"  Gaussians traced:  {n_valid:,} ({100 * n_valid / N:.1f}%)")
-    print(f"  Feature dim:       {feat_dim}")
+    print(f"  Feature dim:       {feat_dim}"
+          + (f" ({primary_name})" if primary_name else ""))
+    for name, t in aux_final.items():
+        print(f"  Aux stream:        {name} [{t.shape[0]:,}, {t.shape[1]}]")
     print(f"  Views used:        {len(cam_list)}")
 
     source_label = feature_source if args.feature_source else "instance"
@@ -1826,6 +2197,26 @@ def main():
     }
     if query_bank is not None:
         save_dict["query_bank"] = query_bank
+    if provenance is not None:
+        save_dict["provenance"] = provenance
+    if aux_final or primary_name:
+        # `gaussian_index` is the shared Gaussian index of every stream in this
+        # file: row i of the compacted view is Gaussian gaussian_index[i].  All
+        # gau_*_feat / num_ray arrays here are full length N, indexed the same way.
+        save_dict["valid_mask"] = valid_mask.cpu()
+        save_dict["gaussian_index"] = valid_mask.nonzero(as_tuple=True)[0].cpu()
+    if primary_name:
+        # Alias, not a copy: torch.save dedups shared storages within one file.
+        save_dict[f"gau_{primary_name}_feat"] = save_dict["feat"]
+    for name, t in aux_final.items():
+        save_dict[f"gau_{name}_feat"] = t.cpu()
+        save_dict[f"{name}_feat_dim"] = int(t.shape[1])
+    if sum_blend_mass is not None:
+        save_dict["blend_mass"] = sum_blend_mass.cpu()
+        r = (sum_blend_mass[valid_mask] / sum_num_ray[valid_mask])
+        print(f"  blend_mass/num_ray:  p05={r.quantile(0.05):.4f} "
+              f"p50={r.quantile(0.5):.4f} p95={r.quantile(0.95):.4f} "
+              f"max={r.max():.4f}  (1.0 would mean an unweighted ray mean)")
     if gaussian_ids is not None:
         save_dict["gaussian_ids"] = gaussian_ids.cpu()
     torch.save(save_dict, out_path_pt)

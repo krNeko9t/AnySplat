@@ -80,6 +80,48 @@ trace 出来的每个高斯的特征是 `feat_g = sum_gau_sem_g / num_ray_g`，�
 等权版本**一并算出来当控制组**（同一份 `.pt`，两行数，成本为零），
 用来量地图 01 里说的「不等价 1」。
 
+### ⚠️ 更正（2026-09-09，04 号票实测）：(a) 的推导是错的，结论仍成立且更强
+
+上面 (a) 里「`feat_g` 是打中该高斯的所有光线上的像素特征的**均值**」这句是**错的**。
+04 号票把一张常数 1.0 的特征图 trace 过去实测：若 `gau_sem` 真是逐光线的裸和，
+`gau_sem/num_ray` 应当恒等于 1.0；实测 bench 上是
+**p05=0.0005、p50=0.0124、p95=0.0618、max=0.242**（我复核过同一份 `.pt`，p95/p05 = **114×**），
+且对输入严格线性。核码原文也这么写着（`src/trace_render/trace_rasterize.py:251`）：
+「`gau_sem[:, c]` is an **alpha-weighted** accumulation of `img_sem[:, :, c]`」，
+而 `num_ray` 只依赖几何与 `img_mask`（同文件 `:255-256`）。真实口径是
+
+```
+gau_sem[g] = Σ_r  w_gr · f_r     （w = per-ray blend weight, alpha·T）
+num_ray[g] = |{r : r 打中 g}|     （不加权的整数计数）
+```
+
+⇒ `feat_g` 是**加权和除以不加权计数**，带着一个逐高斯、跨两个数量级的尺度 `W_g/N_g`。
+
+**重做代数，`num_ray` 加权反而落在比 (a) 声称的更干净的对象上**：
+
+```
+Σ_{g∈S} num_ray_g · feat_g  =  Σ_{g∈S} gau_sem_g  =  Σ_r W^S_r · f_r
+```
+
+即**该实例足迹上的、alpha 加权的光线级像素和**。所以加权口径不变，理由换了。
+
+**并且分母根本不重要**：decoder 首层 `LayerNorm` 对正标量缩放**严格不变**
+（`(cx − c·mean)/(c·std) = (x − mean)/std`），所以 `Σ num_ray`、`Σ blend_mass`
+还是别的任何正标量，喂进 MLP 的东西**一模一样**。
+⇒ **池化的全部内容就是「把该实例的高斯的 `gau_sem` 加起来」**，方向是唯一有意义的量。
+本票原来 (a) 里那半页关于分母的推敲，实际是空的；真正承重的是上面第 2 条（LayerNorm）。
+
+**两条随之要改的**：
+1. **等权 3D 池化不是干净的控制组**——它是 `Σ_g gau_sem_g/num_ray_g`，
+   把逐高斯的 `W_g/N_g` 尺度混了进去，是**被污染**，不只是「换了个权」。
+   实测它与加权版 cos = 0.996（几乎同向），所以这条在 bench 上不致命，但别再把它叫「控制组」。
+2. **`mu_spread`（(d) 条）逐高斯 decode 时**，喂进 MLP 的向量比训练时短约 50×、
+   且逐高斯尺度散布 100×。**只因为 LayerNorm 尺度不变才活着**——
+   谁要是绕过或去掉那个 LN，这个量立刻失效。
+
+04 号票为此在 `.pt` 里加了 **`blend_mass [N]`**（trace 一张常数 1.0 通道，+26 ms/view），
+使得日后要把尺度显式除掉不必重跑 trace——和本票要求落 `num_ray` 是同一个论证，只是更硬。
+
 **(b) 在 model space（z-score 后的对数域）里池化，最后一步才 denormalize。**
 准确说：池化发生在**特征空间**（32 维 dense feat），MLP 只跑一次，
 出来的 `(mu, var)` 已经在 model space，`physgm_denormalize` 是最后一个算子。

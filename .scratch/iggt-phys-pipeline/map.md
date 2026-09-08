@@ -136,7 +136,32 @@ SegVGGT 的 query 自己就是实例，这个问题不存在；**IGGT 没有 que
   没有带参数的 SamProjector / instance head，新旧写法逐位等价（`structure` sha256 未变）。
   改保留是因为 glob 写法对未来加模块是不变式。
 
+- [04 — trace 侧同时搬 instance feat 和 physics feat](issues/04-trace-two-feature-sources.md)：
+  **成了。** `runs/ticket04_iggt_phys/bench/gaussian_iggt_phys_feat.pt`（208 MB）里有
+  `gau_inst_feat [N,8]`、`gau_phys_feat [N,32]`、`num_ray [N]`、**`blend_mass [N]`**，
+  共享同一套下标。覆盖率 **96.22%**（老图 96.2%），3 趟 **79.2 ms/view**，不重编译 `TRACE_CHANNELS`。
+  改动对旧默认路径是加性的（−2 行，都是 choices/print），数值与控制组同到三位有效数字。
+  噪声底 **≈ 6e-7 相对**。「同一份高斯」由每趟对 `num_ray` 的逐位断言执法。
+  **池化口径读数**：2D↔3D cos 均值 0.87，但**这是实例尺寸效应**——
+  >1000 高斯的七个实例 cos 0.95–0.99，四个小/薄实例（534–1306 高斯）塌到 **0.39–0.82**；
+  而**加权 vs 等权 cos = 0.996，几乎无关紧要**。
+
+  ⚠️ **本票更正了 01 号票的推导**（结论不变）：`gau_sem` 是 **alpha 加权**累积、
+  `num_ray` 是不加权计数（`trace_rasterize.py:251`/`:255-256`），
+  常数 1.0 实测 `gau_sem/num_ray` p50 = 0.0124 而非 1.0、p95/p05 = 114×。
+  重做代数后 `num_ray` 加权仍对且更强（`Σ num_ray·feat = Σ gau_sem = Σ_r W_r f_r`），
+  且**分母因 LayerNorm 的正标量尺度不变性完全不重要**——池化的全部内容是
+  「把该实例的高斯的 `gau_sem` 加起来」。承重的是 LayerNorm，不是分母的推敲。
+  ⚠️ **bench 的 GT mask 是 10 个实例，不是老图记的 8 个。**
+
 ## Not yet specified
+
+- **小/薄实例的物性不可信**。04 号票实测：2D↔3D 池化的 cos 在 >1000 高斯的实例上是
+  0.95–0.99，在 534–1306 高斯的四个小/薄实例上塌到 **0.39–0.82**。
+  这**给老图 11 号票（「3D 丢薄结构」）第一次提供了实测依据**——它当初是作为对 04 负反馈的
+  随手补丁被判出 scope 的，现在有数字了，但仍不在本图内做（本图判据是「有个值就行」）。
+  本图内的动作只有一条：**05 的实例物性表要把高斯数少的实例标出来**，不要让它们混在表里
+  冒充等价可信的行。真要修是下一张图的事。
 
 - **val 里的物性对照面板**（学生 / 常数 / 类别查表三行）。02 号票查明它不是「白送」：
   `compute_physics_metrics`（`src/evaluation/physics_metrics.py:80`）是按 SegVGGT 的 **query 口径**
