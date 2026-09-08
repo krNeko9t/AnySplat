@@ -233,3 +233,57 @@ def raster_gaussian_rgb_u8(
     return (
         out_color.permute(1, 2, 0).clamp(0, 1).detach().cpu().numpy() * 255.0
     ).astype(np.uint8)
+
+
+def trace_single_view_chunked(
+    means, quats, scales, opacities, colors,
+    feat_hwc, img_mask, cam, bg_color,
+    trace_backend: str,
+):
+    """Trace a feature map of arbitrary depth by splitting it into TRACE_CHANNELS passes.
+
+    ``feat_hwc`` is ``[H, W, D]`` with *any* ``D >= 1``; the CUDA kernels only
+    accept exactly ``TRACE_CHANNELS`` channels, so the map is cut into
+    ``ceil(D / TRACE_CHANNELS)`` slices (the last one zero-padded) and the
+    per-Gaussian results concatenated back along the channel axis.
+
+    This is exact, not an approximation: inside ``trace`` the channels never mix
+    (``gau_sem[:, c]`` is an alpha-weighted accumulation of ``img_sem[:, :, c]``
+    alone), so the concatenation is element-wise equal to one hypothetical
+    D-channel trace.
+
+    ``num_ray``, ``radii`` and ``out_color`` depend only on the geometry and on
+    ``img_mask``, so every pass returns the same values; they are taken from the
+    first pass. Summing them instead would inflate the caller's normalization
+    denominator by the number of passes.
+
+    Returns ``(gau_sem [P, D], num_ray, radii, out_color)``.
+    """
+    if feat_hwc.dim() != 3:
+        raise ValueError(f"feat_hwc must be [H, W, D]; got shape {tuple(feat_hwc.shape)}")
+    h, w, feat_dim = feat_hwc.shape
+    if feat_dim < 1:
+        raise ValueError(f"feat_hwc must have at least 1 channel; got {feat_dim}")
+
+    gau_sem_parts = []
+    shared = None
+
+    for start in range(0, feat_dim, TRACE_CHANNELS):
+        stop = min(start + TRACE_CHANNELS, feat_dim)
+        chunk = feat_hwc[:, :, start:stop]
+        if stop - start < TRACE_CHANNELS:
+            pad = torch.zeros(
+                h, w, TRACE_CHANNELS - (stop - start),
+                device=feat_hwc.device, dtype=feat_hwc.dtype,
+            )
+            chunk = torch.cat([chunk, pad], dim=2)
+        gau_sem, num_ray, radii, out_color = trace_single_view(
+            means, quats, scales, opacities, colors,
+            chunk.contiguous(), img_mask, cam, bg_color,
+            trace_backend,
+        )
+        gau_sem_parts.append(gau_sem[:, : stop - start])
+        if shared is None:
+            shared = (num_ray, radii, out_color)
+
+    return torch.cat(gau_sem_parts, dim=1), *shared

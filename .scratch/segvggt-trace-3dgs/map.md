@@ -82,6 +82,10 @@ mask logit 是 `q·f`，点积线性 ⇒ `Σ αT·(q·f) = q·(Σ αT·f)`。
 同一个高斯，一旦漂移，平均出来是糊的；decode-first 至少每批内部自洽。
 ⇒ [01 号票](issues/01-cross-batch-feature-consistency.md)是地基，阻塞下游全部。
 
+**F4 — trace kernel 不是逐位可复现的**（02 号票查证）：`atomicAdd` 累加，
+同一条路同一份输入跑两遍 `gau_sem` 就差 maxabs 3.4e-3，相对量级 **1.7e-6**。
+一切「trace 前后是否一致」的比较都必须带控制组，不能用 `torch.equal`。
+
 **IGGT 的现状（对照）**：`scripts/trace_instance_to_gaussians.py:472` 是个裸循环，
 `encoder_batch_size` 默认 4、配置里写 48，所有批的特征进同一个 `sum_gau_sem` 和同一次全局 HDBSCAN。
 **仓库已经在依赖跨批一致性，且从没检查过。** IGGT 的特征直接进对比损失、逐像素、训练时喂随机视角子集，
@@ -109,6 +113,16 @@ mask logit 是 `q·f`，点积线性 ⇒ `Σ αT·(q·f) = q·(Σ αT·f)`。
   算了 `cx_crop` 却从不传出，偏心裁剪本来就静默错——只记不修）；
   ③ **`encoder_batch_size` = 4**（视角数单调退化：4→0.613、24→0.561；显存/速度都不是约束，
   IGGT 那个 48 有害）⇒ garden 47 批、`Q_all` 约 650 行，04 号票按"几百"设计。
+
+- [02 — 让 trace 支持 feat_dim > 20（分趟，不重编译）](issues/02-chunked-trace-over-20-channels.md)：
+  **分趟做完了，等价，代价就是线性的 7×。** 新增 `trace_single_view_chunked`，
+  `num_ray`/`radii`/`out_color` 只取第一趟（本票埋的坑躲掉了，端到端两个维度的
+  `num_ray mean=359.1 max=466386` 逐位一致作旁证）。判据脚本 `scripts/check_chunked_trace.py`。
+  三条带下游：① **墙钟 168.5 ms/view，garden 185 视角只要 31 s** ⇒ Out of scope 里
+  「重编译 `TRACE_CHANNELS`」那条**不重开**；② **本票原文的「逐元素相等」判据是错的** ——
+  trace kernel 用 `atomicAdd`，同一条路跑两遍就差 3.4e-3，等价只能成立到这个底噪为止
+  （相对量级 **1.7e-6**），04 号票定阈值别定到这个尺度以下；③ 真脚本上 `--id_embed_dim 128`
+  跑通并正确解码，03 号票可以直接把 128 维喂进来。
 
 ## Not yet specified
 

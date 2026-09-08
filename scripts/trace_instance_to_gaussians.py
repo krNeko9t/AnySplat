@@ -76,6 +76,7 @@ from src.trace_render.trace_rasterize import (
     load_gaussians_from_ply,
     resolve_trace_backend,
     trace_single_view,
+    trace_single_view_chunked,
 )
 
 ENCODER_CROP_SIZE = 448  # prepare_encoder_image center-crop size
@@ -1492,12 +1493,6 @@ def main():
     masks = prep.get("masks")
     id_codec = prep.get("id_codec")
 
-    if feat_dim > TRACE_CHANNELS:
-        raise ValueError(
-            f"feat_dim={feat_dim} > TRACE_CHANNELS={TRACE_CHANNELS}. "
-            f"Cannot trace more than {TRACE_CHANNELS} channels."
-        )
-
     if args.save_render:
         os.makedirs(os.path.join(output_dir, "renders"), exist_ok=True)
 
@@ -1505,8 +1500,10 @@ def main():
     sum_gau_sem = torch.zeros(N, feat_dim, device=device, dtype=torch.float32)
     sum_num_ray = torch.zeros(N, device=device, dtype=torch.float32)
 
+    n_passes = (feat_dim + TRACE_CHANNELS - 1) // TRACE_CHANNELS
     print(f"\nTracing {len(cam_list)} views (feat_dim={feat_dim}, "
-          f"TRACE_CHANNELS={TRACE_CHANNELS}, backend={args.resolved_trace_backend}) ...")
+          f"TRACE_CHANNELS={TRACE_CHANNELS} x {n_passes} pass(es), "
+          f"backend={args.resolved_trace_backend}) ...")
 
     for idx, cam in enumerate(tqdm(cam_list, desc="Trace")):
         trace_cam = trace_cams[idx]
@@ -1520,12 +1517,6 @@ def main():
             ).squeeze(0)
 
         feat_hwc = feat_2d.permute(1, 2, 0).contiguous()
-        if feat_dim < TRACE_CHANNELS:
-            pad = torch.zeros(
-                H, W, TRACE_CHANNELS - feat_dim,
-                device=device, dtype=torch.float32,
-            )
-            feat_hwc = torch.cat([feat_hwc, pad], dim=2)
 
         if masks is not None:
             img_mask = masks[idx]
@@ -1538,13 +1529,13 @@ def main():
         else:
             img_mask = torch.ones(H, W, dtype=torch.int32, device=device)
 
-        gau_sem, num_ray, radii, out_color = trace_single_view(
+        gau_sem, num_ray, radii, out_color = trace_single_view_chunked(
             means, quats, scales, opacities, colors,
             feat_hwc, img_mask, trace_cam, bg_color,
             args.resolved_trace_backend,
         )
 
-        sum_gau_sem += gau_sem[:, :feat_dim]
+        sum_gau_sem += gau_sem
         sum_num_ray += num_ray.float()
 
         if args.save_render:
