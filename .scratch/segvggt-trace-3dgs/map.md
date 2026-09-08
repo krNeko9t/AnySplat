@@ -2,6 +2,17 @@
 
 Label: wayfinder:map
 
+## ⚠️ 状态：搁置（2026-09-09）
+
+本图停在 04 号票的验收复盘上。人看图判不合格，**主因是 ckpt 自己的 2D mask**
+（F5：bench view02 2D 只有 0.6477，trace 只丢了 11%），而重训归 phys-on-query 图。
+2026-09-09 grilling 后改走 IGGT 官方权重 + 新物性头
+⇒ **后续在 [iggt-phys-pipeline 图](../iggt-phys-pipeline/map.md)**，本图不再推进。
+
+本图产出的东西**没有作废，被新图引用**：02 号票的分趟 trace（新图的 32 维物性特征
+不分趟根本搬不动）、05 号票的相机对齐、04 号票的验收教训（交付图必须是全分辨率叠加图）、
+F4 的 `atomicAdd` 不可复现。
+
 ## Destination
 
 输入**一个已经建好的高斯场景 + 它自己的相机**，跑 `arm_b_lora` 的推理，把 SegVGGT 的
@@ -182,6 +193,13 @@ mask logit 是 `q·f`，点积线性 ⇒ `Σ αT·(q·f) = q·(Σ αT·f)`。
   属 demo 层面，deadline 之后再说。
 
 ## Out of scope
+
+- **10 / 11 号票（stuff/thing 界线、3D 丢薄结构）判出 scope 并作废**（2026-09-09）：
+  这两张票是 04 号票被判不合格后按人的负反馈随手开的，用户自陈**"没什么道理"**
+  —— 定性判据（"图上不能有不是任何东西的色块"、"薄结构不能丢"）不是从本图的判据推出来的，
+  是对一张**错的图**（1/4 分辨率灰底渲染）的应激反应。留着它们只会让一条已经搁置的路
+  继续挂着两个假的阻塞项。**不带进新图**：[iggt-phys-pipeline 图](../iggt-phys-pipeline/map.md)
+  的判据换成"和官方 IGGT 基线并排看不明显更差"，有对照组，不设硬阈值。
 
 - **类别预测**：继承 [phys-on-query 图](../phys-on-query/map.md)的判定——
   joint 配方 `class_agnostic: true`，本条链路上的 checkpoint 只预测 objectness。

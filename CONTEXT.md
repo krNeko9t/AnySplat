@@ -48,3 +48,24 @@ _Avoid_：静默冻结（这个比喻正是把它误当冻结的原因）
 `query_physgm` 权重有没有全部加载成功"——参数的**值**是否落位，冻结三判据一条都不占。
 它与指纹层各管各的，不合并。
 _Avoid_：把它算作"另一种冻结校验"
+
+### 物性读出
+
+**物性读出**（physics readout）：
+把 backbone 的特征变成 (E, ν, ρ) 的那一小段网络。本仓库里它有**三种粒度**，
+说"物性头"而不说粒度，基本一定会指错东西：
+
+- **场景级**：池化整帧 aggregator token → 一帧一个 (mu, var)。`phys_scheme="physgm_copy"`
+  （`src/model/heads/physics/physgm_readout.py`）。**给不出"哪个物体多重"**。
+- **实例级（掩码池化）**：dense feature map 按 instance mask 掩码平均 → 每实例一个 (mu, var)。
+  `phys_scheme="physgm_dpt"`（`physgm_dense_readout.py`）。
+  **池化严格在 per-property MLP 之前**——这一条是可替换池化域（2D 像素 / 3D 高斯）的全部依据。
+- **实例级（query 自带）**：query 向量直接过 MLP，实例身份由 query 自己携带，不需要 mask。
+  `QueryPhysGMReadout`（`src/model/arch/segvggt.py:183`）。
+_Avoid_：物性头、phys head（都不带粒度）
+
+**GT-mask 依赖**：
+一个物性读出在**推理时**是否需要外部给的实例掩码。掩码池化那一档需要，query 那一档不需要。
+它不是实现细节而是路线属性——需要它，就必须回答"推理时掩码从哪来"，
+而这正是 IGGT 路线（实例由 HDBSCAN 事后聚出）与 SegVGGT 路线的分水岭。
+_Avoid_：train-test 失配（这是它的**后果**之一，不是它本身）

@@ -1,7 +1,7 @@
 # 10 — stuff/thing 的界线：墙和地板怎么办
 
 Type: grilling
-Status: open
+Status: closed — 判出 scope（2026-09-09）
 Blocked by: —
 Blocks: [07 — 3dovs 上顺路报分割指标](07-3dovs-segmentation-metric.md), [09 — 验收交付什么](09-acceptance-artifacts.md)
 Assignee: —
@@ -39,3 +39,17 @@ Assignee: —
 
 出一张 bench 的图，图上**不再有"不是任何东西"的色块** —— 要么是物体，要么是明确标注的背景/未认领。
 以及：这套规则原样跑 garden 不崩、不出现同样的病。
+
+
+---
+
+## 判出 scope（2026-09-09）
+
+本票不是从本图的判据推出来的，是 04 号票被判不合格后按人的负反馈随手开的
+—— 而当时拿去验收的是**一张错的图**（1/4 分辨率灰底渲染，灰色占 87.8%）。
+用户 2026-09-09 自陈这两张票「没什么道理」。
+
+**「stuff/thing 界线」因此不作为任何图的阻塞项。** 本图已整体搁置，
+后续走 [iggt-phys-pipeline 图](../../iggt-phys-pipeline/map.md)：
+判据换成「和官方 IGGT 基线并排看不明显更差」，有对照组，不设硬阈值。
+本票**不带进新图**。

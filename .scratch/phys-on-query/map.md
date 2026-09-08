@@ -309,5 +309,10 @@ SegVGGT Table 7：冻结 23.4 → LoRA joint **31.9**；Table 8：冻结底座�
 
 - **IGGT 路线**（`phys_iggt.yaml`）：aggregator/part_adaptor/part_head 全冻，phys head 是纯 frozen
   probe；要修得先给 VGGT aggregator 加 adapter，成本高一个量级。降级为"冻结底座"那一行的对照组。
+  **⚠️ 2026-09-09：这条判定在本图内仍然成立，但已在另一张图上被重开**
+  —— [iggt-phys-pipeline 图](../iggt-phys-pipeline/map.md)走的正是 IGGT + frozen probe，
+  理由是那张图的判据不同：它只要"每个实例有个物性值"，不要物性准。
+  **"成本高一个量级"针对的是"把物性做准"**，在"有个值就行"的判据下 frozen probe 恰恰够。
+  本图不因此重开 IGGT 路线；两张图的判据不同，结论不同是对的。
 - **复现 PIXIE / VoMP / PhysGS，MPM 灵敏度实验，HILO / PixieVerse**（memory `paper-direction-scene-phys`
   明令不碰）。
