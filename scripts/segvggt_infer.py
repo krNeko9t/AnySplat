@@ -35,12 +35,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.model.arch import get_model
 from src.model.arch.segvggt import EncoderSegVGGTCfg
+from src.model.arch.segvggt_decode import decode_instances, report_physics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("segvggt_infer")
@@ -77,114 +77,6 @@ def load_and_preprocess(paths: list[Path], target_width: int = 518) -> torch.Ten
     arr = np.stack(imgs, axis=0)  # [S, H, W, 3] uint8
     t = torch.from_numpy(arr[None]).float().div_(255.0)  # [1, S, H, W, 3]
     return t.permute(0, 1, 4, 2, 3).contiguous()  # [1, S, 3, H, W]
-
-
-# --------------------------------------------------------------------------- #
-# decode object queries -> instance masks (mirrors official predict_by_feat_instance)
-# --------------------------------------------------------------------------- #
-def decode_instances(
-    cls_logits: torch.Tensor,   # [Q, C+1]
-    mask_logits: torch.Tensor,  # [Q, V*h*w]
-    mask_thr: float = 0.4,
-    topk: int = 600,
-    npoint_thr: int = 200,
-    score_thr: float = 0.25,
-    class_agnostic: bool = False,
-):
-    """Return (binary_masks [N, V*h*w], scores [N], labels [N], query_idx [N]).
-
-    ``query_idx`` maps each surviving instance back to the object query that produced
-    it, so per-query readouts (e.g. physics mu/var) can be lined up with the masks.
-    """
-    cls_logits = cls_logits.float().cpu()
-    mask_logits = mask_logits.float().cpu()
-
-    if class_agnostic:
-        probs = F.softmax(cls_logits, dim=-1)
-        scores = 1.0 - probs[:, -1]  # 1 - P(no-match)
-        topk = min(topk, scores.shape[0])
-        scores, idx = scores.topk(topk, sorted=False)
-        m = mask_logits[idx]
-        labels = torch.zeros_like(scores, dtype=torch.long)
-    else:
-        # Per-(query, class) scores, excluding the trailing no-match channel.
-        n_classes = cls_logits.shape[1] - 1
-        scores = F.softmax(cls_logits, dim=-1)[:, :-1]
-        labels = (
-            torch.arange(n_classes, device=scores.device)
-            .unsqueeze(0)
-            .repeat(len(cls_logits), 1)
-            .flatten(0, 1)
-        )
-        scores, flat_idx = scores.flatten(0, 1).topk(min(topk, scores.numel()), sorted=False)
-        labels = labels[flat_idx]
-        idx = torch.div(flat_idx, n_classes, rounding_mode="floor")
-        m = mask_logits[idx]
-
-    m_sig = m.sigmoid()
-    mask_scores = (m_sig * (m > 0)).sum(1) / ((m > 0).sum(1) + 1e-6)
-    scores = scores * mask_scores
-
-    binary = m_sig > mask_thr
-    keep = scores > score_thr
-    scores, binary, labels, idx = scores[keep], binary[keep], labels[keep], idx[keep]
-    keep = binary.sum(1) > npoint_thr
-    scores, binary, labels, idx = scores[keep], binary[keep], labels[keep], idx[keep]
-    order = scores.argsort(descending=True)
-    return binary[order], scores[order], labels[order], idx[order]
-
-
-def report_physics(pred, query_idx: torch.Tensor, scores: torch.Tensor, out_dir: Path):
-    """Print / dump the per-object physics readout for the surviving instances.
-
-    This is the end product of the physics-on-queries route: because the properties
-    are decoded from the object queries rather than pooled with a GT mask, they are
-    available here at inference on a scene with no annotation at all.
-
-    Values are converted back to SI (density kg/m3, Young's modulus Pa, Poisson ratio)
-    with the dataset's own inverse transform, so nothing about the normalisation is
-    re-derived here. No-op when the encoder ran without ``phys_scheme``.
-    """
-    mu = getattr(pred, "query_phys_mu", None)
-    var = getattr(pred, "query_phys_var", None)
-    if mu is None or var is None:
-        logger.info("no physics readout in this checkpoint "
-                    "(encoder cfg phys_scheme is null) -- skipping")
-        return
-    if len(query_idx) == 0:
-        logger.info("no instances survived thresholding; nothing to report")
-        return
-
-    from src.dataset.physics.parsers import physgm_denormalize
-
-    names = getattr(pred, "property_names", None) or ("density", "youngs_modulus",
-                                                      "poisson_ratio")
-    mu_sel = mu[0].float().cpu()[query_idx]                 # [N, P] model space
-    var_sel = var[0].float().cpu()[query_idx]
-    si = physgm_denormalize(mu_sel)                          # [N, P] SI units
-
-    header = f"{'inst':>4} {'score':>7} " + " ".join(f"{n:>18}" for n in names)
-    lines = [header, "-" * len(header)]
-    for i in range(mu_sel.shape[0]):
-        cells = " ".join(
-            f"{float(si[i, p]):>10.4g}+-{float(var_sel[i, p]) ** 0.5:>5.2f}"
-            for p in range(mu_sel.shape[1])
-        )
-        lines.append(f"{i:>4} {float(scores[i]):>7.3f} {cells}")
-    body = "\n".join(lines)
-    logger.info("per-object physics (SI units, +- is the model-space std):\n%s", body)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        out_dir / "physics.npz",
-        query_idx=query_idx.cpu().numpy(),
-        scores=scores.cpu().numpy(),
-        mu_model_space=mu_sel.numpy(),
-        var_model_space=var_sel.numpy(),
-        value_si=si.numpy(),
-        property_names=np.array(names),
-    )
-    logger.info("wrote %s", out_dir / "physics.npz")
 
 
 def _palette(n: int) -> np.ndarray:
@@ -279,6 +171,13 @@ def main():
     )
     ap.add_argument("--max_instances", type=int, default=50,
                     help="max instances to draw in the overlay")
+    ap.add_argument(
+        "--phys_scheme",
+        default=None,
+        choices=["query_physgm"],
+        help="attach the per-query physics readout (required to load a "
+             "phys-on-query checkpoint; without it from_checkpoint refuses one)",
+    )
     ap.add_argument("--out_dir", default="outputs/segvggt_demo")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -307,6 +206,7 @@ def main():
         num_semantic_classes=args.num_semantic_classes,
         non_instance_classes=non_inst,
         pretrained_weights=ckpt,
+        phys_scheme=args.phys_scheme,
     )
     model = get_model(cfg).to(args.device).eval()
 

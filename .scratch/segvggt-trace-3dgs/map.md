@@ -124,6 +124,18 @@ mask logit 是 `q·f`，点积线性 ⇒ `Σ αT·(q·f) = q·(Σ αT·f)`。
   （相对量级 **1.7e-6**），04 号票定阈值别定到这个尺度以下；③ 真脚本上 `--id_embed_dim 128`
   跑通并正确解码，03 号票可以直接把 128 维喂进来。
 
+- [03 — 把 SegVGGT 接成 trace 脚本的一个 feature source](issues/03-segvggt-feature-source.md)：
+  **接上了，bench 跑通。** `gau_feat [1045236,128]`（96.2% 高斯被 trace 到）+
+  `Q_all [93,128]`（9 批，10.3/批）落在同一个 `.pt` 里；`prep` 契约扩了可选的 `query_bank`
+  （`query_proj` / `phys_mu|var_model` / `phys_si` / `scores` / `query_idx` / `batch_id`，
+  **只 concat 不合并**）。解码走新抽的 `src/model/arch/segvggt_decode.py`，两个入口共用。
+  三条带下游：① **bank 与 field 逐位同空间**（用模型自己的 einsum 重建 `query_masks`，
+  maxabs = 0.0）⇒ 04 号票的点积站得住；② **2D 的阈值不能搬到 3D** ——
+  `>0` 时某个 query 吞掉 82% 全场，可用区间挤在 0~0.4，04 必须自己定，
+  且只有**归一化**的 `feat` 能用全局阈值（`feat_unnorm` 带 1~1.86e6 的 `num_ray` 倍数）；
+  ③ 顺手补了 `segvggt_infer.py` 的 `--phys_scheme`（原来根本加载不了 phys ckpt，
+  它自己的 `report_physics` 一直是死代码）。
+
 ## Not yet specified
 
 - **没被任何 query 认领的高斯**（背景、漏检、只被一两个视角扫到的）怎么处理：

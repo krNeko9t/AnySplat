@@ -69,6 +69,7 @@ from tqdm import tqdm
 from plyfile import PlyData
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.dataset.physics.types import PROPERTY_NAMES
 from src.trace_cameras import TraceCamera, focal2fov, load_trace_cameras
 from src.trace_render.trace_rasterize import (
     TRACE_CHANNELS,
@@ -544,11 +545,225 @@ def prepare_gt_idmap_features(cam_list, args, device):
     }
 
 
+# ---------------------------------------------------------------------------
+# Mode E (SegVGGT): 128-d feature field + the object-query bank that reads it
+# ---------------------------------------------------------------------------
+
+# Operating point, pinned by ticket 05 of the segvggt-trace-3dgs map. Neither of
+# these is a tunable: 252x448 is where ticket 01 read "the feature map does not
+# drift", and 4 is the training view count (view sweep degrades monotonically:
+# 4 -> 0.613, 8 -> 0.606, 12 -> 0.555, 24 -> 0.561). Do NOT inherit IGGT's 48.
+SEGVGGT_TRACE_WH = (448, 252)
+SEGVGGT_BATCH_SIZE = 4
+
+
+def load_segvggt_model(ckpt_path, device="cuda"):
+    """Load the phys-on-query SegVGGT checkpoint (arm_b_lora) for inference."""
+    from src.model.arch.segvggt import EncoderSegVGGTCfg, SegVGGTModel
+
+    # Mirrors the arm_b_lora training config (.hydra/config.yaml). pretrained_weights
+    # stays empty: from_checkpoint loads the whole fine-tuned state dict, and
+    # _assert_query_physgm_coverage verifies the physics head landed.
+    cfg = EncoderSegVGGTCfg(
+        name="segvggt",
+        pretrained_weights="",
+        num_semantic_classes=200,
+        non_instance_classes=["wall", "floor"],
+        phys_scheme="query_physgm",
+        physgm_hidden=64,
+    )
+    model = SegVGGTModel.from_checkpoint(cfg, ckpt_path, device="cpu")
+    model.eval().to(device)
+    for p in model.parameters():
+        p.requires_grad = False
+    print(f"[segvggt] Loaded {ckpt_path}")
+    return model
+
+
+def _assert_segvggt_preprocess_identity(cam_list):
+    """Guard the one assumption the whole camera story rests on: plain full-image resize.
+
+    ``segvggt_infer.load_and_preprocess`` silently crops in two cases -- portrait
+    frames (centre square crop) and frames of unequal height (``im[:min_h]``, which
+    crops from the bottom only and therefore shifts the principal point). Ticket 05
+    showed ``TraceCamera`` cannot express either: it stores FoVx/FoVy only, a
+    symmetric frustum with no principal point. A crop would not raise, it would just
+    produce a smeared field and silently invalidate everything downstream -- so it
+    raises here instead.
+    """
+    sizes = {(int(c.orig_width), int(c.orig_height)) for c in cam_list}
+    if len(sizes) != 1:
+        detail = ", ".join(
+            f"{c.image_name}={int(c.orig_width)}x{int(c.orig_height)}"
+            for c in cam_list[:8]
+        )
+        raise ValueError(
+            f"segvggt feature source requires all frames to share one size; got "
+            f"{len(sizes)} distinct sizes {sorted(sizes)} (first few: {detail}). "
+            "Mixed sizes make load_and_preprocess crop to the minimum height, which "
+            "shifts the principal point -- TraceCamera cannot represent that."
+        )
+    w, h = sizes.pop()
+    if h > w:
+        raise ValueError(
+            f"segvggt feature source requires landscape frames (h <= w); got "
+            f"{w}x{h} (e.g. {cam_list[0].image_name}). Portrait frames get a centre "
+            "square crop, which changes the field of view TraceCamera assumes."
+        )
+    return w, h
+
+
+def load_segvggt_images(image_paths, target_wh, device="cuda"):
+    """Full-image resize to ``target_wh`` -> [1, V, 3, H, W] in [0, 1].
+
+    Deliberately *not* segvggt_infer.load_and_preprocess: that one rounds the height
+    to a multiple of 14 and may crop. Ticket 05 fixed the operating point at an exact
+    252x448, and a plain full-image resize is a no-op for TraceCamera
+    (``focal2fov(f * s, W * s) == focal2fov(f, W)`` per axis, so anisotropy is fine).
+    """
+    import torchvision.transforms as T
+
+    target_w, target_h = int(target_wh[0]), int(target_wh[1])
+    to_tensor = T.ToTensor()
+    imgs = []
+    for p in image_paths:
+        img = Image.open(p).convert("RGB")
+        imgs.append(to_tensor(img.resize((target_w, target_h), Image.Resampling.BICUBIC)))
+    return torch.stack(imgs, dim=0).unsqueeze(0).to(device)
+
+
+@torch.no_grad()
+def run_segvggt_batch(model, image_paths, target_wh, device="cuda"):
+    """One SegVGGT forward over a view batch.
+
+    Returns ``(feat_maps [V, 128, h, w], query_bank_entry)``. The bank entry carries
+    everything a query needs to be used *outside* this batch: the 128-d projected
+    query (the vector the field is dotted with), the physics readout, the score and
+    the ``query_idx`` join key. DETR slot ids do not survive across batches, so the
+    batch index is recorded too.
+    """
+    from src.model.arch.segvggt_decode import decode_instances
+
+    images = load_segvggt_images(image_paths, target_wh, device)
+    enc_out, _ = model(images)
+    pred = enc_out.segvggt_prediction
+
+    feat = pred.feature_map[0].float()             # [V, h, w, 128]
+    qm = pred.query_masks[0]                       # [Q, V, h, w]
+    ql = pred.query_class_logits[0]                # [Q, C+1]
+    Q = qm.shape[0]
+
+    # class_agnostic is not a flag here: map fact F3 -- the joint recipe trained with
+    # class_agnostic: true, so this checkpoint predicts objectness only.
+    _binary, scores, _labels, query_idx = decode_instances(
+        ql, qm.reshape(Q, -1), class_agnostic=True,
+    )
+
+    # The 128-d projection is exactly what produced the mask logits above, so
+    # ``q_proj @ gau_feat.T`` on the traced field is the 3D continuation of that
+    # einsum (map: "trace is alpha*T weighted accumulation, the dot product is linear").
+    proj = model.encoder.model.aggregator.instance_queries_proj
+    q_proj = proj(pred.query_embed[0].float())[query_idx]     # [N, 128]
+
+    mu = pred.query_phys_mu[0].float()[query_idx]             # [N, 3] model space
+    var = pred.query_phys_var[0].float()[query_idx]
+
+    entry = {
+        "query_proj": q_proj.cpu(),
+        "phys_mu_model": mu.cpu(),
+        "phys_var_model": var.cpu(),
+        "scores": scores.cpu(),
+        "query_idx": query_idx.cpu(),
+        "view_names": [Path(p).stem for p in image_paths],
+    }
+    return feat.permute(0, 3, 1, 2).contiguous(), entry
+
+
+def prepare_segvggt_features(cam_list, args, device):
+    """Run SegVGGT over all views in batches; return the 128-d field + query bank."""
+    from src.dataset.physics.parsers import physgm_denormalize
+    from src.model.arch.segvggt_decode import format_physics_table
+
+    w, h = _assert_segvggt_preprocess_identity(cam_list)
+    target_wh = args._segvggt_image_size
+    print(f"\n[segvggt] {len(cam_list)} frames, all {w}x{h} (landscape) -> "
+          f"{target_wh[0]}x{target_wh[1]}")
+
+    model = load_segvggt_model(args.segvggt_ckpt, device)
+    batch_size = args.encoder_batch_size
+    image_paths = [c.image_path for c in cam_list]
+
+    all_feat_maps = []
+    batches = []
+    n_batches = (len(cam_list) + batch_size - 1) // batch_size
+    print(f"[segvggt] Running {n_batches} batches (encoder_batch_size={batch_size}) ...")
+    for start in tqdm(range(0, len(cam_list), batch_size), desc="SegVGGT"):
+        end = min(start + batch_size, len(cam_list))
+        feat_batch, entry = run_segvggt_batch(
+            model, image_paths[start:end], target_wh, device,
+        )
+        for vi in range(feat_batch.shape[0]):
+            all_feat_maps.append(feat_batch[vi])
+        entry["batch"] = len(batches)
+        entry["view_range"] = (start, end)
+        batches.append(entry)
+
+    feat_dim = all_feat_maps[0].shape[0]
+    del model
+    torch.cuda.empty_cache()
+
+    # Pool the per-batch banks into Q_all. Ticket 04 owns the 3D dedup that turns
+    # these overlapping hypotheses into instances; this only concatenates and keeps
+    # the provenance (batch id + query_idx) so nothing is silently merged here.
+    query_bank = {
+        "query_proj": torch.cat([b["query_proj"] for b in batches], dim=0),
+        "phys_mu_model": torch.cat([b["phys_mu_model"] for b in batches], dim=0),
+        "phys_var_model": torch.cat([b["phys_var_model"] for b in batches], dim=0),
+        "scores": torch.cat([b["scores"] for b in batches], dim=0),
+        "query_idx": torch.cat([b["query_idx"] for b in batches], dim=0),
+        "batch_id": torch.cat([
+            torch.full((len(b["scores"]),), b["batch"], dtype=torch.long)
+            for b in batches
+        ], dim=0),
+        "view_names": [b["view_names"] for b in batches],
+    }
+    query_bank["phys_si"] = physgm_denormalize(query_bank["phys_mu_model"])
+    query_bank["property_names"] = list(PROPERTY_NAMES)
+
+    n_q = query_bank["scores"].shape[0]
+    print(f"[segvggt] feat_dim={feat_dim}, Q_all={n_q} rows over {n_batches} batches "
+          f"({n_q / max(n_batches, 1):.1f} per batch)")
+    print("[segvggt] per-query physics (SI units, +- is the model-space std):\n"
+          + format_physics_table(
+              query_bank["phys_si"], query_bank["phys_var_model"],
+              query_bank["scores"], query_bank["property_names"],
+          ))
+
+    # Ticket 05: full-image resize is a no-op for TraceCamera, so use the scene's own
+    # cameras. Neither trace_crop_aligned helper applies (create_virtual_crop_camera
+    # in particular computes cx_crop and never passes it on).
+    if args.trace_crop_aligned:
+        raise ValueError(
+            "segvggt feature source requires --no_trace_crop_aligned: a full-image "
+            "resize is already a no-op for TraceCamera, and neither virtual-camera "
+            "helper models this preprocessing."
+        )
+
+    return {
+        "feat_maps": all_feat_maps,
+        "trace_cams": list(cam_list),
+        "feat_dim": feat_dim,
+        "masks": None,
+        "query_bank": query_bank,
+    }
+
+
 FEATURE_PREP = {
     "anysplat": prepare_anysplat_features,
     "iggt": prepare_iggt_features,
     "precomputed": prepare_precomputed_features,
     "gt_idmap": prepare_gt_idmap_features,
+    "segvggt": prepare_segvggt_features,
 }
 
 
@@ -1251,7 +1466,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     g_feat = parser.add_argument_group("Feature source")
     g_feat.add_argument(
         "--feature_source", default=None,
-        choices=["anysplat", "iggt", "precomputed", "gt_idmap"],
+        choices=["anysplat", "iggt", "precomputed", "gt_idmap", "segvggt"],
         help="Feature source type (auto-detected from legacy args if omitted)",
     )
     g_feat.add_argument("--feat_dir", default=None,
@@ -1264,7 +1479,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="anysplat: Lightning checkpoint path "
                              "(default: run_dir/checkpoints/last.ckpt)")
     g_feat.add_argument("--encoder_batch_size", type=int, default=4,
-                        help="anysplat/iggt: views per forward pass")
+                        help="anysplat/iggt/segvggt: views per forward pass "
+                             "(segvggt: leave at 4 -- the training view count; "
+                             "quality degrades monotonically above it)")
+    g_feat.add_argument("--segvggt_ckpt", default=None,
+                        help="segvggt: Lightning .ckpt of the phys-on-query run "
+                             "(arm_b_lora)")
+    g_feat.add_argument("--segvggt_image_size", default="448,252",
+                        help="segvggt: W,H fed to the encoder (default 448,252 = the "
+                             "training operating point; not a tunable)")
     g_feat.add_argument("--model_type", choices=["anysplat", "iggt"],
                         default="anysplat",
                         help="Legacy model selector (prefer --feature_source)")
@@ -1368,6 +1591,8 @@ def main():
     # Parse IGGT image size
     iggt_w, iggt_h = [int(x) for x in args.iggt_image_size.split(",")]
     args._iggt_image_size = (iggt_w, iggt_h)
+    sv_w, sv_h = [int(x) for x in args.segvggt_image_size.split(",")]
+    args._segvggt_image_size = (sv_w, sv_h)
 
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -1492,6 +1717,7 @@ def main():
     feat_dim = prep["feat_dim"]
     masks = prep.get("masks")
     id_codec = prep.get("id_codec")
+    query_bank = prep.get("query_bank")
 
     if args.save_render:
         os.makedirs(os.path.join(output_dir, "renders"), exist_ok=True)
@@ -1589,6 +1815,8 @@ def main():
         "trace_backend": args.resolved_trace_backend,
         "scales_ndim": n_scales,
     }
+    if query_bank is not None:
+        save_dict["query_bank"] = query_bank
     if gaussian_ids is not None:
         save_dict["gaussian_ids"] = gaussian_ids.cpu()
     torch.save(save_dict, out_path_pt)

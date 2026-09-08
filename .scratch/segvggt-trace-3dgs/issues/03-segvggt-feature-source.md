@@ -1,11 +1,11 @@
 # 03 — 把 SegVGGT 接成 trace 脚本的一个 feature source
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: [02 — 让 trace 支持 feat_dim > 20](02-chunked-trace-over-20-channels.md)
   （[05 — 预处理与 trace 相机对不对得上](05-preprocess-camera-alignment.md) 已关闭 2026-09-08）
 Blocks: [04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)
-Assignee: —
+Assignee: krNeko9t
 
 ## Question
 
@@ -71,3 +71,102 @@ Assignee: —
 
 4. **判据里的 GT 用 `sam/mask/*.png`**（原生 756×1008、8 实例），
    **不是** `id_maps/*.npy`（336×504，上一次 IGGT 的产物）。
+
+## Answer
+
+**接上了，bench 上跑通并落盘。`gau_feat [1045236,128]` + `Q_all [93,128]`，
+链路的三段（field / query / 物性）实测在同一个空间里。放行 04 号票。**
+
+### 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `src/model/arch/segvggt_decode.py` | **新增**。`decode_instances` + `report_physics` 从 `segvggt_infer.py` **原样搬过来**共用（票里要求的"不要重写一遍"）；新抽 `format_physics_table`，两个入口打同一张表。 |
+| `scripts/segvggt_infer.py` | 改成 import 上面那个模块；顺带补 `--phys_scheme`（见下）。 |
+| `scripts/trace_instance_to_gaussians.py` | 新增 `prepare_segvggt_features` + 三个 helper，注册进 `FEATURE_PREP`；新参数 `--segvggt_ckpt` / `--segvggt_image_size`；`prep` 契约扩了可选的 **`query_bank`**，落盘进同一个 `.pt`。 |
+| `scripts/check_segvggt_trace_source.py` | **新增**，本票三条判据的可复现装置。 |
+
+### `query_bank` 的字段（04 号票的输入契约）
+
+`query_proj [M,128]`（**与 field 点积的那个向量**）、`phys_mu_model/phys_var_model [M,3]`、
+`phys_si [M,3]`（`physgm_denormalize` 出来的 SI）、`scores [M]`、
+`query_idx [M]`（批内 slot id）、`batch_id [M]`、`view_names`、`property_names`。
+
+**只 concat，不合并。** 跨批 slot 身份不通用，所以 `batch_id` 一起存着——
+去重是 04 号票的事，这里一个字都不猜。
+
+### 判据逐条
+
+**① bank 与 field 同空间 —— `maxabs = 0.000e+00`，逐位相等。**
+拿 `instance_queries_proj(query_embed)` 与 `feature_map` 重做模型自己那个
+`einsum("qd,vhwd->qvhw")`，重建出的 `[400,4,126,224]` 与 `pred.query_masks` **一模一样**。
+⇒ 我取出来的 `query_proj` **就是**产生 mask logit 的那个向量，不是一个"差不多"的东西。
+这是本票最该验的一条：错了不报错，只会让 04 号票在 3D 里点积出垃圾。
+
+**② PCA 伪彩色对得上边缘。** feature 栅格 126×224 vs 原图 756×1008（4.5×/6.0×，
+各向异性，正是 05 号票说的整图 resize）。overlay 里墙/地板的分界线沿真实接缝走，
+娃娃、猫、蛋挞、玩具车、葡萄各自成块。
+顺带复现 05 号票的量化读数：逐视角 mask vs `sam/mask` 的 **mean best IoU = 0.6285**
+（05 在同一运行点读到 0.6133，同一量级；我这次用 4 视角单批，05 是另一批）。
+
+**③ 物性表打出来了**，SI 单位：density 610–2112 kg/m³、E 4e7–5e10 Pa、ν 0.29–0.43。
+93 行全在 `[segvggt] per-query physics` 那张表里。
+
+### 端到端读数（bench，36 视角）
+
+```
+[segvggt] 36 frames, all 1008x756 (landscape) -> 448x252
+Tracing 36 views (feat_dim=128, TRACE_CHANNELS=20 x 7 pass(es), backend=surfel)
+Gaussians traced: 1,005,708 (96.2%)      Q_all = 93 rows over 9 batches (10.3/batch)
+```
+
+9 批与 05 号票预测一致；每批 10.3 个存活 query（05 估的是 ~14，同量级，偏少）。
+
+### 护栏（票里点名要写的唯一一段几何代码）
+
+`_assert_segvggt_preprocess_identity`：**全帧同尺寸** + **横图**，否则硬报错，
+报错信息带图名和尺寸。另外 `--trace_crop_aligned` 对 segvggt 直接抛错——
+两个虚拟相机 helper 都表达不了这套预处理（05 号票查出 `create_virtual_crop_camera`
+算了 `cx_crop` 却不传出）。
+
+`load_segvggt_images` **故意不用** `segvggt_infer.load_and_preprocess`：
+后者把高 round 到 14 的倍数、还可能裁。这里是**精确 448×252 的整图 resize**，
+恒等假设因此是构造出来的，不是撞上的。
+
+### 顺手补的一个洞（本票范围外一行）
+
+`scripts/segvggt_infer.py` **原来根本加载不了 phys 的 ckpt** ——
+它没有 `--phys_scheme`，`_assert_query_physgm_coverage` 必然抛
+"Checkpoint contains query_physgm weights but the model was built without
+phys_scheme='query_physgm'"，所以它自己的 `report_physics` 一直是死代码。
+（`git stash` 验过是原有问题，不是本次重构引入。）补了 `--phys_scheme` 一个参数，
+现在两个入口都实际走共用模块。冒烟跑过，物性表和 `physics.npz` 都出来了。
+
+### ⚠️ 带给 04 号票的读数：**2D 的阈值不能直接搬到 3D**
+
+`gau_feat @ Q_all.T` 出得来 `[1045236, 93]`，但**阈值是个真问题**：
+
+| 阈值（归一化场） | 每 query 认领高斯 p50 / max | 覆盖 |
+|---|---|---|
+| `>0.0` | 6,338 / **859,829**（82% 全场！） | 96.7% |
+| `>0.4` | 103 / 96,277 | 10.0% |
+| `>0.8` | 0 / 14,792 | 1.5% |
+
+logit 分布 p01=-3.16 / p50=-0.24 / p99=0.31 / max=2.80。
+**`>0` 不是可用阈值**（2D 那边 `sigmoid>0.4` ⇔ logit`>-0.405`，搬过来会让某个 query 吞掉全场），
+可用区间挤在 0 与 0.4 之间，04 号票必须自己定。
+
+**另一条**：只有**归一化**的 `feat` 能用全局阈值。`feat_unnorm` 每个高斯带一个
+`num_ray` 的正倍数（min=1 到 max=1.86e6），符号一样但量级差六个数量级，
+所以 `>0.4` 在它上面几乎等于 `>0`（覆盖 89.5%）——**地图等价性论证里那个"和"只保证符号，不保证可比**。
+
+### 复现
+
+```bash
+PYTHONNOUSERSITE=1 python scripts/trace_instance_to_gaussians.py \
+  -s <scene> -p <scene>/point_cloud.ply --feature_source segvggt \
+  --segvggt_ckpt <arm_b_lora.ckpt> --no_trace_crop_aligned -o <out>
+SEGVGGT_TRACE_OUT=<out> PYTHONNOUSERSITE=1 python scripts/check_segvggt_trace_source.py
+```
+
+`tests/` 71 项全过。
