@@ -54,6 +54,19 @@ mask 由 `einsum("bqd,bshwd->bqshw", proj(q), feat)` 得到（`segvggt.py:163`�
 `loss_segvggt.py:274-277` 把 200+1 的头 logsumexp 成 2 列、`:194-196` 把 GT 类别全填 0。
 ⇒ 只有 objectness，没有 class。（继承自 phys-on-query 图的 Out of scope。）
 
+**F5 — 2D mask 就是天花板，而天花板不高**（04 号票验收复盘，2026-09-08 实测）：
+`scripts/check_2d_vs_3d_gap.py` 在同一视角上并排量 GT / 模型 2D mask / 我们的 3D 实例。
+bench view 02：**2D 0.6477 → 3D 0.5764（只算 6 个物体，损失 11.0%）**，
+且 3D 在 8 个 GT 里有 4 个比 2D 还好。
+⇒ **trace + 池化是基本忠实的搬运，分割质量的主因是 ckpt 本身**，
+而 05 号票已排除分辨率（三个运行点 0.6112 / 0.6133 / 0.6176，平的）。
+重训归 [phys-on-query 图](../phys-on-query/map.md)，本图 Out of scope。
+
+**F6 — `sam/mask` 与模型的粒度对不齐，一对一 IoU 会系统性低估。**
+GT 把「葡萄串 + 叶子」算一个实例，模型分成两个（各自都干净）⇒ 0.339；
+GT 把猫拆成头 + 身两个，我们合成一个 ⇒ 猫头那栏 0.235。
+**这不是分割错，是分组不同意** ⇒ 07 号票不能直接报 mean best IoU。
+
 ### 本图的核心论证：为什么是 trace-first，不是 decode-first
 
 Q=400 是**张量的一个轴**，不是循环次数——一次 einsum 出全部 400×V×h×w 的 mask logit。
@@ -150,14 +163,14 @@ mask logit 是 `q·f`，点积线性 ⇒ `Σ αT·(q·f) = q·(Σ αT·f)`。
   ② **「成员数 / 覆盖批数」是免费的置信度**（真物体 10+ 成员跨 9 批，假阳性是单成员单批），
   但 bench 一个场景不够，等 08 在 garden 47 批上看过再当阈值；
   ③ `mask_frac` 进了 `query_bank` 契约，旧 `.pt` 没有会告警并跳过 2D 过滤。
+  **⚠️ 验收复盘（人看图后）：四条决定站得住，但「图能出」这个结论当时下早了。**
+  复查见 F5/F6 —— 不是池化/阈值的 bug，主因是 ckpt；且当时拿去验收的是**错的图**
+  （1/4 分辨率灰底渲染，灰色占 87.8%），叠回原图全分辨率边界是贴着物体走的。
+  真正剩下的两个问题拆成 [10 号票](issues/10-stuff-thing-boundary.md) 和
+  [11 号票](issues/11-thin-structure-loss-in-3d.md)；交付图的形式记进 09 号票。
 
 ## Not yet specified
 
-- **stuff / thing 的界线**（04 号票新起的雾，取代原来那条「没被认领的高斯怎么处理」——
-  后者已由 04 答成「当 recall 缺口报，不塞第 0 类」）：`max_mask_frac` 点掉了整幅背景那个
-  slot，但 bench 的 id5（80,511 高斯的碎木地板）说明还有一档"半 stuff"漏在网里。
-  是再加一条判据（空间连通性？成员数？），还是就这样报出来当已知缺陷，
-  要等 07 号票算过指标、08 号票换过场景才谈得上。
 - **物性在 3D 空间的粒度**：现在物性挂在实例上是一个常数（一个 query 一行）。
   真要做 per-gaussian 的物性场（同一物体内部材质渐变），表示就得换。
   与 phys-on-query 图 Not yet specified 里的 **part-level 粒度**是同一件事的两端，
