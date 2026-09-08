@@ -2,7 +2,7 @@
 
 Type: task
 Status: open
-Blocked by: [01 — SegVGGT 的 feature map 跨 forward 漂不漂](01-cross-batch-feature-consistency.md), [03 — 把 SegVGGT 接成 trace 的 feature source](03-segvggt-feature-source.md)
+Blocked by: ~~[01 — SegVGGT 的 feature map 跨 forward 漂不漂](01-cross-batch-feature-consistency.md)~~（已关闭 2026-09-08，放行）, [03 — 把 SegVGGT 接成 trace 的 feature source](03-segvggt-feature-source.md)
 Blocks: [06 — 物性数值怎么摆才不撒谎](06-how-to-present-physics-honestly.md), [07 — 3dovs 上顺路报分割指标](07-3dovs-segmentation-metric.md), [08 — 在真正的 3DGS 场景上验后端](08-3dgs-backend-on-garden.md), [09 — 验收交付什么](09-acceptance-artifacts.md)
 Assignee: —
 

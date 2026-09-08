@@ -1,10 +1,10 @@
 # 01 — SegVGGT 的 feature map 跨 forward 漂不漂
 
 Type: prototype
-Status: open
+Status: closed (2026-09-08) — 放行 trace-first
 Blocked by: —
 Blocks: [04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)
-Assignee: —
+Assignee: claude (wayfinder session, 2026-09-08)
 
 > **这是本图的地基票。** trace-first 整条路线建立在一个从没有人量过的假设上：
 > 同一个物体在两次不同的 forward 里，`semantic_feature_maps` 落在同一个坐标系里。
@@ -48,3 +48,74 @@ ckpt: `arm_b_lora` 的 `epoch_114-step_20000.ckpt`。
 
 一个一次性脚本（可以扔在 `.scratch/` 下，不进 `src/`）+ 直方图图片 + 本票的 resolution 里
 写下读数和放行/不放行的判断。
+
+
+---
+
+## Resolution（2026-09-08）
+
+**放行 trace-first。** SegVGGT 的 feature map 跨 forward 不漂——至少漂得比
+仓库已经在依赖的 IGGT 还少。
+
+### 装置
+
+`.scratch/segvggt-trace-3dgs/prototypes/measure_cross_batch_drift.py`
+（一次性脚本，捕获在 `research/01-cross-batch-feature-consistency` 分支，commit `f567bc7`；
+主干不留）。场景 `3dovs/bench` 36 视角，ckpt `arm_b_lora epoch_114-step_20000`，
+**252×448 / 4 视角**（[05 号票](../../phys-on-query/issues/05-training-operating-point.md)钉死的训练工作点）。
+4 个 anchor × 3 个成分互不相交的批，anchor 恒放 slot 0，只比 anchor 自己那张 feature map。
+图：`../prototypes/out/drift.png`，全部数字：`../prototypes/out/report.json`。
+
+**装置里最要紧的一件事是控制组**：同一批跑两遍。没有噪声底，0.99 的余弦读不出意思。
+
+### 读数
+
+| 量 | p05 | p50 | mean | min | n |
+|---|---|---|---|---|---|
+| **控制组** 同批两遍，feature cos | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 113k |
+| 跨批 feature cos | 0.9908 | 0.9991 | 0.9975 | 0.8595 | 226k |
+| **IGGT 同装置对照** | 0.9824 | 0.9992 | 0.9965 | 0.8533 | 903k |
+| 跨批 feature norm 比 | 0.9396 | 1.0054 | 1.0063 | 0.7903 | 226k |
+| 跨批 query cos（同 slot 号） | 0.8847 | 0.9842 | 0.9643 | 0.2589 | 3200 |
+| 跨批 query cos（匈牙利，仅存活） | 0.6262 | 0.9717 | 0.9354 | 0.4376 | 101 |
+| **mask IoU：q_k vs mean(f)** | 0.5381 | 0.9372 | 0.8886 | 0.0 | 130 |
+| mask IoU：q_k vs f_j | 0.3631 | 0.8957 | 0.8217 | 0.0 | 260 |
+
+**控制组恒等到逐位**（bf16 aggregator 也确定性），所以上表每一位小数都是真漂移，不是采样噪声。
+
+### 判据怎么落的（判据在票里已定：定性直方图 + 端到端旁证，不设硬阈值）
+
+1. **单峰，没有第二个峰。** cos 直方图（左图，对数纵轴）质量全压在 1 附近，
+   0.85 以下一个点都没有。"每批转一个正交阵"那个担心**没有发生**。
+2. **横坐标给了答案。** IGGT 在同一套装置下 p05 = 0.9824，SegVGGT 是 0.9908 —— **SegVGGT 更紧**。
+   `trace_instance_to_gaussians.py:472` 那个裸循环已经在生产里依赖这条性质，
+   而 SegVGGT 在它之上。"锚更弱所以必须实测"这个担心是对的，实测的结论是锚够用。
+3. **端到端旁证没塌。** `mean(f)` 是 `sum_gau_sem/num_ray` 的 2D 替身
+   （后者同样是**原始未归一化**特征的平均，`trace_instance_to_gaussians.py:1562`）。
+   拿 q_k 打到 mean(f) 上，mask IoU 中位数 **0.937**，且**比打到单个别的批 f_j 上还高**
+   （0.937 > 0.896）—— 平均起的是去噪作用，不是抹糊。这正是 trace-first 需要的方向。
+
+⇒ **Not yet specified 里"单次 forward 吃下全部视角"的退路，不必走。**
+
+### 三条带进下游的注意事项
+
+1. **query 比 feature 漂得多**（同 slot p05 0.885，min 0.26；匈牙利 p05 0.626）。
+   跟 F2/F1 一致：损失只看 `q·f`，(q,f) 可以互相补偿。
+   ⇒ **不要用 query 余弦去跨批合并实例**，
+   [04 号票](04-query-pooling-and-3d-dedup.md)按计划**在 3D 里用高斯集合 IoU 去重**是对的选择。
+   这条把 04 的方案从"一个选项"抬成"唯一站得住的选项"。
+2. **换 slot 只动尺度，不动方向。** 同一批视角、anchor 从 slot 0 挪到别处：
+   cos p05 **0.9974**（比跨批更紧），但 norm 比中位数 **0.9695** —— 非 slot-0 的特征
+   系统性大约 3%。VGGT 拿第一帧当参考系，这个不对称是结构性的。
+   方向不变 ⇒ 对 `q·f` 的 argmax 无害；但 `sum_gau_sem` 是**原始特征**的平均，
+   同一个高斯若在不同批里落在不同 slot，权重会差 3%。
+   ⇒ 04 号票定阈值时记着有这么个 3% 的地板，别把阈值卡到比它还细。
+3. **上面全部只测了一个场景**（`3dovs/bench`，室内、2DGS）。
+   [08 号票](08-3dgs-backend-on-garden.md)跑 `mipnerf360/garden` 时顺手复跑一次这个脚本
+   （`--image_dir` 换掉即可），室外/3DGS 那边免费拿到第二个读数。
+
+### 反向没证的事
+
+**mask IoU 有 0.0 的尾巴**（两个 IoU 列 min 都是 0）。低分存活 query（score 刚过 0.25）
+本来就不稳，换个批就换个物体。这不是坐标系问题，是**弱实例假设**问题，
+归 [04 号票](04-query-pooling-and-3d-dedup.md)的 score 门限去处理，不影响本票的判定。
