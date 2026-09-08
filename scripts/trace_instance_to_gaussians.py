@@ -655,9 +655,16 @@ def run_segvggt_batch(model, image_paths, target_wh, device="cuda"):
 
     # class_agnostic is not a flag here: map fact F3 -- the joint recipe trained with
     # class_agnostic: true, so this checkpoint predicts objectness only.
-    _binary, scores, _labels, query_idx = decode_instances(
+    binary, scores, _labels, query_idx = decode_instances(
         ql, qm.reshape(Q, -1), class_agnostic=True,
     )
+
+    # Area fraction of each candidate's 2D mask over this batch's views. Ticket 04:
+    # one slot (234 on bench, in every batch) decodes the background as a single
+    # 67%-of-frame blob, and in 3D it then claims most of the scene. It is a "stuff"
+    # query, and this is where it is cheapest to recognise -- a 2D property of the
+    # decode, not something a 3D threshold should have to be tuned around.
+    mask_frac = binary.float().mean(dim=1)                     # [N]
 
     # The 128-d projection is exactly what produced the mask logits above, so
     # ``q_proj @ gau_feat.T`` on the traced field is the 3D continuation of that
@@ -674,6 +681,7 @@ def run_segvggt_batch(model, image_paths, target_wh, device="cuda"):
         "phys_var_model": var.cpu(),
         "scores": scores.cpu(),
         "query_idx": query_idx.cpu(),
+        "mask_frac": mask_frac.cpu(),
         "view_names": [Path(p).stem for p in image_paths],
     }
     return feat.permute(0, 3, 1, 2).contiguous(), entry
@@ -721,6 +729,7 @@ def prepare_segvggt_features(cam_list, args, device):
         "phys_var_model": torch.cat([b["phys_var_model"] for b in batches], dim=0),
         "scores": torch.cat([b["scores"] for b in batches], dim=0),
         "query_idx": torch.cat([b["query_idx"] for b in batches], dim=0),
+        "mask_frac": torch.cat([b["mask_frac"] for b in batches], dim=0),
         "batch_id": torch.cat([
             torch.full((len(b["scores"]),), b["batch"], dtype=torch.long)
             for b in batches

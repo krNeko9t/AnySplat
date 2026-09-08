@@ -2,7 +2,7 @@
 
 Type: task
 Status: open
-Blocked by: [04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)
+Blocked by: ~~[04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)~~（已关闭 2026-09-08，放行）
 Blocks: —
 Assignee: —
 
@@ -53,3 +53,18 @@ Assignee: —
   按 448 宽算高：`448/1.543 = 290.3 → round14 → 294`。
 - 01 号票的第三条待办（"08 顺手在室外/3DGS 上复跑一次漂移脚本"）仍然有效，
   脚本换 `--image_dir` 即可。
+
+
+---
+
+## 04 号票（2026-09-08 关闭）留给本票的三条
+
+1. **`query_bank` 多了 `mask_frac` 字段**（每个候选 2D mask 的面积占比），
+   重跑 trace 会自动带上。旧的 `.pt` 没有它，`segvggt_pool_instances.py` 会告警并跳过
+   2D 过滤——那时背景 slot 会吞掉整个场景，**别当成 3DGS 后端的 bug**。
+2. **背景 slot 是不是也是 234，本票是第二个样本。** bench 上 9 个批全是 slot 234，
+   2D 面积 0.492–0.769，真物体最大 0.126。garden 上要**复看这个空档还在不在**——
+   在，`--max_mask_frac 0.3` 就是个稳的默认值；不在，就得靠 `--max_scene_frac` 那条 3D 兜底。
+3. **「成员数 / 覆盖批数」这个免费置信度，garden 才是它的检验场。**
+   bench 9 个批上真物体是 10–15 成员跨 9 批、假阳性是单成员单批。garden **47 批**，
+   如果这个规律还成立，它就比 score 更好用；成立与否请带数字回来（04 没敢拿它当阈值）。

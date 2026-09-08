@@ -2,7 +2,7 @@
 
 Type: task
 Status: open
-Blocked by: [04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)
+Blocked by: ~~[04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)~~（已关闭 2026-09-08，放行）
 Blocks: —
 Assignee: —
 
@@ -45,3 +45,14 @@ Assignee: —
 
 05 号票用它读到的 2D 参考读数（view 00、4 视角一批、`score_thr=0.25`、`mask_thr=0.4`）：
 **mean best IoU ≈ 0.613**（252×448 运行点）。本票的 3D 指标应当能和这个数对得上量级。
+
+
+---
+
+## 04 号票（2026-09-08 关闭）留给本票的两条
+
+1. **stuff/thing 没被一刀切干净。** `--max_mask_frac 0.3` 点掉了整幅背景那个 slot（234），
+   但 bench 的 id5（80,511 高斯）在图上是**碎成片的木地板**。算指标时它会和某个 GT
+   匹配不上、或者匹配到桌面——**先看它落在哪一档，再决定要不要为它加判据**。
+2. **无人认领 87.8%**（bench）。04 定的是「当 recall 缺口报，不塞第 0 类」。
+   本票算 recall 时这一块是分母的一部分，别偷偷从分母里去掉。

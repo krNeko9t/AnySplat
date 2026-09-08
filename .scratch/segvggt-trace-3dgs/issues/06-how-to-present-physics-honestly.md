@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: [04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)
+Blocked by: ~~[04 — 跨批 query 池化 + 3D IoU 去重](04-query-pooling-and-3d-dedup.md)~~（已关闭 2026-09-08，放行）
 Blocks: —
 Assignee: —
 
