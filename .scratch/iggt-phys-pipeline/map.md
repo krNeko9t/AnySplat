@@ -117,9 +117,19 @@ SegVGGT 的 query 自己就是实例，这个问题不存在；**IGGT 没有 que
 
 <!-- 一行一个已关闭的票 -->
 
-（空——本图 2026-09-09 开）
+- [01 — 物性怎么从 dense feat 走到 3D 实例](issues/01-physics-from-dense-feat-to-3d-instances.md)：
+  走**候选 A（3D 池化，头一个字节不动）**。池化严格在 MLP 之前且 decoder 首层是 `LayerNorm`
+  （吃掉 2D/3D 池化的一阶尺度差）⇒ trace 32 维 dense feat 到高斯，按 HDBSCAN 实例
+  **`num_ray` 加权**平均（训练侧是「跨视角逐像素等权」`physics_pool.py:79-80`，
+  `Σ num_ray·feat / Σ num_ray` 才是它的对应物），过同一个 MLP，最后才 `physgm_denormalize`。
+  **32 维不降**（省 6 秒不值得重训）；**`var` 与 `mu_spread` 分两列**，`mu_spread` 定义为
+  逐高斯单独 decode 出的 `mu` 的标准差。两处不等价分派：池化口径 → 04，成员集合 → 06。
+  **给 02 的交待：训练侧照原样配，不改头、不改 loss、不改 `instance_mask` 来源。**
 
 ## Not yet specified
+
+- **物性在 3D 空间的粒度**（逐高斯物性场 vs 实例级一个值）。01 号票的候选 C 会一并答掉它，
+  但 C 已判出本图 scope ⇒ 这条 fog 留着，等本图收工后连同候选 C 一起重开。
 
 - **论文主张**。用户明确：先看结果，发现什么对论文有利再反过来定。所以它不是一张票，
   是本图收工之后的动作。
@@ -143,6 +153,11 @@ SegVGGT 的 query 自己就是实例，这个问题不存在；**IGGT 没有 que
 - **抬高物性上限**（重跑伪标签 / 换视角选择 / 改 prompt / 接外部材料数据库）：
   继承 [phys-on-query 图](../phys-on-query/map.md)，一定会做，不在本图。
 - **类别预测**：继承 phys-on-query 图与老图的判定，本图只做 class-agnostic。
+- **候选 B（训练时用预测 mask，聚类进训练循环）与候选 C（逐点物性场，改头 + 改 loss）**：
+  [01 号票](issues/01-physics-from-dense-feat-to-3d-instances.md)判出本图 scope。
+  不是「以后不做」——C 表示上更干净，还顺带答了「物性在 3D 空间的粒度」那条老 fog——
+  而是**两者都在关键路径上加一个未知量，而候选 A 的代价是可量的**。重开是下一张图的事。
+
 - **`physgm_copy` / `class` / `property` 三个 scheme**：G2 已判——前者是 scene-level 不满足
   「实例物性」，后两者的输出口径与 PhysGM 的归一化常数和 loss 对不上。
   本图只走 `physgm_dpt`（若 01 号票判它不成立，那时重开这一条）。
