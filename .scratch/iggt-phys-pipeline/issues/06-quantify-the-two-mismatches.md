@@ -2,7 +2,7 @@
 
 Type: task
 Status: open
-Blocked by: [02 — 物性头训练接线与运行点](02-train-physics-head.md), [04 — trace 两路特征](04-trace-two-feature-sources.md)
+Blocked by: [02 — 物性头训练接线与运行点](02-train-physics-head.md) ✅ closed, [04 — trace 两路特征](04-trace-two-feature-sources.md) ✅ closed
 Blocks: —
 Assignee: —
 
@@ -42,3 +42,25 @@ Assignee: —
 
 一句话结论：**成员集合这处不等价，在本图的判据（「有个值就行」）下是可忽略的，还是不可忽略的。**
 若不可忽略，写清楚它会怎么影响后续（那是下一张图的事，不是本图的）。
+
+---
+
+## 04 号票交下来的前提（2026-09-09，别再重新发现）
+
+1. **甲（GT mask 侧）的高斯成员集合 04 已经算好了**：把 mask 的 one-hot **加一张常数 1.0
+   覆盖平面**穿过同一批相机同一份高斯，`share = occ/coverage`，`argmax` 且 `share > 0.5`。
+   1,005,708 个被 trace 的高斯里 512,699 个落到某实例，其余是 GT 留 0 的墙/地板。
+   **照抄 `scripts/check_iggt_phys_trace.py`，不要另发明一套反投影。**
+2. **bench 的 GT 是 10 个实例**（36 视角并集上 id 1…10），不是老图记的 8 个。
+3. **池化就是「把该实例的高斯的 `gau_sem` 加起来」**。分母（`Σ num_ray` / `Σ blend_mass`
+   / 任何正标量）因 decoder 首层 LayerNorm 的尺度不变性**完全不影响 MLP 的输入**。
+   别在分母上花时间。
+4. **预期主因是实例尺寸，不是加权**：04 实测 2D↔3D cos 在 >1000 高斯的实例上 0.95–0.99，
+   在 534–1306 高斯的四个小/薄实例上塌到 0.39–0.82；加权 vs 等权 cos = 0.996。
+   ⇒ 本票的表**必须带 `n_gau` 列并按它排序**，否则会把尺寸效应误读成成员集合效应。
+5. **噪声底 ≈ 6e-7 相对**（04 的控制组读数）。
+6. ⚠️ `mu_spread` 逐高斯 decode 时，喂 MLP 的向量比训练时短约 50×、逐高斯尺度散布 100×，
+   **只因为 LayerNorm 尺度不变才有意义**。若发现 `mu_spread` 反常，先怀疑这条。
+7. 现成资产：`.pt` 在
+   `/mnt/storage_pool/liaoyuanjun/runs/ticket04_iggt_phys/bench/gaussian_iggt_phys_feat.pt`；
+   harness 在 `scripts/check_iggt_phys_trace.py`（docstring 里有两条命令，约 80 s 复现）。

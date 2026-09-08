@@ -2,8 +2,8 @@
 
 Type: task
 Status: open
-Blocked by: [02 — 物性头训练接线与运行点](02-train-physics-head.md), [03 — IGGT 基线 + HDBSCAN 代价](03-iggt-baseline-and-hdbscan-cost.md), [04 — trace 两路特征](04-trace-two-feature-sources.md)
-Blocks: —
+Blocked by: [02](02-train-physics-head.md) ✅ closed, [03](03-iggt-baseline-and-hdbscan-cost.md), [04](04-trace-two-feature-sources.md) ✅ closed
+Blocks: [06 — 量成员集合这处不等价](06-quantify-the-two-mismatches.md)
 Assignee: —
 
 > 收口票。地图 Destination 的四条硬条件在这里被兑现或被判没兑现。
@@ -36,3 +36,23 @@ Assignee: —
 导师那四条硬条件逐条对上：① 输入是已建好的 3DGS 场景 + 相机 ✓；② 一次前馈 ✓；
 ③ 链路里有一次我们完成的训练（= 02 的物性头）✓；④ 输出 3D 实例 + 每实例物性 ✓。
 **任何一条没兑现，如实写进 Answer，别用图糊过去。**
+
+---
+
+## 02 / 04 交下来的、本票必须处理的三件事（2026-09-09）
+
+1. ⚠️ **分辨率张力，04 标出未决，本票要拍板。**
+   04 跑在 **504×336**（`iggt` 默认），为的是实例流与 03 的验收基线逐位可比；
+   但物性头是在 **252×448、4 固定视角**上训的。
+   `--iggt_phys_image_size 448,252` 可切换。
+   **做法**：两个分辨率各解一次 (E,ν,ρ)，把差摆出来，再决定发哪个。
+   实例分割的质量是 Destination 的判据（「并排不明显更差」），物性只要「有个值」
+   ⇒ **默认倾向保 504×336**（不动实例流），除非物性值差得离谱。**理由要写进 Answer。**
+
+2. ⚠️ **实例物性表要带 `n_gau` 列，并把高斯数少的实例显式标出来。**
+   04 实测：小/薄实例（534–1306 高斯）的 2D↔3D 池化 cos 塌到 0.39–0.82，
+   而 >1000 高斯的实例是 0.95–0.99。**不许让这些行在表里冒充等价可信。**
+
+3. **池化落地就是「把该实例的高斯的 `gau_sem` 加起来」再过 MLP**；
+   分母是什么因 LayerNorm 尺度不变而无所谓（见 01 号票的更正块）。
+   `mu_spread` = 逐高斯单独 decode 出的 `mu` 的标准差，与头输出的 `var` **分两列**。
